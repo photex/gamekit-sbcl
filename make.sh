@@ -5,6 +5,14 @@ LANG=C
 LC_ALL=C
 export LANG LC_ALL
 
+export GAMEKIT_DEPS_ROOT=`pwd`/../gamekit-sbcl-deps
+
+if [ ! -d $GAMEKIT_DEPS_ROOT ]; then
+    echo "Gamekit 3rd party dependencies are missing!"
+    echo "Please clone git://github.com/photex/gamekit-sbcl-deps.git to ../gamekit-sbcl-deps"
+    return 1
+fi
+
 # "When we build software, it's a good idea to have a reliable method
 # for getting an executable from it. We want any two reconstructions
 # starting from the same source to end up in the same result. That's
