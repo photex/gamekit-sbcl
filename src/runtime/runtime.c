@@ -650,6 +650,10 @@ main(int argc, char *argv[], char *envp[])
 
     if (!noinform && embedded_core_offset == 0) {
         print_banner();
+        SDL_version sdl_version;
+        SDL_GetVersion(&sdl_version);
+        printf("Linked with SDL2 %d.%d.%d\n",
+               sdl_version.major, sdl_version.minor, sdl_version.patch);
         fflush(stdout);
     }
 
@@ -701,13 +705,6 @@ main(int argc, char *argv[], char *envp[])
 /*     wos_install_interrupt_handlers(handler); */
     wos_install_interrupt_handlers(&exception_frame);
 #endif
-
-    /* Initialize SDL2 */
-    if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
-      fprintf(stderr, "\nUnable to initialize SDL: %s\n", SDL_GetError());
-      return 1;
-    }
-    atexit(SDL_Quit);
 
     /* Pass core filename and the processed argv into Lisp. They'll
      * need to be processed further there, to do locale conversion.
