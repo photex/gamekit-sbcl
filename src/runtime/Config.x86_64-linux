@@ -28,7 +28,10 @@ OS_SRC = linux-os.c x86-64-linux-os.c
 # interface, though.:-| As far as I (WHN 2002-05-19) know, no one is
 # working on one and it would be a nice thing to have.)
 LINKFLAGS += -Wl,--export-dynamic
-OS_LIBS = -L$(GAMEKIT_DEPS_ROOT)/sdl2/lib/linux/x64 -Wl,-Bstatic -lSDL2 -Wl,-Bdynamic -ldl -lrt
+OS_LIBS = -L$(GAMEKIT_DEPS_ROOT)/sdl2/lib/linux/x64 \
+	-L$(GAMEKIT_DEPS_ROOT)/bullet/lib/linux/x64 \
+	-Wl,-Bstatic -lSDL2 -lBulletDynamics -lBulletCollision -lLinearMath \
+	-Wl,-Bdynamic -ldl -lrt -lstdc++
 
 ifdef LISP_FEATURE_LARGEFILE
   CFLAGS += -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
@@ -42,7 +45,9 @@ ifdef LISP_FEATURE_SB_CORE_COMPRESSION
   OS_LIBS += -lz
 endif
 
-CFLAGS += -fno-omit-frame-pointer -I$(GAMEKIT_DEPS_ROOT)/sdl2/include
+CFLAGS += -fno-omit-frame-pointer \
+	-I$(GAMEKIT_DEPS_ROOT)/sdl2/include \
+	-I$(GAMEKIT_DEPS_ROOT)/bullet/include
 
 GC_SRC = gencgc.c
 

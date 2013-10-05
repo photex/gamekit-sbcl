@@ -80,7 +80,20 @@ extern void *return_from_lisp_stub;
 #include "genesis/simple-fun.h"
 #endif
 
+/* Gamekit includes */
 #include <SDL2/SDL.h>
+#include <Bullet-C-Api.h>
+
+/* Gamekit globals */
+plPhysicsSdkHandle g_bullet_sdk;
+
+void gamekit_startup(void) {
+  g_bullet_sdk = plNewBulletSdk();
+}
+
+void gamekit_shutdown(void) {
+  plDeletePhysicsSdk(g_bullet_sdk);
+}
 
 
 /* SIGINT handler that invokes the monitor (for when Lisp isn't up to it) */
@@ -681,6 +694,9 @@ main(int argc, char *argv[], char *envp[])
         enable_lossage_handler();
 
     globals_init();
+
+    gamekit_startup();
+    atexit(gamekit_shutdown);
 
     initial_function = load_core_file(core, embedded_core_offset);
     if (initial_function == NIL) {
