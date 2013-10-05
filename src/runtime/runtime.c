@@ -80,6 +80,8 @@ extern void *return_from_lisp_stub;
 #include "genesis/simple-fun.h"
 #endif
 
+#include <SDL2/SDL.h>
+
 
 /* SIGINT handler that invokes the monitor (for when Lisp isn't up to it) */
 static void
@@ -699,6 +701,13 @@ main(int argc, char *argv[], char *envp[])
 /*     wos_install_interrupt_handlers(handler); */
     wos_install_interrupt_handlers(&exception_frame);
 #endif
+
+    /* Initialize SDL2 */
+    if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
+      fprintf(stderr, "\nUnable to initialize SDL: %s\n", SDL_GetError());
+      return 1;
+    }
+    atexit(SDL_Quit);
 
     /* Pass core filename and the processed argv into Lisp. They'll
      * need to be processed further there, to do locale conversion.
