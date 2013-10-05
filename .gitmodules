@@ -1,3 +1,0 @@
-[submodule "gamekit/deps"]
-	path = gamekit/deps
-	url = git://github.com/photex/gamekit-sbcl-deps.git
