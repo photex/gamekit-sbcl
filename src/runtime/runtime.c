@@ -80,20 +80,37 @@ extern void *return_from_lisp_stub;
 #include "genesis/simple-fun.h"
 #endif
 
-/* Gamekit includes */
+/* **************************************************************************
+ * Gamekit setup
+ */
+
+/* 3rd party includes */
 #include <SDL2/SDL.h>
+#include <AL/al.h>
+#include <GL/gl.h>
 #include <Bullet-C-Api.h>
 
-/* Gamekit globals */
+/* globals */
 plPhysicsSdkHandle g_bullet_sdk;
 
-void gamekit_startup(void) {
+/* startup and shutdown */
+int gamekit_startup(void) {
+  if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
+    fprintf(stderr, "Unable to init SDL2: %s",
+            SDL_GetError());
+    return 1;
+  }
   g_bullet_sdk = plNewBulletSdk();
+
+  return 0;
 }
 
 void gamekit_shutdown(void) {
   plDeletePhysicsSdk(g_bullet_sdk);
+
+  SDL_Quit();
 }
+/* ************************************************************************** */
 
 
 /* SIGINT handler that invokes the monitor (for when Lisp isn't up to it) */
@@ -663,10 +680,14 @@ main(int argc, char *argv[], char *envp[])
 
     if (!noinform && embedded_core_offset == 0) {
         print_banner();
+
         SDL_version sdl_version;
         SDL_GetVersion(&sdl_version);
-        printf("Linked with SDL2 %d.%d.%d\n",
+        printf("\nLinked with:\n\tSDL2 %d.%d.%d\n",
                sdl_version.major, sdl_version.minor, sdl_version.patch);
+
+        printf("\tBullet 2.8.1\n");
+
         fflush(stdout);
     }
 
@@ -695,7 +716,9 @@ main(int argc, char *argv[], char *envp[])
 
     globals_init();
 
-    gamekit_startup();
+    if(gamekit_startup() != 0) {
+      return 1;
+    }
     atexit(gamekit_shutdown);
 
     initial_function = load_core_file(core, embedded_core_offset);

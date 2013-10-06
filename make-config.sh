@@ -419,6 +419,9 @@ if [ "$sbcl_os" = "darwin" ] && [ "$sbcl_arch" = "x86-64" ]; then
     fi
 fi
 
+# adding gamekit to features for any systems that will be aware of it
+printf ' :gamekit' >> $ltf
+
 original_dir=`pwd`
 cd ./src/runtime/
 rm -f Config target-arch-os.h target-arch.h target-os.h target-lispregs.h

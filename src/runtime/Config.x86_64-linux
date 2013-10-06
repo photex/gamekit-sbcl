@@ -30,7 +30,10 @@ OS_SRC = linux-os.c x86-64-linux-os.c
 LINKFLAGS += -Wl,--export-dynamic
 OS_LIBS = -L$(GAMEKIT_DEPS_ROOT)/sdl2/lib/linux/x64 \
 	-L$(GAMEKIT_DEPS_ROOT)/bullet/lib/linux/x64 \
-	-Wl,-Bstatic -lSDL2 -lBulletDynamics -lBulletCollision -lLinearMath \
+	-L$(GAMEKIT_DEPS_ROOT)/openal/lib/linux/x64 \
+	-Wl,-Bstatic -lSDL2 \
+	-lBulletDynamics -lBulletCollision -lLinearMath \
+	-lopenal \
 	-Wl,-Bdynamic -ldl -lrt -lstdc++
 
 ifdef LISP_FEATURE_LARGEFILE
@@ -47,7 +50,9 @@ endif
 
 CFLAGS += -fno-omit-frame-pointer \
 	-I$(GAMEKIT_DEPS_ROOT)/sdl2/include \
-	-I$(GAMEKIT_DEPS_ROOT)/bullet/include
+	-I$(GAMEKIT_DEPS_ROOT)/bullet/include \
+	-I$(GAMEKIT_DEPS_ROOT)/openal/include \
+	-I$(GAMEKIT_DEPS_ROOT)/freetype/include
 
 GC_SRC = gencgc.c
 
