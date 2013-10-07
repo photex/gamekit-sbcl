@@ -31,10 +31,13 @@ LINKFLAGS += -Wl,--export-dynamic
 OS_LIBS = -L$(GAMEKIT_DEPS_ROOT)/sdl2/lib/linux/x64 \
 	-L$(GAMEKIT_DEPS_ROOT)/bullet/lib/linux/x64 \
 	-L$(GAMEKIT_DEPS_ROOT)/openal/lib/linux/x64 \
+	-L$(GAMEKIT_DEPS_ROOT)/oggvorbis/lib/linux/x64 \
+	-L$(GAMEKIT_DEPS_ROOT)/freetype2/lib/linux/x64 \
+	-L$(GAMEKIT_DEPS_ROOT)/libpng/lib/linux/x64 \
 	-Wl,-Bstatic -lSDL2 \
 	-lBulletDynamics -lBulletCollision -lLinearMath \
-	-lopenal \
-	-Wl,-Bdynamic -ldl -lrt -lstdc++
+	-lopenal -lfreetype -lpng -logg -lvorbis \
+	-Wl,-Bdynamic -ldl -lrt -lstdc++ -lGL
 
 ifdef LISP_FEATURE_LARGEFILE
   CFLAGS += -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
@@ -52,7 +55,9 @@ CFLAGS += -fno-omit-frame-pointer \
 	-I$(GAMEKIT_DEPS_ROOT)/sdl2/include \
 	-I$(GAMEKIT_DEPS_ROOT)/bullet/include \
 	-I$(GAMEKIT_DEPS_ROOT)/openal/include \
-	-I$(GAMEKIT_DEPS_ROOT)/freetype/include
+	-I$(GAMEKIT_DEPS_ROOT)/freetype2/include \
+	-I$(GAMEKIT_DEPS_ROOT)/oggvorbis/include \
+	-I$(GAMEKIT_DEPS_ROOT)/libpng/include 
 
 GC_SRC = gencgc.c
 

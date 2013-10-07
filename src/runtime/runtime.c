@@ -85,29 +85,47 @@ extern void *return_from_lisp_stub;
  */
 
 /* 3rd party includes */
-#include <SDL2/SDL.h>
-#include <AL/al.h>
 #include <GL/gl.h>
+#include <AL/al.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
 #include <Bullet-C-Api.h>
+#include <SDL2/SDL.h>
+#include "stb_image.h"
+#include "stb_vorbis.h"
 
 /* globals */
 plPhysicsSdkHandle g_bullet_sdk;
+FT_Library g_freetype_lib;
 
 /* startup and shutdown */
 int gamekit_startup(void) {
+  int rc = 0;
+
   if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
     fprintf(stderr, "Unable to init SDL2: %s",
             SDL_GetError());
     return 1;
   }
+
   g_bullet_sdk = plNewBulletSdk();
+  if (!g_bullet_sdk) {
+    fprintf(stderr, "Unable to get a handle for the BulletSDK.");
+    return 1;
+  }
+
+  rc = FT_Init_FreeType(&g_freetype_lib);
+  if (rc != 0) {
+    fprintf(stderr, "There was an error initializing Freetype2.");
+    return 1;
+  }
 
   return 0;
 }
 
 void gamekit_shutdown(void) {
+  FT_Done_FreeType(g_freetype_lib);
   plDeletePhysicsSdk(g_bullet_sdk);
-
   SDL_Quit();
 }
 /* ************************************************************************** */
@@ -683,10 +701,10 @@ main(int argc, char *argv[], char *envp[])
 
         SDL_version sdl_version;
         SDL_GetVersion(&sdl_version);
-        printf("\nLinked with:\n\tSDL2 %d.%d.%d\n",
+        printf("\nSDL2 %d.%d.%d\n",
                sdl_version.major, sdl_version.minor, sdl_version.patch);
 
-        printf("\tBullet 2.8.1\n");
+        printf("Bullet 2.8.1\n");
 
         fflush(stdout);
     }
@@ -715,11 +733,13 @@ main(int argc, char *argv[], char *envp[])
         enable_lossage_handler();
 
     globals_init();
-
+    
+    /* Gamekit  */
     if(gamekit_startup() != 0) {
       return 1;
     }
     atexit(gamekit_shutdown);
+    /* Gamekit */
 
     initial_function = load_core_file(core, embedded_core_offset);
     if (initial_function == NIL) {
