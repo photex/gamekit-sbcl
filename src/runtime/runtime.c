@@ -733,7 +733,7 @@ main(int argc, char *argv[], char *envp[])
         enable_lossage_handler();
 
     globals_init();
-    
+
     /* Gamekit  */
     if(gamekit_startup() != 0) {
       return 1;
