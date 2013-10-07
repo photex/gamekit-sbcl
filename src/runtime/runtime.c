@@ -85,8 +85,14 @@ extern void *return_from_lisp_stub;
  */
 
 /* 3rd party includes */
+#ifdef LISP_FEATURE_DARWIN
+#include <OpenGL/gl.h>
+#include <OpenAL/al.h>
+#else
 #include <GL/gl.h>
 #include <AL/al.h>
+#endif
+
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include <Bullet-C-Api.h>
@@ -733,7 +739,7 @@ main(int argc, char *argv[], char *envp[])
         enable_lossage_handler();
 
     globals_init();
-    
+
     /* Gamekit  */
     if(gamekit_startup() != 0) {
       return 1;
