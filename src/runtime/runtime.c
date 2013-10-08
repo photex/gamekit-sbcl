@@ -97,18 +97,23 @@ extern void *return_from_lisp_stub;
 #include FT_FREETYPE_H
 #include <Bullet-C-Api.h>
 #include <SDL2/SDL.h>
+#include <assimp/cimport.h>
+#include <assimp/scene.h>
 #include "stb_image.h"
 #include "stb_vorbis.h"
 
 /* globals */
 plPhysicsSdkHandle g_bullet_sdk;
 FT_Library g_freetype_lib;
+struct aiScene *g_null_scene=NULL;
 
 /* startup and shutdown */
 int gamekit_startup(void) {
   int rc = 0;
 
-  if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
+  int flags = SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_JOYSTICK |
+    SDL_INIT_HAPTIC | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS;
+  if (SDL_Init(flags) != 0) {
     fprintf(stderr, "Unable to init SDL2: %s",
             SDL_GetError());
     return 1;
@@ -126,10 +131,13 @@ int gamekit_startup(void) {
     return 1;
   }
 
+  g_null_scene = (struct aiScene*)malloc(sizeof(struct aiScene));
+
   return 0;
 }
 
 void gamekit_shutdown(void) {
+  free(g_null_scene);
   FT_Done_FreeType(g_freetype_lib);
   plDeletePhysicsSdk(g_bullet_sdk);
   SDL_Quit();
@@ -704,13 +712,6 @@ main(int argc, char *argv[], char *envp[])
 
     if (!noinform && embedded_core_offset == 0) {
         print_banner();
-
-        SDL_version sdl_version;
-        SDL_GetVersion(&sdl_version);
-        printf("\nSDL2 %d.%d.%d\n",
-               sdl_version.major, sdl_version.minor, sdl_version.patch);
-
-        printf("Bullet 2.8.1\n");
 
         fflush(stdout);
     }
