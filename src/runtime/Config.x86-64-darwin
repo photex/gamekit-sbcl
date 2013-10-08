@@ -28,6 +28,7 @@ OS_LIBS = -L$(GAMEKIT_DEPS_ROOT)/sdl2/lib/macosx \
 	-L$(GAMEKIT_DEPS_ROOT)/openal/lib/macosx \
 	-L$(GAMEKIT_DEPS_ROOT)/oggvorbis/lib/macosx \
 	-L$(GAMEKIT_DEPS_ROOT)/freetype2/lib/macosx \
+	-L$(GAMEKIT_DEPS_ROOT)/assimp/lib/macosx \
 	-lSystem -lc -ldl -lstdc++ -liconv \
 	-framework Cocoa -framework Carbon \
 	-framework CoreAudio -framework AudioToolbox -framework AudioUnit \
@@ -38,7 +39,7 @@ OS_LIBS = -L$(GAMEKIT_DEPS_ROOT)/sdl2/lib/macosx \
 	-framework OpenGL -framework OpenAL \
 	-lSDL2 \
 	-lBulletDynamics -lBulletCollision -lLinearMath \
-	-lfreetype 
+	-lfreetype -lassimp
 
 ifdef LISP_FEATURE_SB_THREAD
   OS_LIBS += -lpthread
@@ -58,6 +59,7 @@ CFLAGS += -arch x86_64 -fno-omit-frame-pointer -pagezero_size 0x100000 \
 	-I$(GAMEKIT_DEPS_ROOT)/sdl2/include \
 	-I$(GAMEKIT_DEPS_ROOT)/bullet/include \
 	-I$(GAMEKIT_DEPS_ROOT)/freetype2/include \
+	-I$(GAMEKIT_DEPS_ROOT)/assimp/include \
 	-framework OpenAL
 
 GC_SRC = gencgc.c
