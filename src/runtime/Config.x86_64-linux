@@ -36,7 +36,7 @@ OS_LIBS = -L$(GAMEKIT_DEPS_ROOT)/sdl2/lib/linux/x64 \
 	-Wl,-Bstatic -lSDL2 \
 	-lBulletDynamics -lBulletCollision -lLinearMath \
 	-lopenal -lfreetype -lassimp \
-	-Wl,-Bdynamic -ldl -lrt -lstdc++ -lGL
+	-Wl,-Bdynamic -ldl -lrt -lstdc++
 
 ifdef LISP_FEATURE_LARGEFILE
   CFLAGS += -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
