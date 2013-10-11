@@ -93,10 +93,9 @@ extern void *return_from_lisp_stub;
 #include <AL/al.h>
 #endif
 
-#include <ft2build.h>
-#include FT_FREETYPE_H
 #include <Bullet-C-Api.h>
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_video.h>
 #include <assimp/cimport.h>
 #include <assimp/scene.h>
 #include "stb_image.h"
@@ -104,18 +103,16 @@ extern void *return_from_lisp_stub;
 
 /* globals */
 plPhysicsSdkHandle g_bullet_sdk;
-FT_Library g_freetype_lib;
-struct aiScene *g_null_scene=NULL;
 
 /* startup and shutdown */
 int gamekit_startup(void) {
-  int rc = 0;
+  if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
+    fprintf(stderr, "Unable to init SDL2: %s\n", SDL_GetError());
+    return 1;
+  }
 
-  int flags = SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_JOYSTICK |
-    SDL_INIT_HAPTIC | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS;
-  if (SDL_Init(flags) != 0) {
-    fprintf(stderr, "Unable to init SDL2: %s",
-            SDL_GetError());
+  if (SDL_GL_LoadLibrary(NULL) != 0) {
+    fprintf(stderr, "Unable to load OpenGL: %s\n", SDL_GetError());
     return 1;
   }
 
@@ -125,21 +122,12 @@ int gamekit_startup(void) {
     return 1;
   }
 
-  rc = FT_Init_FreeType(&g_freetype_lib);
-  if (rc != 0) {
-    fprintf(stderr, "There was an error initializing Freetype2.");
-    return 1;
-  }
-
-  g_null_scene = (struct aiScene*)malloc(sizeof(struct aiScene));
-
   return 0;
 }
 
 void gamekit_shutdown(void) {
-  free(g_null_scene);
-  FT_Done_FreeType(g_freetype_lib);
   plDeletePhysicsSdk(g_bullet_sdk);
+  SDL_GL_UnloadLibrary();
   SDL_Quit();
 }
 /* ************************************************************************** */
