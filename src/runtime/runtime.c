@@ -80,57 +80,8 @@ extern void *return_from_lisp_stub;
 #include "genesis/simple-fun.h"
 #endif
 
-/* **************************************************************************
- * Gamekit setup
- */
+#include <corpus.h>
 
-/* 3rd party includes */
-#ifdef LISP_FEATURE_DARWIN
-#include <OpenGL/gl.h>
-#include <OpenAL/al.h>
-#else
-#include <GL/gl.h>
-#include <AL/al.h>
-#endif
-
-#include <Bullet-C-Api.h>
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_video.h>
-#include <assimp/cimport.h>
-#include <assimp/scene.h>
-#include "stb_image.h"
-#include "stb_vorbis.h"
-
-/* globals */
-plPhysicsSdkHandle g_bullet_sdk;
-
-/* startup and shutdown */
-int gamekit_startup(void) {
-  if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
-    fprintf(stderr, "Unable to init SDL2: %s\n", SDL_GetError());
-    return 1;
-  }
-
-  if (SDL_GL_LoadLibrary(NULL) != 0) {
-    fprintf(stderr, "Unable to load OpenGL: %s\n", SDL_GetError());
-    return 1;
-  }
-
-  g_bullet_sdk = plNewBulletSdk();
-  if (!g_bullet_sdk) {
-    fprintf(stderr, "Unable to get a handle for the BulletSDK.");
-    return 1;
-  }
-
-  return 0;
-}
-
-void gamekit_shutdown(void) {
-  plDeletePhysicsSdk(g_bullet_sdk);
-  SDL_GL_UnloadLibrary();
-  SDL_Quit();
-}
-/* ************************************************************************** */
 
 
 /* SIGINT handler that invokes the monitor (for when Lisp isn't up to it) */
@@ -729,13 +680,6 @@ main(int argc, char *argv[], char *envp[])
 
     globals_init();
 
-    /* Gamekit  */
-    if(gamekit_startup() != 0) {
-      return 1;
-    }
-    atexit(gamekit_shutdown);
-    /* Gamekit */
-
     initial_function = load_core_file(core, embedded_core_offset);
     if (initial_function == NIL) {
         lose("couldn't find initial function\n");
@@ -759,6 +703,13 @@ main(int argc, char *argv[], char *envp[])
 /*     wos_install_interrupt_handlers(handler); */
     wos_install_interrupt_handlers(&exception_frame);
 #endif
+
+    /* Gamekit  */
+    if(corpus_startup() != 0) {
+      return 1;
+    }
+    atexit(corpus_shutdown);
+    /* Gamekit */
 
     /* Pass core filename and the processed argv into Lisp. They'll
      * need to be processed further there, to do locale conversion.

@@ -28,14 +28,8 @@ OS_SRC = linux-os.c x86-64-linux-os.c
 # interface, though.:-| As far as I (WHN 2002-05-19) know, no one is
 # working on one and it would be a nice thing to have.)
 LINKFLAGS += -Wl,--export-dynamic
-OS_LIBS = -L$(GAMEKIT_DEPS_ROOT)/sdl2/lib/linux/x64 \
-	-L$(GAMEKIT_DEPS_ROOT)/bullet/lib/linux/x64 \
-	-L$(GAMEKIT_DEPS_ROOT)/openal/lib/linux/x64 \
-	-L$(GAMEKIT_DEPS_ROOT)/libRocket/lib/linux/x64 \
-	-L$(GAMEKIT_DEPS_ROOT)/assimp/lib/linux/x64 \
-	-Wl,-Bstatic -lSDL2 \
-	-lBulletDynamics -lBulletCollision -lLinearMath \
-	-lopenal -lassimp -lRocketCore -lRocketControls \
+OS_LIBS = -L$(GAMEKIT_DEPS_ROOT)/corpus/lib/linux/x64 \
+	-Wl,-Bstatic -lCorpusCallosum \
 	-Wl,-Bdynamic -ldl -lrt -lstdc++
 
 ifdef LISP_FEATURE_LARGEFILE
@@ -51,11 +45,7 @@ ifdef LISP_FEATURE_SB_CORE_COMPRESSION
 endif
 
 CFLAGS += -fno-omit-frame-pointer \
-	-I$(GAMEKIT_DEPS_ROOT)/sdl2/include \
-	-I$(GAMEKIT_DEPS_ROOT)/bullet/include \
-	-I$(GAMEKIT_DEPS_ROOT)/openal/include \
-	-I$(GAMEKIT_DEPS_ROOT)/libRocket/include \
-	-I$(GAMEKIT_DEPS_ROOT)/assimp/include
+	-I$(GAMEKIT_DEPS_ROOT)/corpus/include 
 
 GC_SRC = gencgc.c
 
