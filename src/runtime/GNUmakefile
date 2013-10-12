@@ -47,9 +47,7 @@ COMMON_SRC = alloc.c backtrace.c breakpoint.c coreparse.c \
 	regnames.c run-program.c runtime.c safepoint.c save.c search.c \
 	thread.c time.c util.c validate.c vars.c wrap.c
 
-GAMEKIT_SRC = stb_image.c stb_vorbis.c
-
-C_SRC = $(COMMON_SRC) ${ARCH_SRC} ${OS_SRC} ${GC_SRC} ${GAMEKIT_SRC}
+C_SRC = $(COMMON_SRC) ${ARCH_SRC} ${OS_SRC} ${GC_SRC}
 
 SRCS = $(C_SRC) ${ASSEM_SRC}
 
