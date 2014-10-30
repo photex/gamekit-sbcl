@@ -96,8 +96,6 @@ extern void *return_from_lisp_stub;
 #include <Bullet-C-Api.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_video.h>
-#include <assimp/cimport.h>
-#include <assimp/scene.h>
 #include "stb_image.h"
 #include "stb_vorbis.h"
 
@@ -106,15 +104,15 @@ plPhysicsSdkHandle g_bullet_sdk;
 
 /* startup and shutdown */
 int gamekit_startup(void) {
-  if (SDL_Init(0) != 0) {
+  if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
     fprintf(stderr, "Unable to init SDL2: %s\n", SDL_GetError());
     return 1;
   }
 
-  /* if (SDL_GL_LoadLibrary(NULL) != 0) { */
-  /*   fprintf(stderr, "Unable to load OpenGL: %s\n", SDL_GetError()); */
-  /*   return 1; */
-  /* } */
+  if (SDL_GL_LoadLibrary(NULL) != 0) {
+    fprintf(stderr, "Unable to load OpenGL: %s\n", SDL_GetError());
+    return 1;
+  }
 
   g_bullet_sdk = plNewBulletSdk();
   if (!g_bullet_sdk) {
@@ -127,7 +125,7 @@ int gamekit_startup(void) {
 
 void gamekit_shutdown(void) {
   plDeletePhysicsSdk(g_bullet_sdk);
-  /* SDL_GL_UnloadLibrary(); */
+  SDL_GL_UnloadLibrary();
   SDL_Quit();
 }
 /* ************************************************************************** */
@@ -772,10 +770,12 @@ main(int argc, char *argv[], char *envp[])
 #endif
 
     /* Gamekit  */
-    if(gamekit_startup() != 0) {
-      return 1;
+    if (getenv("GAMEKIT_DISABLED") == NULL) {
+      if(gamekit_startup() != 0) {
+        return 1;
+      }
+      atexit(gamekit_shutdown);
     }
-    atexit(gamekit_shutdown);
     /* Gamekit */
 
     /* Pass core filename and the processed argv into Lisp. They'll

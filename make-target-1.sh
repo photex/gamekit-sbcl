@@ -16,6 +16,8 @@ set -e
 
 echo //entering make-target-1.sh
 
+export GAMEKIT_DISABLED=1
+
 LANG=C
 LC_ALL=C
 export LANG LC_ALL

@@ -6,6 +6,7 @@ LC_ALL=C
 export LANG LC_ALL
 
 export GAMEKIT_DEPS_ROOT=`pwd`/../gamekit-sbcl-deps
+export GAMEKIT_DISABLED=1 # prevents gamekit_init from being called while building sbcl
 
 if [ ! -d $GAMEKIT_DEPS_ROOT ]; then
     echo "Gamekit 3rd party dependencies are missing!"

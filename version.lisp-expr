@@ -1,1 +1,4 @@
-"gamekit-1.1.12"
+;;; This file is auto-generated using generate-version.sh. Every time
+;;; you re-run make.sh, this file will be overwritten if you are
+;;; working from a Git checkout.
+"1.1.12.21.master.1405-7131e9d-dirty"
