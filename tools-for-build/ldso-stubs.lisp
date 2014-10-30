@@ -63,6 +63,16 @@ ldso_stub__~A: ;                                \\
 #endif
 #include \"sbcl.h\""
 
+#!+arm "
+#define LDSO_STUBIFY(fct)               \\
+  .align                              ; \\
+  .global ldso_stub__ ## fct          ; \\
+  .type ldso_stub__ ## fct, %function ; \\
+ldso_stub__ ## fct:                   ; \\
+  ldr r8, =fct                        ; \\
+  bx r8                               ; \\
+  .size ldso_stub__ ## fct, .-ldso_stub__ ## fct"
+
 #!+sparc "
 #ifdef LISP_FEATURE_SPARC
 #include \"sparc-funcdef.h\"
@@ -200,10 +210,6 @@ ldso_stub__ ## fct: ;                  \\
                    "asinh"
                    "atanh"
                    "bind"
-                   "cfgetispeed"
-                   "cfgetospeed"
-                   "cfsetispeed"
-                   "cfsetospeed"
                    "chmod"
                    "chown"
                    "close"
@@ -233,7 +239,6 @@ ldso_stub__ ## fct: ;                  \\
                    "gethostbyname"
                    "gethostname"
                    "getitimer"
-                   "getpagesize"
                    "getpeername"
                    "getpgrp"
                    "getpid"
@@ -254,10 +259,10 @@ ldso_stub__ ## fct: ;                  \\
                    "lstat"
                    #!+inode64 "lstat$INODE64"
                    "malloc"
+                   #!+(or x86 x86-64) "memcmp"
                    "memmove"
                    "mkdir"
                    "nanosleep"
-                   "nl_langinfo"
                    "open"
                    "opendir"
                    "pipe"
@@ -284,12 +289,6 @@ ldso_stub__ ## fct: ;                  \\
                    "symlink"
                    "sync"
                    "tanh"
-                   "tcdrain"
-                   "tcflow"
-                   "tcflush"
-                   "tcgetattr"
-                   "tcsendbreak"
-                   "tcsetattr"
                    "truncate"
                    "ttyname"
                    #!-hpux "tzname"
@@ -323,9 +322,9 @@ ldso_stub__ ## fct: ;                  \\
                  ;; cut down on the number of ports affected.
                  #!-(or win32 darwin freebsd netbsd openbsd)
                  '("ptsname"
-                   "grantpt"
+                   #!-android "grantpt"
                    "unlockpt")
-                 #!+openbsd
+                 #!+(or openbsd freebsd dragonfly)
                  '("openpty")
                  '("dlclose"
                    "dlerror"
@@ -338,7 +337,20 @@ ldso_stub__ ## fct: ;                  \\
                  #!+os-provides-dladdr
                  '("dladdr")
                  #!-sunos ;; !defined(SVR4)
-                 '("sigsetmask")))
+                 '("sigsetmask")
+                 #!-android
+                   '("nl_langinfo"
+                     "getpagesize"
+                     "cfgetispeed"
+                     "cfgetospeed"
+                     "cfsetispeed"
+                     "cfsetospeed"
+                     "tcdrain"
+                     "tcflow"
+                     "tcflush"
+                     "tcgetattr"
+                     "tcsendbreak"
+                     "tcsetattr")))
 
 (with-open-file (f "src/runtime/ldso-stubs.S" :direction :output :if-exists :supersede)
   (assert (= (length *preludes*) 2))

@@ -11,6 +11,24 @@
 
 (in-package "SB!IMPL")
 
+(def!struct (win32-host
+             (:make-load-form-fun make-host-load-form)
+             (:include host
+                       (parse #'parse-win32-namestring)
+                       (parse-native #'parse-native-win32-namestring)
+                       (unparse #'unparse-win32-namestring)
+                       (unparse-native #'unparse-native-win32-namestring)
+                       (unparse-host #'unparse-win32-host)
+                       (unparse-directory #'unparse-win32-directory)
+                       (unparse-file #'unparse-win32-file)
+                       (unparse-enough #'unparse-win32-enough)
+                       (unparse-directory-separator "\\")
+                       (simplify-namestring #'simplify-win32-namestring)
+                       (customary-case :lower))))
+
+(defvar *physical-host* (make-win32-host))
+
+;;;
 (define-symbol-macro +long-file-name-prefix+ (quote "\\\\?\\"))
 (define-symbol-macro +unc-file-name-prefix+ (quote "\\\\?\\UNC"))
 
@@ -71,7 +89,7 @@
                  (tail-end (cdr tail)))
             (unless (= tail-start tail-end)
               (setf pieces (butlast pieces))
-              (extract-name-type-and-version namestring tail-start tail-end)))
+              (extract-name-type-and-version namestring tail-start tail-end #\^)))
 
         (when (stringp name)
           (let ((position (position-if (lambda (char)
@@ -118,7 +136,8 @@
                                 (t
                                  (dirs (maybe-make-pattern namestring
                                                            piece-start
-                                                           piece-end)))))))
+                                                           piece-end
+                                                           #\^)))))))
                     (cond (absolute
                            (if home
                                (list* :absolute home (dirs))
@@ -204,6 +223,9 @@
                (concatenate 'simple-string "\\\\" device)
                (concatenate 'simple-string "//" device))))))
 
+(defun unparse-win32-directory (pathname)
+  (unparse-physical-directory pathname #\^))
+
 (defun unparse-win32-file (pathname)
   (declare (type pathname pathname))
   (collect ((strings))
@@ -222,7 +244,7 @@
         (when (and (typep name 'string)
                    (string= name ""))
           (error "name is of length 0: ~S" pathname))
-        (strings (unparse-physical-piece name)))
+        (strings (unparse-physical-piece name #\^)))
       (when type-supplied
         (unless name
           (error "cannot specify the type without a file: ~S" pathname))
@@ -230,14 +252,14 @@
           (when (position #\. type)
             (error "type component can't have a #\. inside: ~S" pathname)))
         (strings ".")
-        (strings (unparse-physical-piece type))))
+        (strings (unparse-physical-piece type #\^))))
     (apply #'concatenate 'simple-string (strings))))
 
 (defun unparse-win32-namestring (pathname)
   (declare (type pathname pathname))
   (concatenate 'simple-string
                (unparse-win32-device pathname)
-               (unparse-physical-directory pathname)
+               (unparse-physical-directory pathname #\^)
                (unparse-win32-file pathname)))
 
 (defun unparse-native-win32-namestring (pathname as-file)
@@ -273,23 +295,32 @@
          (ecase (pop directory)
            (:absolute
             (let ((next (pop directory)))
+              ;; Don't use USER-HOMEDIR-NAMESTRING, since
+              ;; it can be specified as C:/User/user
+              ;; and (native-namestring (user-homedir-pathname))
+              ;; will be not equal to it, because it's parsed first.
               (cond ((eq :home next)
-                     (write-string (user-homedir-namestring) s))
+                     (write-string (native-namestring (user-homedir-pathname))
+                                   s))
                     ((and (consp next) (eq :home (car next)))
-                     (let ((where (user-homedir-namestring (second next))))
+                     (let ((where (user-homedir-pathname (second next))))
                        (if where
-                           (write-string where s)
-                           (error "User homedir unknown for: ~S"
+                           (write-string (native-namestring where) s)
+                           (error "User homedir unknown for: ~S."
                                   (second next)))))
+                    ;; namestring of user-homedir-pathname already has
+                    ;; // at the end
                     (next
-                     (push next directory)))
-              (write-char #\\ s)))
+                     (write-char #\\ s)
+                     (push next directory))
+                    (t
+                     (write-char #\\ s)))))
            (:relative)))
        (loop for (piece . subdirs) on directory
              do (typecase piece
-                  ((member :up) (write-string ".." s))
+                  ((member :up :back) (write-string ".." s))
                   (string (write-string piece s))
-                  (t (error "ungood directory segment in NATIVE-NAMESTRING: ~S"
+                  (t (error "Bad directory segment in NATIVE-NAMESTRING: ~S."
                             piece)))
              if (or subdirs (stringp name))
              do (write-char #\\ s)
@@ -299,16 +330,16 @@
        (if name-present-p
            (progn
              (unless (stringp name-string) ;some kind of wild field
-               (error "ungood name component in NATIVE-NAMESTRING: ~S" name))
+               (error "Bad name component in NATIVE-NAMESTRING: ~S." name))
              (write-string name-string s)
              (when type-present-p
                (unless (stringp type-string) ;some kind of wild field
-                 (error "ungood type component in NATIVE-NAMESTRING: ~S" type))
+                 (error "Bad type component in NATIVE-NAMESTRING: ~S." type))
                (write-char #\. s)
                (write-string type-string s)))
-           (when type-present-p ;
+           (when type-present-p
              (error
-              "type component without a name component in NATIVE-NAMESTRING: ~S"
+              "Type component without a name component in NATIVE-NAMESTRING: ~S."
               type)))
        (when absolutep
          (let ((string (get-output-stream-string s)))
@@ -351,7 +382,7 @@
                      pathname-directory)
                     (t
                      (bug "Bad fallthrough in ~S" 'unparse-unix-enough)))))
-        (strings (unparse-physical-directory-list result-directory)))
+        (strings (unparse-physical-directory-list result-directory #\^)))
       (let* ((pathname-type (%pathname-type pathname))
              (type-needed (and pathname-type
                                (not (eq pathname-type :unspecific))))
@@ -367,7 +398,7 @@
                      (typep pathname-name 'simple-string)
                      (position #\. pathname-name :start 1))
             (error "too many dots in the name: ~S" pathname))
-          (strings (unparse-physical-piece pathname-name)))
+          (strings (unparse-physical-piece pathname-name #\^)))
         (when type-needed
           (when (or (null pathname-type) (eq pathname-type :unspecific))
             (lose))
@@ -375,7 +406,7 @@
             (when (position #\. pathname-type)
               (error "type component can't have a #\. inside: ~S" pathname)))
           (strings ".")
-          (strings (unparse-physical-piece pathname-type))))
+          (strings (unparse-physical-piece pathname-type #\^))))
       (apply #'concatenate 'simple-string (strings)))))
 
 ;; FIXME: This has been converted rather blindly from the Unix

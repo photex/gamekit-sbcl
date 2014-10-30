@@ -35,17 +35,26 @@
              (:nconc
               (let ((temp (gensym))
                     (map-result (gensym)))
-                `(let ((,map-result (list nil)))
+                `(let ((,map-result
+                        (locally (declare (muffle-conditions compiler-note))
+                          (list nil))))
+                   (declare (truly-dynamic-extent ,map-result))
                    (do-anonymous ((,temp ,map-result) . ,(do-clauses))
                      (,endtest (cdr ,map-result))
                      (setq ,temp (last (nconc ,temp ,call)))))))
              (:list
               (let ((temp (gensym))
                     (map-result (gensym)))
-                `(let ((,map-result (list nil)))
+                `(let ((,map-result
+                        (locally (declare (muffle-conditions compiler-note))
+                          (list nil))))
+                   (declare (truly-dynamic-extent ,map-result))
                    (do-anonymous ((,temp ,map-result) . ,(do-clauses))
                      (,endtest (truly-the list (cdr ,map-result)))
-                     (rplacd ,temp (setq ,temp (list ,call)))))))
+                     ;; Accumulate using %RPLACD. RPLACD becomes (SETF CDR)
+                     ;; which becomes %RPLACD but relies on "defsetfs".
+                     ;; This is for effect, not value, so makes no difference.
+                     (%rplacd ,temp (setq ,temp (list ,call)))))))
              ((nil)
               `(let ((,n-first ,(first arglists)))
                  (do-anonymous ,(do-clauses)
@@ -239,8 +248,8 @@
                              ',result-type-value))
                    (t (bug "impossible (?) sequence type"))))
             (t
-             (let* ((seqs (cons seq seqs))
-                    (seq-args (make-gensym-list (length seqs))))
+             (let* ((all-seqs (cons seq seqs))
+                    (seq-args (make-gensym-list (length all-seqs))))
                (multiple-value-bind (push-dacc result)
                    (ecase result-supertype
                      (null (values nil nil))
@@ -254,17 +263,24 @@
                  ;; FUNCALL and ALIEN-FUNCALL, and for the same
                  ;; reason: we need to get the runtime values of each
                  ;; of the &REST vars.)
-                 `(lambda (result-type fun ,@seq-args)
-                    (declare (ignore result-type))
-                    (let ((fun (%coerce-callable-to-fun fun))
-                          (acc nil))
-                      (declare (type list acc))
-                      (declare (ignorable acc))
-                      ,(build-sequence-iterator
-                        seqs seq-args
-                        :result result
-                        :body push-dacc
-                        :fast (policy node (> speed space))))))))))))
+                 (block nil
+                   (let ((gave-up
+                           (catch 'give-up-ir1-transform
+                             (return
+                               `(lambda (result-type fun ,@seq-args)
+                                  (declare (ignore result-type))
+                                  (let ((fun (%coerce-callable-to-fun fun))
+                                        (acc nil))
+                                    (declare (type list acc))
+                                    (declare (ignorable acc))
+                                    ,(build-sequence-iterator
+                                      all-seqs seq-args
+                                      :result result
+                                      :body push-dacc
+                                      :fast (policy node (> speed space)))))))))
+                     (if (and (null result-type-value) (null seqs))
+                         '(%map-for-effect-arity-1 fun seq)
+                         (throw 'give-up-ir1-transform gave-up)))))))))))
 
 ;;; MAP-INTO
 (deftransform map-into ((result fun &rest seqs)
@@ -315,7 +331,7 @@
   '(nth i s))
 
 (deftransform %setelt ((s i v) ((simple-array * (*)) * *) *)
-  '(%aset s i v))
+  '(setf (aref s i) v))
 
 (deftransform %setelt ((s i v) (list * *) * :policy (< safety 3))
   '(setf (car (nthcdr i s)) v))
@@ -755,6 +771,39 @@
   (def string>* nil nil)
   (def string>=* nil t))
 
+(deftransform string=* ((string1 string2 start1 end1 start2 end2)
+                        (string string
+                                (constant-arg (eql 0))
+                                (constant-arg null)
+                                (constant-arg (eql 0))
+                                (constant-arg null)))
+  (cond ((and (constant-lvar-p string1)
+              (equal (lvar-value string1) ""))
+         `(zerop (length string2)))
+        ((and (constant-lvar-p string2)
+              (equal (lvar-value string2) ""))
+         `(zerop (length string1)))
+        (t
+         (give-up-ir1-transform))))
+
+(deftransform string/=* ((string1 string2 start1 end1 start2 end2)
+                         (string string
+                                 (constant-arg (eql 0))
+                                 (constant-arg null)
+                                 (constant-arg (eql 0))
+                                 (constant-arg null)))
+  (cond ((and (constant-lvar-p string1)
+              (equal (lvar-value string1) ""))
+         (lvar-type string2)
+         `(and (plusp (length string2))
+               0))
+        ((and (constant-lvar-p string2)
+              (equal (lvar-value string2) ""))
+         `(and (plusp (length string1))
+               0))
+        (t
+         (give-up-ir1-transform))))
+
 (macrolet ((def (name result-fun)
              `(deftransform ,name ((string1 string2 start1 end1 start2 end2)
                                    (simple-base-string simple-base-string t t t t) *)
@@ -765,6 +814,7 @@
   (def string=* not)
   (def string/=* identity))
 
+(deftransform string ((x) (symbol)) '(symbol-name x))
 
 ;;;; transforms for sequence functions
 
@@ -917,25 +967,25 @@
                     (mask (ash #.(1- (ash 1 sb!vm:n-word-bits))
                                (* (- extra ,n-elems-per-word)
                                   ,n-bits-per-elem))))
-               (setf (sb!kernel:%vector-raw-bits dst end)
+               (setf (%vector-raw-bits dst end)
                      (logior
-                      (logandc2 (sb!kernel:%vector-raw-bits dst end)
+                      (logandc2 (%vector-raw-bits dst end)
                                 (ash mask
-                                     ,(ecase sb!c:*backend-byte-order*
-                                             (:little-endian 0)
-                                             (:big-endian `(* (- ,n-elems-per-word extra)
-                                                              ,n-bits-per-elem)))))
-                      (logand (sb!kernel:%vector-raw-bits src end)
+                                     ,(ecase *backend-byte-order*
+                                        (:little-endian 0)
+                                        (:big-endian `(* (- ,n-elems-per-word extra)
+                                                         ,n-bits-per-elem)))))
+                      (logand (%vector-raw-bits src end)
                               (ash mask
-                                   ,(ecase sb!c:*backend-byte-order*
-                                           (:little-endian 0)
-                                           (:big-endian `(* (- ,n-elems-per-word extra)
-                                                            ,n-bits-per-elem)))))))))
+                                   ,(ecase *backend-byte-order*
+                                      (:little-endian 0)
+                                      (:big-endian `(* (- ,n-elems-per-word extra)
+                                                       ,n-bits-per-elem)))))))))
            ;; Copy from the end to save a register.
            (do ((i end (1- i)))
                ((<= i ,src-word))
-             (setf (sb!kernel:%vector-raw-bits dst (1- i))
-                   (sb!kernel:%vector-raw-bits src (1- i))))
+             (setf (%vector-raw-bits dst (1- i))
+                   (%vector-raw-bits src (1- i))))
            (values))))))
 
 #.(loop for i = 1 then (* i 2)
@@ -972,6 +1022,20 @@
 ;;; inline.  The UB*-BASH-COPY transforms might fix things up later
 ;;; anyway.
 
+(defun inlineable-copy-vector-p (type)
+  (and (array-type-p type)
+       ;; The two transforms that use this test already specify that their
+       ;; sequence argument is a VECTOR,
+       ;; so this seems like it would be more efficient as
+       ;;  and (not (array-type-complexp type))
+       ;;      (not (eq (array-type-element-type type) *wild-type*))
+       ;; Anyway it no longer works to write this as a single specifier
+       ;; '(or (simple-unboxed-array (*)) simple-vector) because that
+       ;; type is just (simple-array * (*)) which isn't amenable to
+       ;; inline copying since we don't know what it holds.
+       (or (csubtypep type (specifier-type '(simple-unboxed-array (*))))
+           (csubtypep type (specifier-type 'simple-vector)))))
+
 (defun maybe-expand-copy-loop-inline (src src-offset dst dst-offset length
                                       element-type)
   (let ((saetp (find-saetp element-type)))
@@ -1006,8 +1070,7 @@
                       :node node)
   (let ((type (lvar-type seq)))
     (cond
-      ((and (array-type-p type)
-            (csubtypep type (specifier-type '(or (simple-unboxed-array (*)) simple-vector)))
+      ((and (inlineable-copy-vector-p type)
             (policy node (> speed space)))
        (let ((element-type (type-specifier (array-type-specialized-element-type type))))
          `(let* ((length (length seq))
@@ -1036,8 +1099,7 @@
 
 (deftransform copy-seq ((seq) (vector))
   (let ((type (lvar-type seq)))
-    (cond ((and (array-type-p type)
-                (csubtypep type (specifier-type '(or (simple-unboxed-array (*)) simple-vector))))
+    (cond ((inlineable-copy-vector-p type)
            (let ((element-type (type-specifier (array-type-specialized-element-type type))))
              `(let* ((length (length seq))
                      (result (make-array length :element-type ',element-type)))
@@ -1080,6 +1142,7 @@
      `(block search
         (flet ((oops (vector start end)
                  (sequence-bounding-indices-bad-error vector start end)))
+          (declare (ignorable #'oops))
           (let* ((len1 (length pattern))
                  (len2 (length text))
                  (end1 (or end1 len1))
@@ -1160,17 +1223,17 @@
                              (member string simple-string base-string simple-base-string))
                             &rest sequence)
                            * :node node)
-  (let ((vars (loop for x in lvars collect (gensym)))
+  (let ((vars (loop for x in lvars collect (sb!xc:gensym)))
         (type (lvar-value result-type)))
     (if (policy node (<= speed space))
         ;; Out-of-line
         `(lambda (.dummy. ,@vars)
            (declare (ignore .dummy.))
            ,(ecase type
-                   ((string simple-string)
-                    `(%concatenate-to-string ,@vars))
-                   ((base-string simple-base-string)
-                    `(%concatenate-to-base-string ,@vars))))
+              ((string simple-string)
+               `(%concatenate-to-string ,@vars))
+              ((base-string simple-base-string)
+               `(%concatenate-to-base-string ,@vars))))
         ;; Inline
         (let* ((element-type (ecase type
                                ((string simple-string) 'character)
@@ -1179,47 +1242,66 @@
                                   collect (when (constant-lvar-p lvar)
                                             (lvar-value lvar))))
                (lengths
-                (loop for value in lvar-values
-                      for var in vars
-                      collect (if value
-                                  (length value)
-                                  `(sb!impl::string-dispatch ((simple-array * (*))
-                                                              sequence)
-                                       ,var
-                                     (declare (muffle-conditions compiler-note))
-                                     (length ,var))))))
+                 (loop for value in lvar-values
+                       for var in vars
+                       collect (if value
+                                   (length value)
+                                   `(sb!impl::string-dispatch ((simple-array * (*))
+                                                               sequence)
+                                                              ,var
+                                      (declare (muffle-conditions compiler-note))
+                                      (length ,var)))))
+               (non-constant-start
+                 (loop for value in lvar-values
+                       while (and (stringp value)
+                                    (< (length value) *concatenate-open-code-limit*))
+                       sum (length value))))
           `(apply
             (lambda ,vars
               (declare (ignorable ,@vars))
               (declare (optimize (insert-array-bounds-checks 0)))
               (let* ((.length. (+ ,@lengths))
-                     (.pos. 0)
+                     (.pos. ,non-constant-start)
                      (.string. (make-string .length. :element-type ',element-type)))
                 (declare (type index .length. .pos.)
-                         (muffle-conditions compiler-note))
-                ,@(loop for value in lvar-values
+                         (muffle-conditions compiler-note)
+                         (ignorable .pos.))
+                ,@(loop with constants = -1
+                        for first = t then nil
+                        for value in lvar-values
                         for var in vars
-                        collect (if (and (stringp value)
-                                         (< (length value) *concatenate-open-code-limit*))
-                                    ;; Fold the array reads for constant arguments
-                                    `(progn
-                                       ,@(loop for c across value
-                                               for i from 0
-                                               collect
-                                               ;; Without truly-the we get massive numbers
-                                               ;; of pointless error traps.
-                                                  `(setf (aref .string.
-                                                               (truly-the index (+ .pos. ,i)))
-                                                         ,c))
-                                       (incf .pos. ,(length value)))
-                                    `(sb!impl::string-dispatch
-                                         (#!+sb-unicode
-                                          (simple-array character (*))
-                                          (simple-array base-char (*))
-                                          t)
-                                         ,var
-                                       (replace .string. ,var :start1 .pos.)
-                                       (incf .pos. (length ,var)))))
+                        collect
+                        (cond ((and (stringp value)
+                                    (< (length value) *concatenate-open-code-limit*))
+                               ;; Fold the array reads for constant arguments
+                               `(progn
+                                  ,@(loop for c across value
+                                          for i from 0
+                                          collect
+                                          ;; Without truly-the we get massive numbers
+                                          ;; of pointless error traps.
+                                          `(setf (aref .string.
+                                                       (truly-the index ,(if constants
+                                                                             (incf constants)
+                                                                             `(+ .pos. ,i))))
+                                                 ,c))
+                                  ,(unless constants
+                                     `(incf (truly-the index .pos.) ,(length value)))))
+                              (t
+                               (prog1
+                                   `(sb!impl::string-dispatch
+                                        (#!+sb-unicode
+                                         (simple-array character (*))
+                                         (simple-array base-char (*))
+                                         t)
+                                        ,var
+                                      (replace .string. ,var
+                                               ,@(cond ((not constants)
+                                                        '(:start1 .pos.))
+                                                       ((plusp non-constant-start)
+                                                        `(:start1 ,non-constant-start))))
+                                      (incf (truly-the index .pos.) (length ,var)))
+                                 (setf constants nil)))))
                 .string.))
             lvars)))))
 
@@ -1643,14 +1725,14 @@
                         `(list* ,@variants ',tail)
                         `(list ,@variants)))))))))
 
-(deftransform sb!impl::backq-list ((&rest elts))
+(deftransform sb!impl::|List| ((&rest elts))
   (transform-backq-list-or-list* 'list elts))
 
-(deftransform sb!impl::backq-list* ((&rest elts))
+(deftransform sb!impl::|List*| ((&rest elts))
   (transform-backq-list-or-list* 'list* elts))
 
 ;; Merge adjacent constant values
-(deftransform sb!impl::backq-append ((&rest elts))
+(deftransform sb!impl::|Append| ((&rest elts))
   (let ((gensyms (make-gensym-list (length elts)))
         (acc nil)
         (ignored '())
@@ -1677,12 +1759,3 @@
       `(lambda ,gensyms
          (declare (ignore ,@ignored))
          (append ,@arguments)))))
-
-;; Nothing special for nconc
-(define-source-transform sb!impl::backq-nconc (&rest elts)
-  `(nconc ,@elts))
-
-;; cons and vector are handled with regular constant folding...
-;; but we still want to convert backq-cons into cl:cons.
-(deftransform sb!impl::backq-cons ((x y))
-  `(cons x y))

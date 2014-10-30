@@ -85,6 +85,7 @@
 (defvar *current-path*)
 
 (defvar *derive-function-types* nil
+  #!+sb-doc
   "Should the compiler assume that function types will never change,
   so that it can use type information inferred from current definitions
   to optimize code which uses those definitions? Setting this true
@@ -222,7 +223,6 @@
                          context))
         ((:function nil)
          (check-fun-name name)
-         (note-if-setf-fun-and-macro name)
          (let ((expansion (fun-name-inline-expansion name))
                (inlinep (info :function :inlinep name)))
            (setf (gethash name *free-funs*)
@@ -292,7 +292,7 @@
                    #+sb-xc-host
                    (when (eql (find-symbol (symbol-name name) :cl) name)
                      (multiple-value-bind (xc-value foundp)
-                         (info :variable :xc-constant-value name)
+                         (xc-constant-value name)
                        (cond (foundp
                               (setf value xc-value))
                              ((not (eq value name))
@@ -315,15 +315,14 @@
     (labels ((trivialp (value)
                (typep value
                       '(or
-                        #-sb-xc-host unboxed-array
-                        #+sb-xc-host (simple-array (unsigned-byte 8) (*))
+                        #-sb-xc-host
+                        (or unboxed-array #!+sb-simd-pack simd-pack)
+                        #+sb-xc-host
+                        (and array (not (array t)))
                         symbol
                         number
                         character
-                        string
-                        #!+sb-simd-pack
-                        #+sb-xc-host nil
-                        #-sb-xc-host sb!kernel:simd-pack)))
+                        string))) ; subsumed by UNBOXED-ARRAY
              (grovel (value)
                ;; Unless VALUE is an object which which obviously
                ;; can't contain other objects
@@ -366,6 +365,10 @@
                                      #-sb-xc-host (layout-n-untagged-slots
                                                    (%instance-ref value 0))))
                         (grovel (%instance-ref value i)))))
+                   #+sb-xc-host
+                   ((satisfies sb!kernel::xc-dumpable-structure-instance-p)
+                    (dotimes (i (%instance-length value))
+                      (grovel (%instance-ref value i))))
                    (t
                     (compiler-error
                      "Objects of type ~S can't be dumped into fasl files."
@@ -654,6 +657,13 @@
                   (use-continuation cast next result)))
           (t (use-continuation ref next result)))))
 
+(defun always-boundp (name)
+  (case (info :variable :always-bound name)
+    (:always-bound t)
+    ;; Compiling to fasl considers a symbol always-bound if its
+    ;; :always-bound info value is now T or will eventually be T.
+    (:eventually (fasl-output-p *compile-object*))))
+
 ;;; Convert a reference to a symbolic constant or variable. If the
 ;;; symbol is entered in the LEXENV-VARS we use that definition,
 ;;; otherwise we find the current global definition. This is also
@@ -661,7 +671,7 @@
 (defun ir1-convert-var (start next result name)
   (declare (type ctran start next) (type (or lvar null) result) (symbol name))
   (let ((var (or (lexenv-find name vars) (find-free-var name))))
-    (if (and (global-var-p var) (not (info :variable :always-bound name)))
+    (if (and (global-var-p var) (not (always-boundp name)))
         ;; KLUDGE: If the variable may be unbound, convert using SYMBOL-VALUE
         ;; which is not flushable, so that unbound dead variables signal an
         ;; error (bug 412, lp#722734): checking for null RESULT is not enough,
@@ -722,34 +732,42 @@
           (values (sb!xc:compiler-macro-function opname *lexenv*) opname)
           (values nil nil))))
 
-;;; Picks of special forms and compiler-macro expansions, and hands
+;;; If FORM has a usable compiler macro, use it; otherwise return FORM itself.
+;;; Return the name of the compiler-macro as a secondary value, if applicable.
+(defun expand-compiler-macro (form)
+  (multiple-value-bind (cmacro-fun cmacro-fun-name)
+      (find-compiler-macro (car form) form)
+    (if (and cmacro-fun
+             ;; CLHS 3.2.2.1.3 specifies that NOTINLINE
+             ;; suppresses compiler-macros.
+             (not (fun-lexically-notinline-p cmacro-fun-name)))
+        (values (handler-case (careful-expand-macro cmacro-fun form t)
+                  (compiler-macro-keyword-problem (c)
+                    (print-compiler-message *error-output* "note: ~A" (list c))
+                    form))
+                cmacro-fun-name)
+        (values form nil))))
+
+;;; Picks off special forms and compiler-macro expansions, and hands
 ;;; the rest to IR1-CONVERT-COMMON-FUNCTOID
 (defun ir1-convert-functoid (start next result form)
   (let* ((op (car form))
          (translator (and (symbolp op) (info :function :ir1-convert op))))
     (cond (translator
+           ;; FIXME: redundant? A macro can not be defined in the first place.
            (when (sb!xc:compiler-macro-function op *lexenv*)
              (compiler-warn "ignoring compiler macro for special form"))
            (funcall translator start next result form))
           (t
-           (multiple-value-bind (cmacro-fun cmacro-fun-name)
-               (find-compiler-macro op form)
-             (if (and cmacro-fun
-                      ;; CLHS 3.2.2.1.3 specifies that NOTINLINE
-                      ;; suppresses compiler-macros.
-                      (not (fun-lexically-notinline-p cmacro-fun-name)))
-                 (let ((res (handler-case
-                                (careful-expand-macro cmacro-fun form t)
-                              (compiler-macro-keyword-problem (c)
-                                (print-compiler-message *error-output* "note: ~A" (list c))
-                                form))))
-                   (cond ((eq res form)
-                          (ir1-convert-common-functoid start next result form op))
-                         (t
-                          (unless (policy *lexenv* (zerop store-xref-data))
-                            (record-call cmacro-fun-name (ctran-block start) *current-path*))
-                          (ir1-convert start next result res))))
-                 (ir1-convert-common-functoid start next result form op)))))))
+           (multiple-value-bind (res cmacro-fun-name)
+               (expand-compiler-macro form)
+             (cond ((eq res form)
+                    (ir1-convert-common-functoid start next result form op))
+                   (t
+                    (unless (policy *lexenv* (zerop store-xref-data))
+                      (record-call cmacro-fun-name (ctran-block start)
+                                   *current-path*))
+                    (ir1-convert start next result res))))))))
 
 ;;; Handles the "common" cases: any other forms except special forms
 ;;; and compiler-macros.
@@ -779,6 +797,12 @@
 (defun ir1-convert-global-functoid (start next result form fun)
   (declare (type ctran start next) (type (or lvar null) result)
            (list form))
+  (when (eql fun 'declare)
+    (compiler-error
+     "~@<There is no function named ~S.  ~
+      References to ~S in some contexts (like starts of blocks) are unevaluated ~
+      expressions, but here the expression is being evaluated, which invokes ~
+      undefined behaviour.~@:>" fun fun))
   ;; FIXME: Couldn't all the INFO calls here be converted into
   ;; standard CL functions, like MACRO-FUNCTION or something? And what
   ;; happens with lexically-defined (MACROLET) macros here, anyway?
@@ -1162,6 +1186,8 @@
     (collect ((restr nil cons)
              (new-vars nil cons))
       (dolist (var-name (rest decl))
+        (unless (symbolp var-name)
+          (compiler-error "Variable name is not a symbol: ~S." var-name))
         (when (boundp var-name)
           (program-assert-symbol-home-package-unlocked
            context var-name "declaring the type of ~A"))
@@ -1478,6 +1504,7 @@
   (declare (type list raw-spec vars fvars))
   (declare (type lexenv res))
   (let ((spec (canonized-decl-spec raw-spec))
+        (optimize-qualities)
         (result-type *wild-type*))
     (values
      (case (first spec)
@@ -1492,9 +1519,10 @@
         (process-ignore-decl spec vars fvars)
         res)
        (optimize
-        (make-lexenv
-         :default res
-         :policy (process-optimize-decl spec (lexenv-policy res))))
+        (multiple-value-bind (new-policy specified-qualities)
+            (process-optimize-decl spec (lexenv-policy res))
+          (setq optimize-qualities specified-qualities)
+          (make-lexenv :default res :policy new-policy)))
        (muffle-conditions
         (make-lexenv
          :default res
@@ -1531,7 +1559,8 @@
           (if fn
               (funcall fn res spec vars fvars)
               res))))
-     result-type)))
+     result-type
+     optimize-qualities)))
 
 ;;; Use a list of DECLARE forms to annotate the lists of LAMBDA-VAR
 ;;; and FUNCTIONAL structures which are being bound. In addition to
@@ -1548,23 +1577,31 @@
                       (lexenv *lexenv*) (binding-form-p nil) (context :compile))
   (declare (list decls vars fvars))
   (let ((result-type *wild-type*)
+        (optimize-qualities)
         (*post-binding-variable-lexenv* nil))
     (dolist (decl decls)
       (dolist (spec (rest decl))
-        (progv
+        (flet
+            ((process-it ()
+               (unless (consp spec)
+                 (compiler-error "malformed declaration specifier ~S in ~S"
+                                 spec decl))
+               (multiple-value-bind (new-env new-result-type new-qualities)
+                   (process-1-decl spec lexenv vars fvars binding-form-p context)
+                 (setq lexenv new-env
+                       optimize-qualities (nconc new-qualities optimize-qualities))
+                 (unless (eq new-result-type *wild-type*)
+                   (setq result-type
+                         (values-type-intersection result-type new-result-type))))))
+          (if (eq context :compile)
+              (let ((*current-path* (or (get-source-path spec)
+                                        (get-source-path decl)
+                                        *current-path*)))
+                (process-it))
             ;; Kludge: EVAL calls this function to deal with LOCALLY.
-            (when (eq context :compile) (list '*current-path*))
-            (when (eq context :compile) (list (or (get-source-path spec)
-                                                  (get-source-path decl)
-                                                  *current-path*)))
-          (unless (consp spec)
-            (compiler-error "malformed declaration specifier ~S in ~S" spec decl))
-          (multiple-value-bind (new-env new-result-type)
-              (process-1-decl spec lexenv vars fvars binding-form-p context)
-            (setq lexenv new-env)
-            (unless (eq new-result-type *wild-type*)
-              (setq result-type
-                    (values-type-intersection result-type new-result-type)))))))
+              (process-it)))))
+    (advise-if-repeated-optimize-qualities
+     (lexenv-policy lexenv) optimize-qualities)
     (values lexenv result-type *post-binding-variable-lexenv*)))
 
 (defun %processing-decls (decls vars fvars ctran lvar binding-form-p fun)

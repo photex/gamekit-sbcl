@@ -100,7 +100,7 @@
               (error "~@<unknown element type in array type: ~2I~_~S~:>"
                      (type-specifier type))
               t)
-          (or (eq (array-type-element-type type) *wild-type*)
+          (or (eq (array-type-specialized-element-type type) *wild-type*)
               (values (type= (array-type-specialized-element-type type)
                              (specifier-type (array-element-type
                                               object)))))))
@@ -109,6 +109,12 @@
        t))
     (classoid
      #+sb-xc-host (ctypep object type)
+     ;; It might be more efficient to check that OBJECT is either INSTANCEP
+     ;; or FUNCALLABLE-INSTANCE-P before making this call.
+     ;; But doing that would change the behavior if %%TYPEP were ever called
+     ;; with a built-in classoid whose members are not instances.
+     ;; e.g. (%%typep (find-fdefn 'car) (specifier-type 'fdefn))
+     ;; I'm not sure if that can happen.
      #-sb-xc-host (classoid-typep (layout-of object) type object))
     (union-type
      (some (lambda (union-type-type) (%%typep object union-type-type strict))

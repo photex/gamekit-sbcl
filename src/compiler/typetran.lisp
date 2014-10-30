@@ -132,6 +132,36 @@
     `(or (classoid-cell-classoid ',cell)
          (error "class not yet defined: ~S" name))))
 
+(defoptimizer (%typep-wrapper constraint-propagate-if)
+    ((test-value variable type) node gen)
+  (declare (ignore test-value gen))
+  (aver (constant-lvar-p type))
+  (let ((type (lvar-value type)))
+    (values variable (if (ctype-p type)
+                         type
+                         (handler-case (careful-specifier-type type)
+                           (t () nil))))))
+
+(deftransform %typep-wrapper ((test-value variable type) * * :node node)
+  (aver (constant-lvar-p type))
+  (if (constant-lvar-p test-value)
+      `',(lvar-value test-value)
+      (let* ((type (lvar-value type))
+             (type (if (ctype-p type)
+                       type
+                       (handler-case (careful-specifier-type type)
+                         (t () nil))))
+             (value-type (lvar-type variable)))
+        (cond ((not type)
+               'test-value)
+              ((csubtypep value-type type)
+               t)
+              ((not (types-equal-or-intersect value-type type))
+               nil)
+              (t
+               (delay-ir1-transform node :constraint)
+               'test-value)))))
+
 ;;;; standard type predicates, i.e. those defined in package COMMON-LISP,
 ;;;; plus at least one oddball (%INSTANCEP)
 ;;;;
@@ -166,6 +196,8 @@
   (define-type-predicate simple-vector-p simple-vector)
   (define-type-predicate stringp string)
   (define-type-predicate %instancep instance)
+  (define-type-predicate simple-fun-p simple-fun)
+  (define-type-predicate closurep closure)
   (define-type-predicate funcallable-instance-p funcallable-instance)
   (define-type-predicate symbolp symbol)
   (define-type-predicate vectorp vector))
@@ -180,6 +212,9 @@
 #!+sb-unicode
 (define-source-transform base-char-p (x)
   `(typep ,x 'base-char))
+;; CONS is implemented as (and list (not (eql nil))) where the 'and' is
+;; built-in to the consp vop. Reduce to just LISTP if possible.
+(deftransform consp ((x) ((not null)) * :important nil) '(listp x))
 
 ;;;; TYPEP source transform
 
@@ -232,7 +267,7 @@
     (once-only ((n-object object))
       (ecase (numeric-type-complexp type)
         (:real
-         (if (and #!-(or x86 x86-64) ;; Not implemented elsewhere yet
+         (if (and #!-(or x86 x86-64 arm) ;; Not implemented elsewhere yet
                   nil
                   (eql (numeric-type-class type) 'integer)
                   (eql (numeric-type-low type) 0)
@@ -287,25 +322,30 @@
 ;;; currently just drop through to the general code in this case,
 ;;; rather than trying to optimize it (but FIXME CSR 2004-04-05: it
 ;;; wouldn't be hard to optimize it after all).
+;;; FIXME: if the CONSP|NIL -> LISTP optimization kicks in,
+;;;        we forgo the array optimizations.
 (defun source-transform-union-typep (object type)
   (let* ((types (union-type-types type))
          (type-cons (specifier-type 'cons))
          (mtype (find-if #'member-type-p types))
          (members (when mtype (member-type-members mtype))))
-    (if (and mtype
-             (memq nil members)
-             (memq type-cons types))
-        (once-only ((n-obj object))
+    (once-only ((n-obj object))
+      (if (and mtype
+               (memq nil members)
+               (memq type-cons types))
           `(or (listp ,n-obj)
                (typep ,n-obj
                       '(or ,@(mapcar #'type-specifier
                                      (remove type-cons
                                              (remove mtype types)))
-                        (member ,@(remove nil members))))))
-        (once-only ((n-obj object))
-          `(or ,@(mapcar (lambda (x)
-                           `(typep ,n-obj ',(type-specifier x)))
-                         types))))))
+                        (member ,@(remove nil members)))))
+          (multiple-value-bind (widetags more-types)
+              (sb!kernel::widetags-from-union-type types)
+            `(or ,@(if widetags
+                       `((%other-pointer-subtype-p ,n-obj ',widetags)))
+                 ,@(mapcar (lambda (x)
+                             `(typep ,n-obj ',(type-specifier x)))
+                           more-types)))))))
 
 ;;; Do source transformation for TYPEP of a known intersection type.
 (defun source-transform-intersection-typep (object type)
@@ -443,6 +483,16 @@
 ;;; dimensions, then use that predicate and test for dimensions.
 ;;; Otherwise, just do %TYPEP.
 (defun source-transform-array-typep (obj type)
+  ;; Intercept (SIMPLE-ARRAY * (*)) because otherwise it tests
+  ;; (AND SIMPLE-ARRAY (NOT ARRAY-HEADER)) to weed out rank 0 and >1.
+  ;; By design the simple arrays of of rank 1 occupy a contiguous
+  ;; range of widetags, and unlike the arbitrary-widetags code for unions,
+  ;; this nonstandard predicate can be generically defined for all backends.
+  (if (and (not (array-type-complexp type))
+           (eq (array-type-element-type type) *wild-type*)
+           (equal (array-type-dimensions type) '(*)))
+      (return-from source-transform-array-typep
+        `(simple-rank-1-array-*-p ,obj)))
   (multiple-value-bind (pred stype) (find-supertype-predicate type)
     (if (and (array-type-p stype)
              ;; (If the element type hasn't been defined yet, it's
@@ -502,31 +552,73 @@
        (delay-ir1-transform node :constraint)
 
        ;; Otherwise transform the type test.
-       (multiple-value-bind (pred get-layout)
-           (cond
-             ((csubtypep class (specifier-type 'funcallable-instance))
-              (values 'funcallable-instance-p '%funcallable-instance-layout))
-             ((csubtypep class (specifier-type 'instance))
-              (values '%instancep '%instance-layout))
-             (t
-              (values '(lambda (x) (declare (ignore x)) t) 'layout-of)))
+       (binding* (((pred get-layout)
+                   (cond ((csubtypep class (specifier-type 'funcallable-instance))
+                          (values '(funcallable-instance-p object)
+                                  '(%funcallable-instance-layout object)))
+                         ((csubtypep class (specifier-type 'instance))
+                          (values '(%instancep object)
+                                  '(%instance-layout object)))))
+                  (get-layout-or-return-false
+                   (if pred
+                       ;; Test just one of %INSTANCEP or %FUNCALLABLE-INSTANCE-P
+                       `(if ,pred ,get-layout (return-from typep nil))
+                       ;; But if we don't know which is will be, try both.
+                       ;; This is less general than LAYOUT-OF,and therefore
+                       ;; a little quicker to fail, because objects with
+                       ;; {LIST|OTHER}-POINTER-LOWTAG can't possibly pass.
+                       `(cond ((%instancep object)
+                               (%instance-layout object))
+                              ((funcallable-instance-p object)
+                               (%funcallable-instance-layout object))
+                              (t (return-from typep nil)))))
+                  (n-layout (gensym)))
          (cond
+           ;; It's possible to seal a STANDARD-CLASS, not just a STRUCTURE-CLASS,
+           ;; though probably extremely weird. Also the PRED should be set in
+           ;; that event, but it isn't.
            ((and (eq (classoid-state class) :sealed) layout
                  (not (classoid-subclasses class)))
             ;; Sealed and has no subclasses.
-            (let ((n-layout (gensym)))
-              `(and (,pred object)
-                    (let ((,n-layout (,get-layout object)))
-                      ,@(when (policy *lexenv* (>= safety speed))
-                              `((when (layout-invalid ,n-layout)
-                                  (%layout-invalid-error object ',layout))))
-                      (eq ,n-layout ',layout)))))
+            ;; The crummy dual expressions for the same result are because
+            ;; (BLOCK (RETURN ...)) seems to emit a forward branch in the
+            ;; passing case, but AND emits a forward branch in the failing
+            ;; case which I believe is the better choice.
+            (if pred
+                `(and ,pred (eq ,get-layout ',layout))
+                `(block typep (eq ,get-layout-or-return-false ',layout))))
+
            ((and (typep class 'structure-classoid) layout)
             ;; structure type tests; hierarchical layout depths
-            (let ((depthoid (layout-depthoid layout))
-                  (n-layout (gensym)))
-              `(and (,pred object)
-                    (let ((,n-layout (,get-layout object)))
+            (let* ((depthoid (layout-depthoid layout))
+                   ;; If a structure is apparently an abstract base type,
+                   ;; having no constructor, then no instance layout should
+                   ;; be EQ to the classoid's layout. It is a slight win
+                   ;; to use the depth-based check first, then do the EQ check.
+                   ;; There is no loss in the case where both fail, and there
+                   ;; is a benefit in a passing case. Always try both though,
+                   ;; because (MAKE-INSTANCE 'x) works on any structure class.
+                   (abstract-base-p
+                    (let ((dd (layout-info layout)))
+                      (and dd
+                           (not (dd-default-constructor dd))
+                           (let ((ctors (dd-constructors dd)))
+                             (or (not ctors) (equal ctors '((nil))))))))
+                   (hierarchy-check
+                    ;; Use DATA-VECTOR-REF directly, since that's what SVREF in
+                    ;; a SAFETY 0 lexenv will eventually be transformed to.
+                    ;; This can give a large compilation speedup, since
+                    ;; %INSTANCE-TYPEPs are frequently created during
+                    ;; GENERATE-TYPE-CHECKS, and the normal aref transformation
+                    ;; path is pretty heavy.
+                    `(and (> (layout-depthoid ,n-layout) ,depthoid)
+                          (locally (declare (optimize (safety 0)))
+                            (eq (data-vector-ref (layout-inherits ,n-layout)
+                                                 ,depthoid)
+                                ',layout)))))
+              (aver (equal pred '(%instancep object)))
+              `(and ,pred
+                    (let ((,n-layout ,get-layout))
                       ;; we used to check for invalid layouts here,
                       ;; but in fact that's both unnecessary and
                       ;; wrong; it's unnecessary because structure
@@ -534,46 +626,43 @@
                       ;; because it is quite legitimate to pass an
                       ;; object with an invalid layout to a structure
                       ;; type test.
-                      (if (eq ,n-layout ',layout)
-                          t
-                          (and (> (layout-depthoid ,n-layout)
-                                  ,depthoid)
-                               (locally (declare (optimize (safety 0)))
-                                 ;; Use DATA-VECTOR-REF directly,
-                                 ;; since that's what SVREF in a
-                                 ;; SAFETY 0 lexenv will eventually be
-                                 ;; transformed to. This can give a
-                                 ;; large compilation speedup, since
-                                 ;; %INSTANCE-TYPEPs are frequently
-                                 ;; created during GENERATE-TYPE-CHECKS,
-                                 ;; and the normal aref transformation path
-                                 ;; is pretty heavy.
-                                 (eq (data-vector-ref (layout-inherits ,n-layout)
-                                                      ,depthoid)
-                                     ',layout))))))))
+                      ,(if abstract-base-p
+                           `(if ,hierarchy-check t (eq ,n-layout ',layout))
+                           `(if (eq ,n-layout ',layout) t ,hierarchy-check))))))
+
            ((and layout (>= (layout-depthoid layout) 0))
             ;; hierarchical layout depths for other things (e.g.
             ;; CONDITION, STREAM)
-            (let ((depthoid (layout-depthoid layout))
-                  (n-layout (gensym))
-                  (n-inherits (gensym)))
-              `(and (,pred object)
-                    (let ((,n-layout (,get-layout object)))
-                      (when (layout-invalid ,n-layout)
+            ;; The quasi-hierarchical types are abstract base types,
+            ;; so perform inheritance check first, and EQ second.
+            ;; Actually, since you can't make an abstract STREAM,
+            ;; maybe we should skip the EQ test? But you *can* make
+            ;; an instance of CONDITION for what it's worth.
+            ;; SEQUENCE is special-cased, but could be handled here.
+            (let* ((depthoid (layout-depthoid layout))
+                   (n-inherits (gensym))
+                   (guts
+                    `((when (layout-invalid ,n-layout)
                         (setq ,n-layout (update-object-layout-or-invalid
                                          object ',layout)))
-                      (if (eq ,n-layout ',layout)
-                          t
-                          (let ((,n-inherits (layout-inherits ,n-layout)))
+                      (if (let ((,n-inherits (layout-inherits
+                                              (truly-the layout ,n-layout))))
                             (declare (optimize (safety 0)))
-                            (and (> (length ,n-inherits) ,depthoid)
+                            (and (> (vector-length ,n-inherits) ,depthoid)
                                  ;; See above.
                                  (eq (data-vector-ref ,n-inherits ,depthoid)
-                                     ',layout))))))))
+                                     ',layout)))
+                          t
+                          (eq ,n-layout ',layout)))))
+              (if pred
+                  `(and ,pred (let ((,n-layout ,get-layout)) ,@guts))
+                  `(block typep
+                     (let ((,n-layout ,get-layout-or-return-false)) ,@guts)))))
+
            (t
             (/noshow "default case -- ,PRED and CLASS-CELL-TYPEP")
-            `(and (,pred object)
-                  (classoid-cell-typep (,get-layout object)
+            `(block typep
+               (classoid-cell-typep ,get-layout-or-return-false
                                        ',(find-classoid-cell name :create t)
                                        object)))))))))
 
@@ -590,11 +679,11 @@
 ;;; to that predicate. Otherwise, we dispatch off of the type's type.
 ;;; These transformations can increase space, but it is hard to tell
 ;;; when, so we ignore policy and always do them.
-(defun source-transform-typep (object type)
+(defun %source-transform-typep (object type)
   (let ((ctype (careful-specifier-type type)))
     (or (when (not ctype)
           (compiler-warn "illegal type specifier for TYPEP: ~S" type)
-          (return-from source-transform-typep (values nil t)))
+          (return-from %source-transform-typep (values nil t)))
         (multiple-value-bind (constantp value) (type-singleton-p ctype)
           (and constantp
                `(eql ,object ',value)))
@@ -614,7 +703,7 @@
            `(if (member ,object ',(member-type-members ctype)) t))
           (args-type
            (compiler-warn "illegal type specifier for TYPEP: ~S" type)
-           (return-from source-transform-typep (values nil t)))
+           (return-from %source-transform-typep (values nil t)))
           (t nil))
         (typecase ctype
           (numeric-type
@@ -633,6 +722,15 @@
           (t nil))
         `(%typep ,object ',type))))
 
+(defun source-transform-typep (object type)
+  (let ((name (gensym "OBJECT")))
+    (multiple-value-bind (transform error)
+        (%source-transform-typep name type)
+      (if error
+          (values nil t)
+          (values `(let ((,name ,object))
+                     (%typep-wrapper ,transform ,name ',type)))))))
+
 (define-source-transform typep (object spec &optional env)
   ;; KLUDGE: It looks bad to only do this on explicitly quoted forms,
   ;; since that would overlook other kinds of constants. But it turns
@@ -642,9 +740,7 @@
   ;; weird roundabout way. -- WHN 2001-03-18
   (if (and (not env)
            (consp spec)
-           (eq (car spec) 'quote)
-           (or (not *allow-instrumenting*)
-               (policy *lexenv* (= store-coverage-data 0))))
+           (eq (car spec) 'quote))
       (source-transform-typep object (cadr spec))
       (values nil t)))
 
@@ -699,13 +795,36 @@
           ;; FIXME: #!+long-float (t ,(error "LONG-FLOAT case needed"))
           ((csubtypep tspec (specifier-type 'float))
            `(the ,tval (%single-float x)))
+          ((csubtypep tspec (specifier-type 'complex))
+           (multiple-value-bind (part-type result-type)
+               (cond ((and (numeric-type-p tspec)
+                           (numeric-type-format tspec))) ; specific FLOAT type
+                     ((csubtypep tspec (specifier-type '(complex float)))
+                      ;; unspecific FLOAT type
+                      'float)
+                     ((csubtypep tspec (specifier-type '(complex rational)))
+                      (values 'rational `(or ,tval rational)))
+                     (t
+                      (values t `(or ,tval rational))))
+             (let ((result-type (or result-type tval)))
+               `(cond
+                  ((not (typep x 'complex))
+                   (the ,result-type (complex (coerce x ',part-type))))
+                  ((typep x ',tval)
+                   x)
+                  (t     ; X is COMPLEX, but not of the requested type
+                   (the ,result-type
+                        (complex (coerce (realpart x) ',part-type)
+                                 (coerce (imagpart x) ',part-type))))))))
            ;; Special case STRING and SIMPLE-STRING as they are union types
            ;; in SBCL.
-           ((member tval '(string simple-string))
-            `(the ,tval
-               (if (typep x ',tval)
-                   x
-                   (replace (make-array (length x) :element-type 'character) x))))
+          ((member tval '(string simple-string))
+           `(the ,tval
+                 (if (typep x ',tval)
+                     x
+                     (replace (make-array (length x) :element-type 'character) x))))
+          ((eq tval 'character)
+           `(character x))
            ;; Special case VECTOR
            ((eq tval 'vector)
             `(the ,tval
@@ -739,6 +858,12 @@
                 (give-up-ir1-transform
                  "~@<~S specifies dimensions other than (*) in safe code.~:@>"
                  tval)))
+           ((type= tspec (specifier-type 'list))
+            `(coerce-to-list x))
+           ((csubtypep tspec (specifier-type 'function))
+            (if (csubtypep (lvar-type x) (specifier-type 'symbol))
+                `(coerce-symbol-to-fun x)
+                `(coerce-to-fun x)))
            (t
             (give-up-ir1-transform
              "~@<open coding coercion to ~S not implemented.~:@>"

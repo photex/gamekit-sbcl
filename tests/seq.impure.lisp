@@ -58,6 +58,7 @@
             (coerce base-seq type))
            ((cons (eql simple-array) (cons * (cons (eql 1) null)))
             (destructuring-bind (eltype one) (rest type)
+              (declare (ignore one))
               (when (entirely eltype)
                 (coerce base-seq type))))
            ((cons (eql vector))
@@ -93,22 +94,24 @@
                                 ((speed 0) (space 1))))
           (let ((seq (make-sequence-for-type seq-type))
                 (lambda-expr `(lambda (seq)
+                                (declare (sb-ext:muffle-conditions
+                                          sb-ext:compiler-note))
                                 ,@(when declaredness
                                     `((declare (type ,seq-type seq))))
                                 (declare (optimize ,@optimization))
                                 ,snippet)))
             (when (not seq)
               (return))
-            (format t "~&~S~%" lambda-expr)
+            ;(format t "~&~S~%" lambda-expr)
             (multiple-value-bind (fun warnings-p failure-p)
                 (compile nil lambda-expr)
               (when (or warnings-p failure-p)
                 (error "~@<failed compilation:~2I ~_LAMBDA-EXPR=~S ~_WARNINGS-P=~S ~_FAILURE-P=~S~:@>"
                        lambda-expr warnings-p failure-p))
-              (format t "~&~S ~S~%~S~%~S ~S~%"
-                      base-seq snippet seq-type declaredness optimization)
-              (format t "~&(TYPEP SEQ 'SIMPLE-ARRAY)=~S~%"
-                      (typep seq 'simple-array))
+              ;(format t "~&~S ~S~%~S~%~S ~S~%"
+              ;        base-seq snippet seq-type declaredness optimization)
+              ;(format t "~&(TYPEP SEQ 'SIMPLE-ARRAY)=~S~%"
+              ;        (typep seq 'simple-array))
               (unless (funcall fun seq)
                 (error "~@<failed test:~2I ~_BASE-SEQ=~S ~_SNIPPET=~S ~_SEQ-TYPE=~S ~_DECLAREDNESS=~S ~_OPTIMIZATION=~S~:@>"
                        base-seq
@@ -230,27 +233,28 @@
     (null (find-if 'upper-case-p seq))))
 
 ;;; SUBSEQ
-(let ((avec (make-array 10
-                        :fill-pointer 4
-                        :initial-contents '(0 1 2 3 iv v vi vii iix ix))))
-  ;; These first five always worked AFAIK.
-  (assert (equalp (subseq avec 0 3) #(0 1 2)))
-  (assert (equalp (subseq avec 3 3) #()))
-  (assert (equalp (subseq avec 1 3) #(1 2)))
-  (assert (equalp (subseq avec 1) #(1 2 3)))
-  (assert (equalp (subseq avec 1 4) #(1 2 3)))
-  ;; SBCL bug found ca. 2002-05-01 by OpenMCL's correct handling of
-  ;; SUBSEQ, CSR's driving portable cross-compilation far enough to
-  ;; reach the SUBSEQ calls in assem.lisp, and WHN's sleazy
-  ;; translation of old CMU CL new-assem.lisp into sufficiently grotty
-  ;; portable Lisp that it passed suitable illegal values to SUBSEQ to
-  ;; exercise the bug:-|
-  ;;
-  ;; SUBSEQ should check its END value against logical LENGTH, not
-  ;; physical ARRAY-DIMENSION 0.
-  ;;
-  ;; fixed in sbcl-0.7.4.22 by WHN
-  (assert (null (ignore-errors (aref (subseq avec 1 5) 0)))))
+(with-test (:name :subseq)
+  (let ((avec (make-array 10
+                          :fill-pointer 4
+                          :initial-contents '(0 1 2 3 iv v vi vii iix ix))))
+    ;; These first five always worked AFAIK.
+    (assert (equalp (subseq avec 0 3) #(0 1 2)))
+    (assert (equalp (subseq avec 3 3) #()))
+    (assert (equalp (subseq avec 1 3) #(1 2)))
+    (assert (equalp (subseq avec 1) #(1 2 3)))
+    (assert (equalp (subseq avec 1 4) #(1 2 3)))
+    ;; SBCL bug found ca. 2002-05-01 by OpenMCL's correct handling of
+    ;; SUBSEQ, CSR's driving portable cross-compilation far enough to
+    ;; reach the SUBSEQ calls in assem.lisp, and WHN's sleazy
+    ;; translation of old CMU CL new-assem.lisp into sufficiently grotty
+    ;; portable Lisp that it passed suitable illegal values to SUBSEQ to
+    ;; exercise the bug:-|
+    ;;
+    ;; SUBSEQ should check its END value against logical LENGTH, not
+    ;; physical ARRAY-DIMENSION 0.
+    ;;
+    ;; fixed in sbcl-0.7.4.22 by WHN
+    (assert (null (ignore-errors (aref (subseq avec 1 5) 0))))))
 
 ;;; FILL
 (defun test-fill-typecheck (x)
@@ -263,77 +267,79 @@
 
 ;;; MAKE-SEQUENCE, COERCE, CONCATENATE, MERGE, MAP and requested
 ;;; result type (BUGs 46a, 46b, 66)
-(macrolet ((assert-type-error (form)
-             `(assert (typep (nth-value 1 (ignore-errors ,form))
-                             'type-error))))
-  (dolist (type-stub '((simple-vector)
-                       (vector *)
-                       (vector (signed-byte 8))
-                       (vector (unsigned-byte 16))
-                       (vector (signed-byte 32))
-                       (simple-bit-vector)))
-    (declare (optimize safety))
-    (format t "~&~S~%" type-stub)
-    ;; MAKE-SEQUENCE
-    (assert (= (length (make-sequence `(,@type-stub) 10)) 10))
-    (assert (= (length (make-sequence `(,@type-stub 10) 10)) 10))
-    (assert-type-error (make-sequence `(,@type-stub 10) 11))
-    ;; COERCE
-    (assert (= (length (coerce '(0 0 0) `(,@type-stub))) 3))
-    (assert (= (length (coerce #(0 0 0) `(,@type-stub 3))) 3))
-    (assert-type-error (coerce #*111 `(,@type-stub 4)))
-    ;; CONCATENATE
-    (assert (= (length (concatenate `(,@type-stub) #(0 0 0) #*111)) 6))
-    (assert (equalp (concatenate `(,@type-stub) #(0 0 0) #*111)
-                   (coerce #(0 0 0 1 1 1) `(,@type-stub))))
-    (assert (= (length (concatenate `(,@type-stub 6) #(0 0 0) #*111)) 6))
-    (assert (equalp (concatenate `(,@type-stub 6) #(0 0 0) #*111)
-                   (coerce #(0 0 0 1 1 1) `(,@type-stub 6))))
-    (assert-type-error (concatenate `(,@type-stub 5) #(0 0 0) #*111))
-    ;; MERGE
-    (macrolet ((test (type)
-                 `(merge ,type (copy-seq #(0 1 0)) (copy-seq #*111) #'>)))
-      (assert (= (length (test `(,@type-stub))) 6))
-      (assert (equalp (test `(,@type-stub))
-                      (coerce #(1 1 1 0 1 0) `(,@type-stub))))
-      (assert (= (length (test `(,@type-stub 6))) 6))
-      (assert (equalp (test `(,@type-stub 6))
-                      (coerce #(1 1 1 0 1 0) `(,@type-stub 6))))
-      (assert-type-error (test `(,@type-stub 4))))
-    ;; MAP
-    (assert (= (length (map `(,@type-stub) #'logxor #(0 0 1 1) '(0 1 0 1))) 4))
-    (assert (equalp (map `(,@type-stub) #'logxor #(0 0 1 1) '(0 1 0 1))
-                   (coerce #(0 1 1 0) `(,@type-stub))))
-    (assert (= (length (map `(,@type-stub 4) #'logxor #(0 0 1 1) '(0 1 0 1)))
-               4))
-    (assert (equalp (map `(,@type-stub 4) #'logxor #(0 0 1 1) '(0 1 0 1))
-                   (coerce #(0 1 1 0) `(,@type-stub 4))))
-    (assert-type-error (map `(,@type-stub 5) #'logxor #(0 0 1 1) '(0 1 0 1))))
-  ;; some more CONCATENATE tests for strings
-  (locally
+(with-test (:name :sequence-functions)
+  (macrolet ((assert-type-error (form)
+               `(assert (typep (nth-value 1 (ignore-errors ,form))
+                               'type-error))))
+    (dolist (type-stub '((simple-vector)
+                         (vector *)
+                         (vector (signed-byte 8))
+                         (vector (unsigned-byte 16))
+                         (vector (signed-byte 32))
+                         (simple-bit-vector)))
       (declare (optimize safety))
-    (assert (string= (concatenate 'string "foo" " " "bar") "foo bar"))
-    (assert (string= (concatenate '(string 7) "foo" " " "bar") "foo bar"))
-    (assert-type-error (concatenate '(string 6) "foo" " " "bar"))
-    (assert (string= (concatenate '(string 6) "foo" #(#\b #\a #\r)) "foobar"))
-    (assert-type-error (concatenate '(string 7) "foo" #(#\b #\a #\r))))
-  ;; Non-VECTOR ARRAY types aren't allowed as vector type specifiers.
-  (locally
-    (declare (optimize safety))
-    (assert-type-error (concatenate 'simple-array "foo" "bar"))
-    (assert-type-error (map 'simple-array #'identity '(1 2 3)))
-    (assert (equalp #(11 13)
-                    (map '(simple-array fixnum (*)) #'+ '(1 2 3) '(10 11))))
-    (assert-type-error (coerce '(1 2 3) 'simple-array))
-    (assert-type-error (merge 'simple-array (list 1 3) (list 2 4) '<))
-    (assert (equalp #(3 2 1) (coerce '(3 2 1) '(vector fixnum))))
-    (assert-type-error (map 'array #'identity '(1 2 3)))
-    (assert-type-error (map '(array fixnum) #'identity '(1 2 3)))
-    (assert (equalp #(1 2 3) (coerce '(1 2 3) '(vector fixnum))))
-    ;; but COERCE has an exemption clause:
-    (assert (string= "foo" (coerce "foo" 'simple-array)))
-    ;; ... though not in all cases.
-    (assert-type-error (coerce '(#\f #\o #\o) 'simple-array))))
+      (format t "~&~S~%" type-stub)
+      ;; MAKE-SEQUENCE
+      (assert (= (length (make-sequence `(,@type-stub) 10)) 10))
+      (assert (= (length (make-sequence `(,@type-stub 10) 10)) 10))
+      (assert-type-error (make-sequence `(,@type-stub 10) 11))
+      ;; COERCE
+      (assert (= (length (coerce '(0 0 0) `(,@type-stub))) 3))
+      (assert (= (length (coerce #(0 0 0) `(,@type-stub 3))) 3))
+      (assert-type-error (coerce #*111 `(,@type-stub 4)))
+      ;; CONCATENATE
+      (assert (= (length (concatenate `(,@type-stub) #(0 0 0) #*111)) 6))
+      (assert (equalp (concatenate `(,@type-stub) #(0 0 0) #*111)
+                      (coerce #(0 0 0 1 1 1) `(,@type-stub))))
+      (assert (= (length (concatenate `(,@type-stub 6) #(0 0 0) #*111)) 6))
+      (assert (equalp (concatenate `(,@type-stub 6) #(0 0 0) #*111)
+                      (coerce #(0 0 0 1 1 1) `(,@type-stub 6))))
+      (assert-type-error (concatenate `(,@type-stub 5) #(0 0 0) #*111))
+      ;; MERGE
+      (macrolet ((test (type)
+                   `(merge ,type (copy-seq #(0 1 0)) (copy-seq #*111) #'>)))
+        (assert (= (length (test `(,@type-stub))) 6))
+        (assert (equalp (test `(,@type-stub))
+                        (coerce #(1 1 1 0 1 0) `(,@type-stub))))
+        (assert (= (length (test `(,@type-stub 6))) 6))
+        (assert (equalp (test `(,@type-stub 6))
+                        (coerce #(1 1 1 0 1 0) `(,@type-stub 6))))
+        (assert-type-error (test `(,@type-stub 4))))
+      ;; MAP
+      (assert (= (length (map `(,@type-stub) #'logxor #(0 0 1 1) '(0 1 0 1))) 4))
+      (assert (equalp (map `(,@type-stub) #'logxor #(0 0 1 1) '(0 1 0 1))
+                      (coerce #(0 1 1 0) `(,@type-stub))))
+      (assert (= (length (map `(,@type-stub 4) #'logxor #(0 0 1 1) '(0 1 0 1)))
+                 4))
+      (assert (equalp (map `(,@type-stub 4) #'logxor #(0 0 1 1) '(0 1 0 1))
+                      (coerce #(0 1 1 0) `(,@type-stub 4))))
+      (assert-type-error (map `(,@type-stub 5) #'logxor #(0 0 1 1) '(0 1 0 1))))
+    ;; some more CONCATENATE tests for strings
+    (locally
+        (declare (optimize safety))
+      (assert (string= (concatenate 'string "foo" " " "bar") "foo bar"))
+      (assert (string= (concatenate '(string 7) "foo" " " "bar") "foo bar"))
+      (assert-type-error (concatenate '(string 6) "foo" " " "bar"))
+      (assert (string= (concatenate '(string 6) "foo" #(#\b #\a #\r)) "foobar"))
+      (assert (string= (concatenate '(string 6) #(#\b #\a #\r) "foo") "barfoo"))
+      (assert-type-error (concatenate '(string 7) "foo" #(#\b #\a #\r))))
+    ;; Non-VECTOR ARRAY types aren't allowed as vector type specifiers.
+    (locally
+        (declare (optimize safety))
+      (assert-type-error (concatenate 'simple-array "foo" "bar"))
+      (assert-type-error (map 'simple-array #'identity '(1 2 3)))
+      (assert (equalp #(11 13)
+                      (map '(simple-array fixnum (*)) #'+ '(1 2 3) '(10 11))))
+      (assert-type-error (coerce '(1 2 3) 'simple-array))
+      (assert-type-error (merge 'simple-array (list 1 3) (list 2 4) '<))
+      (assert (equalp #(3 2 1) (coerce '(3 2 1) '(vector fixnum))))
+      (assert-type-error (map 'array #'identity '(1 2 3)))
+      (assert-type-error (map '(array fixnum) #'identity '(1 2 3)))
+      (assert (equalp #(1 2 3) (coerce '(1 2 3) '(vector fixnum))))
+      ;; but COERCE has an exemption clause:
+      (assert (string= "foo" (coerce "foo" 'simple-array)))
+      ;; ... though not in all cases.
+      (assert-type-error (coerce '(#\f #\o #\o) 'simple-array)))))
 
 ;; CONCATENATE used to fail for generic sequences for result-type NULL.
 (with-test (:name (concatenate :result-type-null :bug-1162301))
@@ -356,75 +362,77 @@
 ;;; As pointed out by Raymond Toy on #lisp IRC, MERGE had some issues
 ;;; with user-defined types until sbcl-0.7.8.11
 (deftype list-typeoid () 'list)
-(assert (equal '(1 2 3 4) (merge 'list-typeoid (list 1 3) (list 2 4) '<)))
+(with-test (:name :merge-user-types)
+ (assert (equal '(1 2 3 4) (merge 'list-typeoid (list 1 3) (list 2 4) '<)))
 ;;; and also with types that weren't precicely LIST
-(assert (equal '(1 2 3 4) (merge 'cons (list 1 3) (list 2 4) '<)))
+ (assert (equal '(1 2 3 4) (merge 'cons (list 1 3) (list 2 4) '<))))
 
 ;;; but wait, there's more! The NULL and CONS types also have implicit
 ;;; length requirements:
-(macrolet ((assert-type-error (form)
-             `(assert (typep (nth-value 1 (ignore-errors ,form))
-                             'type-error))))
-  (locally
-      (declare (optimize safety))
-    ;; MAKE-SEQUENCE
-    (assert-type-error (make-sequence 'cons 0))
-    (assert-type-error (make-sequence 'null 1))
-    (assert-type-error (make-sequence '(cons t null) 0))
-    (assert-type-error (make-sequence '(cons t null) 2))
-    ;; KLUDGE: I'm not certain that this test actually tests for what
-    ;; it should test, in that the type deriver and optimizers might
-    ;; be too smart for the good of an exhaustive test system.
-    ;; However, it makes me feel good.  -- CSR, 2002-10-18
-    (assert (null (make-sequence 'null 0)))
-    (assert (= (length (make-sequence 'cons 3)) 3))
-    (assert (= (length (make-sequence '(cons t null) 1)) 1))
-    ;; and NIL is not a valid type for MAKE-SEQUENCE
-    (assert-type-error (make-sequence 'nil 0))
-    ;; COERCE
-    (assert-type-error (coerce #(1) 'null))
-    (assert-type-error (coerce #() 'cons))
-    (assert-type-error (coerce #() '(cons t null)))
-    (assert-type-error (coerce #(1 2) '(cons t null)))
-    (assert (null (coerce #() 'null)))
-    (assert (= (length (coerce #(1) 'cons)) 1))
-    (assert (= (length (coerce #(1) '(cons t null))) 1))
-    (assert-type-error (coerce #() 'nil))
-    ;; MERGE
-    (assert-type-error (merge 'null (list 1 3) (list 2 4) '<))
-    (assert-type-error (merge 'cons () () '<))
-    (assert (null (merge 'null () () '<)))
-    (assert (= (length (merge 'cons (list 1 3) (list 2 4) '<)) 4))
-    (assert (= (length (merge '(cons t (cons t (cons t (cons t null))))
-                              (list 1 3) (list 2 4)
-                              '<))
-               4))
-    (assert-type-error (merge 'nil () () '<))
-    ;; CONCATENATE
-    (assert-type-error (concatenate 'cons #() ()))
-    (assert-type-error (concatenate '(cons t null) #(1 2 3) #(4 5 6)))
-    (assert (= (length (concatenate 'cons #() '(1) "2 3")) 4))
-    (assert (= (length (concatenate '(cons t cons) '(1) "34")) 3))
-    (assert-type-error (concatenate 'nil '(3)))
-    ;; FIXME: tests for MAP to come when some brave soul implements
-    ;; the analogous type checking for MAP/%MAP.
-    ))
+(with-test (:name :sequence-functions-list-types)
+  (macrolet ((assert-type-error (form)
+               `(assert (typep (nth-value 1 (ignore-errors ,form))
+                               'type-error))))
+    (locally
+        (declare (optimize safety))
+      ;; MAKE-SEQUENCE
+      (assert-type-error (make-sequence 'cons 0))
+      (assert-type-error (make-sequence 'null 1))
+      (assert-type-error (make-sequence '(cons t null) 0))
+      (assert-type-error (make-sequence '(cons t null) 2))
+      ;; KLUDGE: I'm not certain that this test actually tests for what
+      ;; it should test, in that the type deriver and optimizers might
+      ;; be too smart for the good of an exhaustive test system.
+      ;; However, it makes me feel good.  -- CSR, 2002-10-18
+      (assert (null (make-sequence 'null 0)))
+      (assert (= (length (make-sequence 'cons 3)) 3))
+      (assert (= (length (make-sequence '(cons t null) 1)) 1))
+      ;; and NIL is not a valid type for MAKE-SEQUENCE
+      (assert-type-error (make-sequence 'nil 0))
+      ;; COERCE
+      (assert-type-error (coerce #(1) 'null))
+      (assert-type-error (coerce #() 'cons))
+      (assert-type-error (coerce #() '(cons t null)))
+      (assert-type-error (coerce #(1 2) '(cons t null)))
+      (assert (null (coerce #() 'null)))
+      (assert (= (length (coerce #(1) 'cons)) 1))
+      (assert (= (length (coerce #(1) '(cons t null))) 1))
+      (assert-type-error (coerce #() 'nil))
+      ;; MERGE
+      (assert-type-error (merge 'null (list 1 3) (list 2 4) '<))
+      (assert-type-error (merge 'cons () () '<))
+      (assert (null (merge 'null () () '<)))
+      (assert (= (length (merge 'cons (list 1 3) (list 2 4) '<)) 4))
+      (assert (= (length (merge '(cons t (cons t (cons t (cons t null))))
+                                (list 1 3) (list 2 4)
+                                '<))
+                 4))
+      (assert-type-error (merge 'nil () () '<))
+      ;; CONCATENATE
+      (assert-type-error (concatenate 'cons #() ()))
+      (assert-type-error (concatenate '(cons t null) #(1 2 3) #(4 5 6)))
+      (assert (= (length (concatenate 'cons #() '(1) "2 3")) 4))
+      (assert (= (length (concatenate '(cons t cons) '(1) "34")) 3))
+      (assert-type-error (concatenate 'nil '(3)))
+      ;; FIXME: tests for MAP to come when some brave soul implements
+      ;; the analogous type checking for MAP/%MAP.
+      )))
 
 ;;; ELT should signal an error of type TYPE-ERROR if its index
 ;;; argument isn't a valid sequence index for sequence:
 (defun test-elt-signal (x)
   (elt x 3))
-(assert (raises-error? (test-elt-signal "foo") type-error))
+(assert-error (test-elt-signal "foo") type-error)
 (assert (eql (test-elt-signal "foob") #\b))
 (locally
-  (declare (optimize (safety 3)))
-  (assert (raises-error? (elt (list 1 2 3) 3) type-error)))
+    (declare (optimize (safety 3)))
+  (assert-error (elt (list 1 2 3) 3) type-error))
 
 ;;; confusion in the refactoring led to this signalling an unbound
 ;;; variable, not a type error.
 (defun svrefalike (x)
   (svref x 0))
-(assert (raises-error? (svrefalike #*0) type-error))
+(assert-error (svrefalike #*0) type-error)
 
 ;;; checks for uniform bounding index handling.
 ;;;
@@ -474,97 +482,97 @@
 (sequence-bounding-indices-test
  (format t "~&/Accessor SUBSEQ")
  (assert (string= (subseq string 0 5) "aaaaa"))
- (assert (raises-error? (subseq string 0 6)))
- (assert (raises-error? (subseq string (opaque-identity -1) 5)))
- (assert (raises-error? (subseq string 4 2)))
- (assert (raises-error? (subseq string 6)))
+ (assert-error (subseq string 0 6))
+ (assert-error (subseq string (opaque-identity -1) 5))
+ (assert-error (subseq string 4 2))
+ (assert-error (subseq string 6))
  (assert (string= (setf (subseq string 0 5) "abcde") "abcde"))
  (assert (string= (subseq string 0 5) "abcde"))
  (reset)
- (assert (raises-error? (setf (subseq string 0 6) "abcdef")))
- (assert (raises-error? (setf (subseq string (opaque-identity -1) 5) "abcdef")))
- (assert (raises-error? (setf (subseq string 4 2) "")))
- (assert (raises-error? (setf (subseq string 6) "ghij"))))
+ (assert-error (setf (subseq string 0 6) "abcdef"))
+ (assert-error (setf (subseq string (opaque-identity -1) 5) "abcdef"))
+ (assert-error (setf (subseq string 4 2) ""))
+ (assert-error (setf (subseq string 6) "ghij")))
 
 ;;; Function COUNT, COUNT-IF, COUNT-IF-NOT
 (sequence-bounding-indices-test
  (format t "~&/Function COUNT, COUNT-IF, COUNT-IF-NOT")
  (assert (= (count #\a string :start 0 :end nil) 5))
  (assert (= (count #\a string :start 0 :end 5) 5))
- (assert (raises-error? (count #\a string :start 0 :end 6)))
- (assert (raises-error? (count #\a string :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (count #\a string :start 4 :end 2)))
- (assert (raises-error? (count #\a string :start 6 :end 9)))
+ (assert-error (count #\a string :start 0 :end 6))
+ (assert-error (count #\a string :start (opaque-identity -1) :end 5))
+ (assert-error (count #\a string :start 4 :end 2))
+ (assert-error (count #\a string :start 6 :end 9))
  (assert (= (count-if #'alpha-char-p string :start 0 :end nil) 5))
  (assert (= (count-if #'alpha-char-p string :start 0 :end 5) 5))
- (assert (raises-error?
-          (count-if #'alpha-char-p string :start 0 :end 6)))
- (assert (raises-error?
-          (count-if #'alpha-char-p string :start (opaque-identity -1) :end 5)))
- (assert (raises-error?
-          (count-if #'alpha-char-p string :start 4 :end 2)))
- (assert (raises-error?
-          (count-if #'alpha-char-p string :start 6 :end 9)))
+ (assert-error
+  (count-if #'alpha-char-p string :start 0 :end 6))
+ (assert-error
+  (count-if #'alpha-char-p string :start (opaque-identity -1) :end 5))
+ (assert-error
+  (count-if #'alpha-char-p string :start 4 :end 2))
+ (assert-error
+  (count-if #'alpha-char-p string :start 6 :end 9))
  (assert (= (count-if-not #'alpha-char-p string :start 0 :end nil) 0))
  (assert (= (count-if-not #'alpha-char-p string :start 0 :end 5) 0))
- (assert (raises-error?
-          (count-if-not #'alpha-char-p string :start 0 :end 6)))
- (assert (raises-error?
-          (count-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5)))
- (assert (raises-error?
-          (count-if-not #'alpha-char-p string :start 4 :end 2)))
- (assert (raises-error?
-          (count-if-not #'alpha-char-p string :start 6 :end 9))))
+ (assert-error
+  (count-if-not #'alpha-char-p string :start 0 :end 6))
+ (assert-error
+  (count-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5))
+ (assert-error
+  (count-if-not #'alpha-char-p string :start 4 :end 2))
+ (assert-error
+  (count-if-not #'alpha-char-p string :start 6 :end 9)))
 
 ;;; Function FILL
 (sequence-bounding-indices-test
  (format t "~&/Function FILL")
  (assert (string= (fill string #\b :start 0 :end 5) "bbbbb"))
  (assert (string= (fill string #\c :start 0 :end nil) "ccccc"))
- (assert (raises-error? (fill string #\d :start 0 :end 6)))
- (assert (raises-error? (fill string #\d :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (fill string #\d :start 4 :end 2)))
- (assert (raises-error? (fill string #\d :start 6 :end 9))))
+ (assert-error (fill string #\d :start 0 :end 6))
+ (assert-error (fill string #\d :start (opaque-identity -1) :end 5))
+ (assert-error (fill string #\d :start 4 :end 2))
+ (assert-error (fill string #\d :start 6 :end 9)))
 
 ;;; Function FIND, FIND-IF, FIND-IF-NOT
 (sequence-bounding-indices-test
  (format t "~&/Function FIND, FIND-IF, FIND-IF-NOT")
  (assert (char= (find #\a string :start 0 :end nil) #\a))
  (assert (char= (find #\a string :start 0 :end 5) #\a))
- (assert (raises-error? (find #\a string :start 0 :end 6)))
- (assert (raises-error? (find #\a string :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (find #\a string :start 4 :end 2)))
- (assert (raises-error? (find #\a string :start 6 :end 9)))
+ (assert-error (find #\a string :start 0 :end 6))
+ (assert-error (find #\a string :start (opaque-identity -1) :end 5))
+ (assert-error (find #\a string :start 4 :end 2))
+ (assert-error (find #\a string :start 6 :end 9))
  (assert (char= (find-if #'alpha-char-p string :start 0 :end nil) #\a))
  (assert (char= (find-if #'alpha-char-p string :start 0 :end 5) #\a))
- (assert (raises-error?
-          (find-if #'alpha-char-p string :start 0 :end 6)))
- (assert (raises-error?
-          (find-if #'alpha-char-p string :start (opaque-identity -1) :end 5)))
- (assert (raises-error?
-          (find-if #'alpha-char-p string :start 4 :end 2)))
- (assert (raises-error?
-          (find-if #'alpha-char-p string :start 6 :end 9)))
+ (assert-error
+  (find-if #'alpha-char-p string :start 0 :end 6))
+ (assert-error
+  (find-if #'alpha-char-p string :start (opaque-identity -1) :end 5))
+ (assert-error
+  (find-if #'alpha-char-p string :start 4 :end 2))
+ (assert-error
+  (find-if #'alpha-char-p string :start 6 :end 9))
  (assert (eq (find-if-not #'alpha-char-p string :start 0 :end nil) nil))
  (assert (eq (find-if-not #'alpha-char-p string :start 0 :end 5) nil))
- (assert (raises-error?
-          (find-if-not #'alpha-char-p string :start 0 :end 6)))
- (assert (raises-error?
-          (find-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5)))
- (assert (raises-error?
-          (find-if-not #'alpha-char-p string :start 4 :end 2)))
- (assert (raises-error?
-          (find-if-not #'alpha-char-p string :start 6 :end 9))))
+ (assert-error
+  (find-if-not #'alpha-char-p string :start 0 :end 6))
+ (assert-error
+  (find-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5))
+ (assert-error
+  (find-if-not #'alpha-char-p string :start 4 :end 2))
+ (assert-error
+  (find-if-not #'alpha-char-p string :start 6 :end 9)))
 
 ;;; Function MISMATCH
 (sequence-bounding-indices-test
  (format t "~&/Function MISMATCH")
  (assert (null (mismatch string "aaaaa" :start1 0 :end1 nil)))
  (assert (= (mismatch "aaab" string :start2 0 :end2 4) 3))
- (assert (raises-error? (mismatch "aaaaaa" string :start2 0 :end2 6)))
- (assert (raises-error? (mismatch string "aaaaaa" :start1 (opaque-identity -1) :end1 5)))
- (assert (raises-error? (mismatch string "" :start1 4 :end1 2)))
- (assert (raises-error? (mismatch "aaaa" string :start2 6 :end2 9))))
+ (assert-error (mismatch "aaaaaa" string :start2 0 :end2 6))
+ (assert-error (mismatch string "aaaaaa" :start1 (opaque-identity -1) :end1 5))
+ (assert-error (mismatch string "" :start1 4 :end1 2))
+ (assert-error (mismatch "aaaa" string :start2 6 :end2 9)))
 
 ;;; Function PARSE-INTEGER
 (sequence-bounding-indices-test
@@ -574,10 +582,10 @@
  (setf (fill-pointer string) 5)
  (assert (= (parse-integer string :start 0 :end 5) 12345))
  (assert (= (parse-integer string :start 0 :end nil) 12345))
- (assert (raises-error? (parse-integer string :start 0 :end 6)))
- (assert (raises-error? (parse-integer string :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (parse-integer string :start 4 :end 2)))
- (assert (raises-error? (parse-integer string :start 6 :end 9))))
+ (assert-error (parse-integer string :start 0 :end 6))
+ (assert-error (parse-integer string :start (opaque-identity -1) :end 5))
+ (assert-error (parse-integer string :start 4 :end 2))
+ (assert-error (parse-integer string :start 6 :end 9)))
 
 ;;; Function PARSE-NAMESTRING
 (sequence-bounding-indices-test
@@ -591,18 +599,18 @@
                                      :start 0 :end 5)))
  (assert (truename (parse-namestring string nil *default-pathname-defaults*
                                      :start 0 :end nil)))
- (assert (raises-error? (parse-namestring string nil
-                                          *default-pathname-defaults*
-                                          :start 0 :end 6)))
- (assert (raises-error? (parse-namestring string nil
-                                          *default-pathname-defaults*
-                                          :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (parse-namestring string nil
-                                          *default-pathname-defaults*
-                                          :start 4 :end 2)))
- (assert (raises-error? (parse-namestring string nil
-                                          *default-pathname-defaults*
-                                          :start 6 :end 9))))
+ (assert-error (parse-namestring string nil
+                                 *default-pathname-defaults*
+                                 :start 0 :end 6))
+ (assert-error (parse-namestring string nil
+                                 *default-pathname-defaults*
+                                 :start (opaque-identity -1) :end 5))
+ (assert-error (parse-namestring string nil
+                                 *default-pathname-defaults*
+                                 :start 4 :end 2))
+ (assert-error (parse-namestring string nil
+                                 *default-pathname-defaults*
+                                 :start 6 :end 9)))
 
 ;;; Function POSITION, POSITION-IF, POSITION-IF-NOT
 (sequence-bounding-indices-test
@@ -610,30 +618,30 @@
 
  (assert (= (position #\a string :start 0 :end nil) 0))
  (assert (= (position #\a string :start 0 :end 5) 0))
- (assert (raises-error? (position #\a string :start 0 :end 6)))
- (assert (raises-error? (position #\a string :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (position #\a string :start 4 :end 2)))
- (assert (raises-error? (position #\a string :start 6 :end 9)))
+ (assert-error (position #\a string :start 0 :end 6))
+ (assert-error (position #\a string :start (opaque-identity -1) :end 5))
+ (assert-error (position #\a string :start 4 :end 2))
+ (assert-error (position #\a string :start 6 :end 9))
  (assert (= (position-if #'alpha-char-p string :start 0 :end nil) 0))
  (assert (= (position-if #'alpha-char-p string :start 0 :end 5) 0))
- (assert (raises-error?
-          (position-if #'alpha-char-p string :start 0 :end 6)))
- (assert (raises-error?
-          (position-if #'alpha-char-p string :start (opaque-identity -1) :end 5)))
- (assert (raises-error?
-          (position-if #'alpha-char-p string :start 4 :end 2)))
- (assert (raises-error?
-          (position-if #'alpha-char-p string :start 6 :end 9)))
+ (assert-error
+  (position-if #'alpha-char-p string :start 0 :end 6))
+ (assert-error
+  (position-if #'alpha-char-p string :start (opaque-identity -1) :end 5))
+ (assert-error
+  (position-if #'alpha-char-p string :start 4 :end 2))
+ (assert-error
+  (position-if #'alpha-char-p string :start 6 :end 9))
  (assert (eq (position-if-not #'alpha-char-p string :start 0 :end nil) nil))
  (assert (eq (position-if-not #'alpha-char-p string :start 0 :end 5) nil))
- (assert (raises-error?
-          (position-if-not #'alpha-char-p string :start 0 :end 6)))
- (assert (raises-error?
-          (position-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5)))
- (assert (raises-error?
-          (position-if-not #'alpha-char-p string :start 4 :end 2)))
- (assert (raises-error?
-          (position-if-not #'alpha-char-p string :start 6 :end 9))))
+ (assert-error
+  (position-if-not #'alpha-char-p string :start 0 :end 6))
+ (assert-error
+  (position-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5))
+ (assert-error
+  (position-if-not #'alpha-char-p string :start 4 :end 2))
+ (assert-error
+  (position-if-not #'alpha-char-p string :start 6 :end 9)))
 
 ;;; Function READ-FROM-STRING
 (sequence-bounding-indices-test
@@ -641,10 +649,10 @@
  (setf (subseq string 0 5) "(a b)")
  (assert (equal (read-from-string string nil nil :start 0 :end 5) '(a b)))
  (assert (equal (read-from-string string nil nil :start 0 :end nil) '(a b)))
- (assert (raises-error? (read-from-string string nil nil :start 0 :end 6)))
- (assert (raises-error? (read-from-string string nil nil :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (read-from-string string nil nil :start 4 :end 2)))
- (assert (raises-error? (read-from-string string nil nil :start 6 :end 9))))
+ (assert-error (read-from-string string nil nil :start 0 :end 6))
+ (assert-error (read-from-string string nil nil :start (opaque-identity -1) :end 5))
+ (assert-error (read-from-string string nil nil :start 4 :end 2))
+ (assert-error (read-from-string string nil nil :start 6 :end 9)))
 
 ;;; Function REDUCE
 (sequence-bounding-indices-test
@@ -654,10 +662,10 @@
                 '(#\a #\b #\c #\d . #\e)))
  (assert (equal (reduce #'list* string :from-end t :start 0 :end 5)
                 '(#\a #\b #\c #\d . #\e)))
- (assert (raises-error? (reduce #'list* string :start 0 :end 6)))
- (assert (raises-error? (reduce #'list* string :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (reduce #'list* string :start 4 :end 2)))
- (assert (raises-error? (reduce #'list* string :start 6 :end 9))))
+ (assert-error (reduce #'list* string :start 0 :end 6))
+ (assert-error (reduce #'list* string :start (opaque-identity -1) :end 5))
+ (assert-error (reduce #'list* string :start 4 :end 2))
+ (assert-error (reduce #'list* string :start 6 :end 9)))
 
 ;;; Function REMOVE, REMOVE-IF, REMOVE-IF-NOT, DELETE, DELETE-IF,
 ;;; DELETE-IF-NOT
@@ -665,61 +673,61 @@
  (format t "~&/Function REMOVE, REMOVE-IF, REMOVE-IF-NOT, ...")
  (assert (equal (remove #\a string :start 0 :end nil) ""))
  (assert (equal (remove #\a string :start 0 :end 5) ""))
- (assert (raises-error? (remove #\a string :start 0 :end 6)))
- (assert (raises-error? (remove #\a string :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (remove #\a string :start 4 :end 2)))
- (assert (raises-error? (remove #\a string :start 6 :end 9)))
+ (assert-error (remove #\a string :start 0 :end 6))
+ (assert-error (remove #\a string :start (opaque-identity -1) :end 5))
+ (assert-error (remove #\a string :start 4 :end 2))
+ (assert-error (remove #\a string :start 6 :end 9))
  (assert (equal (remove-if #'alpha-char-p string :start 0 :end nil) ""))
  (assert (equal (remove-if #'alpha-char-p string :start 0 :end 5) ""))
- (assert (raises-error?
-          (remove-if #'alpha-char-p string :start 0 :end 6)))
- (assert (raises-error?
-          (remove-if #'alpha-char-p string :start (opaque-identity -1) :end 5)))
- (assert (raises-error?
-          (remove-if #'alpha-char-p string :start 4 :end 2)))
- (assert (raises-error?
-          (remove-if #'alpha-char-p string :start 6 :end 9)))
+ (assert-error
+  (remove-if #'alpha-char-p string :start 0 :end 6))
+ (assert-error
+  (remove-if #'alpha-char-p string :start (opaque-identity -1) :end 5))
+ (assert-error
+  (remove-if #'alpha-char-p string :start 4 :end 2))
+ (assert-error
+  (remove-if #'alpha-char-p string :start 6 :end 9))
  (assert (equal (remove-if-not #'alpha-char-p string :start 0 :end nil)
                 "aaaaa"))
  (assert (equal (remove-if-not #'alpha-char-p string :start 0 :end 5)
                 "aaaaa"))
- (assert (raises-error?
-          (remove-if-not #'alpha-char-p string :start 0 :end 6)))
- (assert (raises-error?
-          (remove-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5)))
- (assert (raises-error?
-          (remove-if-not #'alpha-char-p string :start 4 :end 2)))
- (assert (raises-error?
-          (remove-if-not #'alpha-char-p string :start 6 :end 9))))
+ (assert-error
+  (remove-if-not #'alpha-char-p string :start 0 :end 6))
+ (assert-error
+  (remove-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5))
+ (assert-error
+  (remove-if-not #'alpha-char-p string :start 4 :end 2))
+ (assert-error
+  (remove-if-not #'alpha-char-p string :start 6 :end 9)))
 (sequence-bounding-indices-test
  (format t "~&/... DELETE, DELETE-IF, DELETE-IF-NOT")
  (assert (equal (delete #\a string :start 0 :end nil) ""))
  (reset)
  (assert (equal (delete #\a string :start 0 :end 5) ""))
  (reset)
- (assert (raises-error? (delete #\a string :start 0 :end 6)))
+ (assert-error (delete #\a string :start 0 :end 6))
  (reset)
- (assert (raises-error? (delete #\a string :start (opaque-identity -1) :end 5)))
+ (assert-error (delete #\a string :start (opaque-identity -1) :end 5))
  (reset)
- (assert (raises-error? (delete #\a string :start 4 :end 2)))
+ (assert-error (delete #\a string :start 4 :end 2))
  (reset)
- (assert (raises-error? (delete #\a string :start 6 :end 9)))
+ (assert-error (delete #\a string :start 6 :end 9))
  (reset)
  (assert (equal (delete-if #'alpha-char-p string :start 0 :end nil) ""))
  (reset)
  (assert (equal (delete-if #'alpha-char-p string :start 0 :end 5) ""))
  (reset)
- (assert (raises-error?
-          (delete-if #'alpha-char-p string :start 0 :end 6)))
+ (assert-error
+  (delete-if #'alpha-char-p string :start 0 :end 6))
  (reset)
- (assert (raises-error?
-          (delete-if #'alpha-char-p string :start (opaque-identity -1) :end 5)))
+ (assert-error
+  (delete-if #'alpha-char-p string :start (opaque-identity -1) :end 5))
  (reset)
- (assert (raises-error?
-          (delete-if #'alpha-char-p string :start 4 :end 2)))
+ (assert-error
+  (delete-if #'alpha-char-p string :start 4 :end 2))
  (reset)
- (assert (raises-error?
-          (delete-if #'alpha-char-p string :start 6 :end 9)))
+ (assert-error
+  (delete-if #'alpha-char-p string :start 6 :end 9))
  (reset)
  (assert (equal (delete-if-not #'alpha-char-p string :start 0 :end nil)
                 "aaaaa"))
@@ -727,38 +735,38 @@
  (assert (equal (delete-if-not #'alpha-char-p string :start 0 :end 5)
                 "aaaaa"))
  (reset)
- (assert (raises-error?
-          (delete-if-not #'alpha-char-p string :start 0 :end 6)))
+ (assert-error
+  (delete-if-not #'alpha-char-p string :start 0 :end 6))
  (reset)
- (assert (raises-error?
-          (delete-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5)))
+ (assert-error
+  (delete-if-not #'alpha-char-p string :start (opaque-identity -1) :end 5))
  (reset)
- (assert (raises-error?
-          (delete-if-not #'alpha-char-p string :start 4 :end 2)))
+ (assert-error
+  (delete-if-not #'alpha-char-p string :start 4 :end 2))
  (reset)
- (assert (raises-error?
-          (delete-if-not #'alpha-char-p string :start 6 :end 9))))
+ (assert-error
+  (delete-if-not #'alpha-char-p string :start 6 :end 9)))
 
 ;;; Function REMOVE-DUPLICATES, DELETE-DUPLICATES
 (sequence-bounding-indices-test
  (format t "~&/Function REMOVE-DUPLICATES, DELETE-DUPLICATES")
  (assert (string= (remove-duplicates string :start 0 :end 5) "a"))
  (assert (string= (remove-duplicates string :start 0 :end nil) "a"))
- (assert (raises-error? (remove-duplicates string :start 0 :end 6)))
- (assert (raises-error? (remove-duplicates string :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (remove-duplicates string :start 4 :end 2)))
- (assert (raises-error? (remove-duplicates string :start 6 :end 9)))
+ (assert-error (remove-duplicates string :start 0 :end 6))
+ (assert-error (remove-duplicates string :start (opaque-identity -1) :end 5))
+ (assert-error (remove-duplicates string :start 4 :end 2))
+ (assert-error (remove-duplicates string :start 6 :end 9))
  (assert (string= (delete-duplicates string :start 0 :end 5) "a"))
  (reset)
  (assert (string= (delete-duplicates string :start 0 :end nil) "a"))
  (reset)
- (assert (raises-error? (delete-duplicates string :start 0 :end 6)))
+ (assert-error (delete-duplicates string :start 0 :end 6))
  (reset)
- (assert (raises-error? (delete-duplicates string :start (opaque-identity -1) :end 5)))
+ (assert-error (delete-duplicates string :start (opaque-identity -1) :end 5))
  (reset)
- (assert (raises-error? (delete-duplicates string :start 4 :end 2)))
+ (assert-error (delete-duplicates string :start 4 :end 2))
  (reset)
- (assert (raises-error? (delete-duplicates string :start 6 :end 9))))
+ (assert-error (delete-duplicates string :start 6 :end 9)))
 
 ;;; Function REPLACE
 (sequence-bounding-indices-test
@@ -767,29 +775,29 @@
  (assert (string= (replace (copy-seq "ccccc")
                            string
                            :start2 0 :end2 nil) "bbbbb"))
- (assert (raises-error? (replace string "ccccc" :start1 0 :end1 6)))
- (assert (raises-error? (replace string "ccccc" :start2 (opaque-identity -1) :end2 5)))
- (assert (raises-error? (replace string "ccccc" :start1 4 :end1 2)))
- (assert (raises-error? (replace string "ccccc" :start1 6 :end1 9))))
+ (assert-error (replace string "ccccc" :start1 0 :end1 6))
+ (assert-error (replace string "ccccc" :start2 (opaque-identity -1) :end2 5))
+ (assert-error (replace string "ccccc" :start1 4 :end1 2))
+ (assert-error (replace string "ccccc" :start1 6 :end1 9)))
 
 ;;; Function SEARCH
 (sequence-bounding-indices-test
  (format t "~&/Function SEARCH")
  (assert (= (search "aa" string :start2 0 :end2 5) 0))
  (assert (null (search string "aa" :start1 0 :end2 nil)))
- (assert (raises-error? (search "aa" string :start2 0 :end2 6)))
- (assert (raises-error? (search "aa" string :start2 (opaque-identity -1) :end2 5)))
- (assert (raises-error? (search "aa" string :start2 4 :end2 2)))
- (assert (raises-error? (search "aa" string :start2 6 :end2 9))))
+ (assert-error (search "aa" string :start2 0 :end2 6))
+ (assert-error (search "aa" string :start2 (opaque-identity -1) :end2 5))
+ (assert-error (search "aa" string :start2 4 :end2 2))
+ (assert-error (search "aa" string :start2 6 :end2 9)))
 
 ;;; Function STRING-UPCASE, STRING-DOWNCASE, STRING-CAPITALIZE,
 ;;; NSTRING-UPCASE, NSTRING-DOWNCASE, NSTRING-CAPITALIZE
 (defmacro string-case-frob (fn)
   `(progn
-    (assert (raises-error? (,fn string :start 0 :end 6)))
-    (assert (raises-error? (,fn string :start (opaque-identity -1) :end 5)))
-    (assert (raises-error? (,fn string :start 4 :end 2)))
-    (assert (raises-error? (,fn string :start 6 :end 9)))))
+     (assert-error (,fn string :start 0 :end 6))
+     (assert-error (,fn string :start (opaque-identity -1) :end 5))
+     (assert-error (,fn string :start 4 :end 2))
+     (assert-error (,fn string :start 6 :end 9))))
 
 (sequence-bounding-indices-test
  (format t "~&/Function STRING-UPCASE, STRING-DOWNCASE, STRING-CAPITALIZE, ...")
@@ -806,15 +814,15 @@
 ;;; STRING-NOT-GREATERP, STRING-NOT-LESSP
 (defmacro string-predicate-frob (fn)
   `(progn
-    (,fn string "abcde" :start1 0 :end1 5)
-    (,fn "fghij" string :start2 0 :end2 nil)
-    (assert (raises-error? (,fn string "klmno"
-                                :start1 0 :end1 6)))
-    (assert (raises-error? (,fn "pqrst" string
-                                :start2 (opaque-identity -1) :end2 5)))
-    (assert (raises-error? (,fn "uvwxy" string
-                                :start1 4 :end1 2)))
-    (assert (raises-error? (,fn string "z" :start2 6 :end2 9)))))
+     (,fn string "abcde" :start1 0 :end1 5)
+     (,fn "fghij" string :start2 0 :end2 nil)
+     (assert-error (,fn string "klmno"
+                        :start1 0 :end1 6))
+     (assert-error (,fn "pqrst" string
+                        :start2 (opaque-identity -1) :end2 5))
+     (assert-error (,fn "uvwxy" string
+                        :start1 4 :end1 2))
+     (assert-error (,fn string "z" :start2 6 :end2 9))))
 (sequence-bounding-indices-test
  (format t "~&/Function STRING=, STRING/=, STRING<, STRING>, STRING<=, STRING>=, ...")
  (string-predicate-frob string=)
@@ -841,38 +849,38 @@
  (assert (string= (substitute #\b #\a string :start 0 :end 5) "bbbbb"))
  (assert (string= (substitute #\c #\a string :start 0 :end nil)
                   "ccccc"))
- (assert (raises-error? (substitute #\b #\a string :start 0 :end 6)))
- (assert (raises-error? (substitute #\b #\a string :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (substitute #\b #\a string :start 4 :end 2)))
- (assert (raises-error? (substitute #\b #\a string :start 6 :end 9)))
+ (assert-error (substitute #\b #\a string :start 0 :end 6))
+ (assert-error (substitute #\b #\a string :start (opaque-identity -1) :end 5))
+ (assert-error (substitute #\b #\a string :start 4 :end 2))
+ (assert-error (substitute #\b #\a string :start 6 :end 9))
  (assert (string= (substitute-if #\b #'alpha-char-p string
                                  :start 0 :end 5)
                   "bbbbb"))
  (assert (string= (substitute-if #\c #'alpha-char-p string
                                  :start 0 :end nil)
                   "ccccc"))
- (assert (raises-error? (substitute-if #\b #'alpha-char-p string
-                                       :start 0 :end 6)))
- (assert (raises-error? (substitute-if #\b #'alpha-char-p string
-                                       :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (substitute-if #\b #'alpha-char-p string
-                                       :start 4 :end 2)))
- (assert (raises-error? (substitute-if #\b #'alpha-char-p string
-                                       :start 6 :end 9)))
+ (assert-error (substitute-if #\b #'alpha-char-p string
+                              :start 0 :end 6))
+ (assert-error (substitute-if #\b #'alpha-char-p string
+                              :start (opaque-identity -1) :end 5))
+ (assert-error (substitute-if #\b #'alpha-char-p string
+                              :start 4 :end 2))
+ (assert-error (substitute-if #\b #'alpha-char-p string
+                              :start 6 :end 9))
  (assert (string= (substitute-if-not #\b #'alpha-char-p string
                                      :start 0 :end 5)
                   "aaaaa"))
  (assert (string= (substitute-if-not #\c #'alpha-char-p string
                                      :start 0 :end nil)
                   "aaaaa"))
- (assert (raises-error? (substitute-if-not #\b #'alpha-char-p string
-                                           :start 0 :end 6)))
- (assert (raises-error? (substitute-if-not #\b #'alpha-char-p string
-                                           :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (substitute-if-not #\b #'alpha-char-p string
-                                           :start 4 :end 2)))
- (assert (raises-error? (substitute-if-not #\b #'alpha-char-p string
-                                           :start 6 :end 9))))
+ (assert-error (substitute-if-not #\b #'alpha-char-p string
+                                  :start 0 :end 6))
+ (assert-error (substitute-if-not #\b #'alpha-char-p string
+                                  :start (opaque-identity -1) :end 5))
+ (assert-error (substitute-if-not #\b #'alpha-char-p string
+                                  :start 4 :end 2))
+ (assert-error (substitute-if-not #\b #'alpha-char-p string
+                                  :start 6 :end 9)))
 (sequence-bounding-indices-test
  (format t "~&/... NSUBSTITUTE, NSUBSTITUTE-IF, NSUBSTITUTE-IF-NOT")
  (assert (string= (nsubstitute #\b #\a string :start 0 :end 5) "bbbbb"))
@@ -880,13 +888,13 @@
  (assert (string= (nsubstitute #\c #\a string :start 0 :end nil)
                   "ccccc"))
  (reset)
- (assert (raises-error? (nsubstitute #\b #\a string :start 0 :end 6)))
+ (assert-error (nsubstitute #\b #\a string :start 0 :end 6))
  (reset)
- (assert (raises-error? (nsubstitute #\b #\a string :start (opaque-identity -1) :end 5)))
+ (assert-error (nsubstitute #\b #\a string :start (opaque-identity -1) :end 5))
  (reset)
- (assert (raises-error? (nsubstitute #\b #\a string :start 4 :end 2)))
+ (assert-error (nsubstitute #\b #\a string :start 4 :end 2))
  (reset)
- (assert (raises-error? (nsubstitute #\b #\a string :start 6 :end 9)))
+ (assert-error (nsubstitute #\b #\a string :start 6 :end 9))
  (reset)
  (assert (string= (nsubstitute-if #\b #'alpha-char-p string
                                   :start 0 :end 5)
@@ -896,17 +904,17 @@
                                   :start 0 :end nil)
                   "ccccc"))
  (reset)
- (assert (raises-error? (nsubstitute-if #\b #'alpha-char-p string
-                                        :start 0 :end 6)))
+ (assert-error (nsubstitute-if #\b #'alpha-char-p string
+                               :start 0 :end 6))
  (reset)
- (assert (raises-error? (nsubstitute-if #\b #'alpha-char-p string
-                                        :start (opaque-identity -1) :end 5)))
+ (assert-error (nsubstitute-if #\b #'alpha-char-p string
+                               :start (opaque-identity -1) :end 5))
  (reset)
- (assert (raises-error? (nsubstitute-if #\b #'alpha-char-p string
-                                        :start 4 :end 2)))
+ (assert-error (nsubstitute-if #\b #'alpha-char-p string
+                               :start 4 :end 2))
  (reset)
- (assert (raises-error? (nsubstitute-if #\b #'alpha-char-p string
-                                        :start 6 :end 9)))
+ (assert-error (nsubstitute-if #\b #'alpha-char-p string
+                               :start 6 :end 9))
  (reset)
  (assert (string= (nsubstitute-if-not #\b #'alpha-char-p string
                                       :start 0 :end 5)
@@ -916,40 +924,40 @@
                                       :start 0 :end nil)
                   "aaaaa"))
  (reset)
- (assert (raises-error? (nsubstitute-if-not #\b #'alpha-char-p string
-                                            :start 0 :end 6)))
+ (assert-error (nsubstitute-if-not #\b #'alpha-char-p string
+                                   :start 0 :end 6))
  (reset)
- (assert (raises-error? (nsubstitute-if-not #\b #'alpha-char-p string
-                                            :start (opaque-identity -1) :end 5)))
+ (assert-error (nsubstitute-if-not #\b #'alpha-char-p string
+                                   :start (opaque-identity -1) :end 5))
  (reset)
- (assert (raises-error? (nsubstitute-if-not #\b #'alpha-char-p string
-                                            :start 4 :end 2)))
+ (assert-error (nsubstitute-if-not #\b #'alpha-char-p string
+                                   :start 4 :end 2))
  (reset)
- (assert (raises-error? (nsubstitute-if-not #\b #'alpha-char-p string
-                                            :start 6 :end 9))))
+ (assert-error (nsubstitute-if-not #\b #'alpha-char-p string
+                                   :start 6 :end 9)))
 ;;; Function WRITE-STRING, WRITE-LINE
 (sequence-bounding-indices-test
  (format t "~&/Function WRITE-STRING, WRITE-LINE")
  (write-string string *standard-output* :start 0 :end 5)
  (write-string string *standard-output* :start 0 :end nil)
- (assert (raises-error? (write-string string *standard-output*
-                                      :start 0 :end 6)))
- (assert (raises-error? (write-string string *standard-output*
-                                      :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (write-string string *standard-output*
-                                      :start 4 :end 2)))
- (assert (raises-error? (write-string string *standard-output*
-                                      :start 6 :end 9)))
+ (assert-error (write-string string *standard-output*
+                             :start 0 :end 6))
+ (assert-error (write-string string *standard-output*
+                             :start (opaque-identity -1) :end 5))
+ (assert-error (write-string string *standard-output*
+                             :start 4 :end 2))
+ (assert-error (write-string string *standard-output*
+                             :start 6 :end 9))
  (write-line string *standard-output* :start 0 :end 5)
  (write-line string *standard-output* :start 0 :end nil)
- (assert (raises-error? (write-line string *standard-output*
-                                      :start 0 :end 6)))
- (assert (raises-error? (write-line string *standard-output*
-                                      :start (opaque-identity -1) :end 5)))
- (assert (raises-error? (write-line string *standard-output*
-                                      :start 4 :end 2)))
- (assert (raises-error? (write-line string *standard-output*
-                                      :start 6 :end 9))))
+ (assert-error (write-line string *standard-output*
+                           :start 0 :end 6))
+ (assert-error (write-line string *standard-output*
+                           :start (opaque-identity -1) :end 5))
+ (assert-error (write-line string *standard-output*
+                           :start 4 :end 2))
+ (assert-error (write-line string *standard-output*
+                           :start 6 :end 9)))
 
 ;;; Macro WITH-INPUT-FROM-STRING
 (sequence-bounding-indices-test
@@ -958,18 +966,18 @@
    (assert (char= (read-char s) #\a)))
  (with-input-from-string (s string :start 0 :end nil)
    (assert (char= (read-char s) #\a)))
- (assert (raises-error?
-          (with-input-from-string (s string :start 0 :end 6)
-            (read-char s))))
- (assert (raises-error?
-          (with-input-from-string (s string :start (opaque-identity -1) :end 5)
-            (read-char s))))
- (assert (raises-error?
-          (with-input-from-string (s string :start 4 :end 2)
-            (read-char s))))
- (assert (raises-error?
-          (with-input-from-string (s string :start 6 :end 9)
-            (read-char s)))))
+ (assert-error
+  (with-input-from-string (s string :start 0 :end 6)
+    (read-char s)))
+ (assert-error
+  (with-input-from-string (s string :start (opaque-identity -1) :end 5)
+    (read-char s)))
+ (assert-error
+  (with-input-from-string (s string :start 4 :end 2)
+    (read-char s)))
+ (assert-error
+  (with-input-from-string (s string :start 6 :end 9)
+    (read-char s))))
 
 ;;; testing bit-bashing according to _The Practice of Programming_
 (defun fill-bytes-for-testing (bitsize)
@@ -1146,16 +1154,16 @@
   (assert (equal l '(z z y)))
   (assert (eq l (fill l 1)))
   (assert (equal l '(1 1 1)))
-  (assert (raises-error? (fill l 0 :start 4)))
-  (assert (raises-error? (fill l 0 :end 4)))
-  (assert (raises-error? (fill l 0 :start 2 :end 1))))
+  (assert-error (fill l 0 :start 4))
+  (assert-error (fill l 0 :end 4))
+  (assert-error (fill l 0 :start 2 :end 1)))
 
 ;;; Both :TEST and :TEST-NOT provided
 (with-test (:name :test-and-test-not-to-adjoin)
-  (let* ((wc 0)
+  (let* ((wc 0) ; warning counter
          (fun
           (handler-bind (((and warning (not style-warning))
-                          (lambda (w) (incf wc))))
+                          (lambda (w) (declare (ignore w)) (incf wc))))
             (compile nil `(lambda (item test test-not) (adjoin item '(1 2 3 :foo)
                                                                :test test
                                                                :test-not test-not))))))
@@ -1176,16 +1184,17 @@
   (dolist (type '(%string %simple-string string-3 simple-string-3))
     (assert (string= "foo" (coerce '(#\f #\o #\o) type)))
     (assert (string= "foo" (map type 'identity #(#\f #\o #\o))))
-    (assert (string= "foo" (merge type '(#\o) '(#\f #\o) 'char<)))
+    (assert (string= "foo" (merge type (copy-seq '(#\o)) (copy-seq '(#\f #\o))
+                                  'char<)))
     (assert (string= "foo" (concatenate type '(#\f) "oo")))
     (assert (string= "ooo" (make-sequence type 3 :initial-element #\o)))))
 (with-test (:name :user-defined-string-types-map-etc-error)
   (dolist (type '(string-3 simple-string-3))
-    (assert (raises-error? (coerce '(#\q #\u #\u #\x) type)))
-    (assert (raises-error? (map type 'identity #(#\q #\u #\u #\x))))
-    (assert (raises-error? (merge type '(#\q #\x) "uu" 'char<)))
-    (assert (raises-error? (concatenate type "qu" '(#\u #\x))))
-    (assert (raises-error? (make-sequence type 4 :initial-element #\u)))))
+    (assert-error (coerce '(#\q #\u #\u #\x) type))
+    (assert-error (map type 'identity #(#\q #\u #\u #\x)))
+    (assert-error (merge type (copy-seq '(#\q #\x)) (copy-seq "uu") 'char<))
+    (assert-error (concatenate type "qu" '(#\u #\x)))
+    (assert-error (make-sequence type 4 :initial-element #\u))))
 
 (defun test-bit-position (size set start end from-end res)
   (let ((v (make-array size :element-type 'bit :initial-element 0)))
@@ -1275,5 +1284,16 @@
 
 (with-test (:name (:bit-position :random-test))
   (random-test-bit-position 10000))
+
+;; REVERSE and NREVERSE should assert that the returned value
+;; from a generic sequence operation is of type SEQUENCE.
+(defclass bogus-reversal-seq (sequence standard-object) ())
+(defmethod sequence:reverse ((self bogus-reversal-seq))
+  #2a((x y) (1 2)))
+(with-test (:name :generic-sequence-reverse)
+  (assert-error (reverse (make-instance 'bogus-reversal-seq))))
+
+(with-test (:name :abstract-base-sequence-satisfies-sequencep)
+  (assert (typep (sb-pcl::class-prototype (find-class 'sequence)) 'sequence)))
 
 ;;; success

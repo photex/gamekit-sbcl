@@ -24,7 +24,7 @@
   (let ((drop-through (gen-label)))
     (generate-fixnum-test value)
     (inst jmp :z (if not-p drop-through target))
-    (%test-headers value target not-p nil headers drop-through)))
+    (%test-headers value target not-p nil headers :drop-through drop-through)))
 
 (defun %test-immediate (value target not-p immediate)
   ;; Code a single instruction byte test if possible.
@@ -55,7 +55,7 @@
   (inst jmp (if not-p :ne :e) target))
 
 (defun %test-headers (value target not-p function-p headers
-                            &optional (drop-through (gen-label)))
+                            &key except (drop-through (gen-label)))
   (let ((lowtag (if function-p fun-pointer-lowtag other-pointer-lowtag)))
     (multiple-value-bind (equal less-or-equal greater-or-equal when-true when-false)
         ;; EQUAL, LESS-OR-EQUAL and GREATER-OR-EQUAL are the conditions for
@@ -68,6 +68,7 @@
       (%test-lowtag value when-false t lowtag)
       (cond
         ((and (null (cdr headers))
+              (not except)
               (numberp (car headers)))
          ;; Optimize the common case: referencing the value from memory
          ;; is slightly smaller than loading it and then doing the
@@ -79,6 +80,9 @@
          (inst jmp equal target))
         (t
          (inst mov al-tn (make-ea :byte :base value :disp (- lowtag)))
+         (dolist (widetag except)
+           (inst cmp al-tn widetag)
+           (inst jmp :e when-false))
          (do ((remaining headers (cdr remaining)))
              ((null remaining))
            (let ((header (car remaining))
@@ -89,6 +93,8 @@
                   ((and (not last) (null (cddr remaining))
                         (atom (cadr remaining))
                         (= (logcount (logxor header (cadr remaining))) 1))
+                   ;; FIXME: (VECTOR T) does not and could not admit this hack.
+                   ;; The others could but are broken except for BIT-VECTOR.
                    ;; BASE-STRING, (VECTOR NIL), BIT-VECTOR, (VECTOR T)
                    (inst and al-tn (ldb (byte 8 0) (logeqv header (cadr remaining))))
                    (inst cmp al-tn (ldb (byte 8 0) (logand header (cadr remaining))))
@@ -437,34 +443,65 @@
 (define-vop (symbolp type-predicate)
   (:translate symbolp)
   (:generator 12
-    (let ((is-symbol-label (if not-p drop-thru target)))
-      (inst cmp value nil-value)
+    (let ((is-symbol-label (if not-p DROP-THRU target))
+          (widetag-tn (make-ea :byte :base value :disp (- other-pointer-lowtag))))
+      ;; It could have been done with just TEST-TYPE, but using CMP on
+      ;; EAX saves one byte, this basically unrolls TEST-TYPE and
+      ;; inserts a comparison to NIL in the middle.
+      (inst lea eax-tn widetag-tn)
+      (inst cmp eax-tn (- nil-value other-pointer-lowtag))
       (inst jmp :e is-symbol-label)
-      (test-type value target not-p (symbol-header-widetag)))
+      (inst test al-tn other-pointer-lowtag)
+      (inst jmp :nz (if not-p target drop-thru))
+      (inst cmp widetag-tn symbol-header-widetag)
+      (inst jmp (if not-p :ne :e) target))
     DROP-THRU))
 
 (define-vop (check-symbol check-type)
   (:generator 12
-    (let ((error (generate-error-code vop 'object-not-symbol-error value)))
-      (inst cmp value nil-value)
+    (let ((error (generate-error-code vop 'object-not-symbol-error value))
+          (widetag-tn (make-ea :byte :base value :disp (- other-pointer-lowtag))))
+      (inst lea eax-tn widetag-tn)
+      (inst cmp eax-tn (- nil-value other-pointer-lowtag))
       (inst jmp :e drop-thru)
-      (test-type value error t (symbol-header-widetag)))
+      (inst test al-tn other-pointer-lowtag)
+      (inst jmp :nz error)
+      (inst cmp widetag-tn symbol-header-widetag)
+      (inst jmp :ne error))
     DROP-THRU
     (move result value)))
 
 (define-vop (consp type-predicate)
   (:translate consp)
   (:generator 8
-    (let ((is-not-cons-label (if not-p target drop-thru)))
-      (inst cmp value nil-value)
-      (inst jmp :e is-not-cons-label)
-      (test-type value target not-p (list-pointer-lowtag)))
+     (let ((is-not-cons-label (if not-p target drop-thru)))
+       ;; It could have been done with just TEST-TYPE, but using CMP on
+       ;; EAX saves one byte, this basically unrolls TEST-TYPE and
+       ;; inserts a comparison to NIL in the middle.
+       (inst lea eax-tn (make-ea :dword :base value :disp (- list-pointer-lowtag)))
+       (inst cmp eax-tn (- nil-value list-pointer-lowtag))
+       (inst jmp :e is-not-cons-label)
+       (inst test al-tn other-pointer-lowtag)
+       (inst jmp (if not-p :nz :z) target))
     DROP-THRU))
 
 (define-vop (check-cons check-type)
   (:generator 8
     (let ((error (generate-error-code vop 'object-not-cons-error value)))
-      (inst cmp value nil-value)
+      (inst lea eax-tn (make-ea :dword :base value :disp (- list-pointer-lowtag)))
+      (inst cmp eax-tn (- nil-value list-pointer-lowtag))
       (inst jmp :e error)
-      (test-type value error t (list-pointer-lowtag))
+      (inst test al-tn other-pointer-lowtag)
+      (inst jmp :nz error)
       (move result value))))
+
+;; A vop that accepts a computed set of widetags.
+(define-vop (%other-pointer-subtype-p type-predicate)
+  (:translate %other-pointer-subtype-p)
+  (:info target not-p widetags)
+  (:arg-types * (:constant t)) ; voodoo - 'target' and 'not-p' are absent
+  (:generator 15 ; arbitrary
+    (multiple-value-bind (headers exceptions)
+        (canonicalize-headers-and-exceptions widetags)
+      (%test-headers value target not-p nil headers
+                     :except exceptions))))

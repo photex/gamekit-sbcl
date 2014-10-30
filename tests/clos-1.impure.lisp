@@ -33,23 +33,23 @@
   (slot-value x 'c))
 
 (let ((fun (compile nil '(lambda (x) (slot-value x 'a)))))
-  (dotimes (i 4) ; KLUDGE: get caches warm
+  (dotimes (i 4)                        ; KLUDGE: get caches warm
     (assert (= 1 (slot-value *foo* 'a)))
     (assert (= 1 (a-of *foo*)))
     (assert (= 1 (funcall fun *foo*)))
-    (assert (raises-error? (b-of *foo*)))
-    (assert (raises-error? (c-of *foo*)))))
+    (assert-error (b-of *foo*))
+    (assert-error (c-of *foo*))))
 
 (defclass foo ()
   ((b :initarg :b :initform 3) (a :initarg :a)))
 
 (let ((fun (compile nil '(lambda (x) (slot-value x 'a)))))
-  (dotimes (i 4) ; KLUDGE: get caches warm
+  (dotimes (i 4)                        ; KLUDGE: get caches warm
     (assert (= 1 (slot-value *foo* 'a)))
     (assert (= 1 (a-of *foo*)))
     (assert (= 1 (funcall fun *foo*)))
     (assert (= 3 (b-of *foo*)))
-    (assert (raises-error? (c-of *foo*)))))
+    (assert-error (c-of *foo*))))
 
 (defclass foo ()
   ((c :initarg :c :initform t :allocation :class)
@@ -81,12 +81,12 @@
   ((b :initarg :b :initform 3)))
 
 (let ((fun (compile nil '(lambda (x) (slot-value x 'a)))))
-  (dotimes (i 4) ; KLUDGE: get caches warm
-    (assert (raises-error? (slot-value *foo* 'a)))
-    (assert (raises-error? (a-of *foo*)))
-    (assert (raises-error? (funcall fun *foo*)))
+  (dotimes (i 4)                        ; KLUDGE: get caches warm
+    (assert-error (slot-value *foo* 'a))
+    (assert-error (a-of *foo*))
+    (assert-error (funcall fun *foo*))
     (assert (= 3 (b-of *foo*)))
-    (assert (raises-error? (c-of *foo*)))))
+    (assert-error (c-of *foo*))))
 
 ;;; test that :documentation argument to slot specifiers are used as
 ;;; the docstrings of accessor methods.
@@ -183,4 +183,18 @@
   (assert (sb-kernel::args-type-keyp (sb-c::info :function :type 'foo)))
   (assert (sb-kernel::args-type-allowp (sb-c::info :function :type 'foo))))
 
+(fmakunbound 'foo)
+(with-test (:name (defmethod symbol-macrolet))
+  (symbol-macrolet ((cnm (call-next-method)))
+    (defmethod foo ((x number)) (1+ cnm)))
+  (defmethod foo ((x t)) 3)
+  (assert (= (foo t) 3))
+  (assert (= (foo 3) 4)))
 
+(fmakunbound 'foo)
+(define-symbol-macro magic-cnm (call-next-method))
+(with-test (:name (defmethod define-symbol-macro))
+  (defmethod foo ((x number)) (1- magic-cnm))
+  (defmethod foo ((x t)) 3)
+  (assert (= (foo t) 3))
+  (assert (= (foo 3) 2)))

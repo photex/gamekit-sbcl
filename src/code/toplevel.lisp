@@ -30,14 +30,13 @@
                   *allow-with-interrupts*
                   *interrupts-enabled*
                   *interrupt-pending*
-                  #!+sb-thruption *thruption-pending*
-                  *type-system-initialized*))
+                  #!+sb-thruption *thruption-pending*))
 
-(defvar *cold-init-complete-p*)
+(!defglobal *cold-init-complete-p* nil)
 
 ;;; counts of nested errors (with internal errors double-counted)
-(defvar *maximum-error-depth*)
-(defvar *current-error-depth*)
+(!defvar *maximum-error-depth* 10)
+(!defvar *current-error-depth* 0)
 
 ;;;; default initfiles
 
@@ -89,6 +88,7 @@ been specified on the command-line.")
 (defvar *exit-in-process* nil)
 (declaim (type (or null real) *exit-timeout*))
 (defvar *exit-timeout* 60
+  #!+sb-doc
   "Default amount of seconds, if any, EXIT should wait for other
 threads to finish after terminating them. Default value is 60. NIL
 means to wait indefinitely.")
@@ -138,27 +138,28 @@ means to wait indefinitely.")
 (defun infinite-error-protector ()
   (/show0 "entering INFINITE-ERROR-PROTECTOR, *CURRENT-ERROR-DEPTH*=..")
   (/hexstr *current-error-depth*)
-  (cond ((not *cold-init-complete-p*)
-         (%primitive print "Argh! error in cold init, halting")
-         (%primitive sb!c:halt))
-        ((or (not (boundp '*current-error-depth*))
-             (not (realp   *current-error-depth*))
-             (not (boundp '*maximum-error-depth*))
-             (not (realp   *maximum-error-depth*)))
-         (%primitive print "Argh! corrupted error depth, halting")
-         (%primitive sb!c:halt))
-        ((> *current-error-depth* *maximum-error-depth*)
-         (/show0 "*MAXIMUM-ERROR-DEPTH*=..")
-         (/hexstr *maximum-error-depth*)
-         (/show0 "in INFINITE-ERROR-PROTECTOR, calling ERROR-ERROR")
-         (error-error "Help! "
-                      *current-error-depth*
-                      " nested errors. "
-                      "SB-KERNEL:*MAXIMUM-ERROR-DEPTH* exceeded.")
-         t)
-        (t
-         (/show0 "returning normally from INFINITE-ERROR-PROTECTOR")
-         nil)))
+  (unless *cold-init-complete-p*
+    (%primitive print "Argh! error in cold init, halting")
+    (%primitive sb!c:halt))
+  ;; Checking BOUNDP on these variables would be superfluous
+  ;; because REALP will return false for unbound-marker.
+  (let ((cur (locally (declare (optimize (safety 0))) *current-error-depth*))
+        (max (locally (declare (optimize (safety 0))) *maximum-error-depth*)))
+    (cond ((or (not (realp cur)) (not (realp max))) ; why not just FIXNUMP?
+           (%primitive print "Argh! corrupted error depth, halting")
+           (%primitive sb!c:halt))
+          ((> cur max)
+           (/show0 "*MAXIMUM-ERROR-DEPTH*=..")
+           (/hexstr max)
+           (/show0 "in INFINITE-ERROR-PROTECTOR, calling ERROR-ERROR")
+           (error-error "Help! "
+                        cur
+                        " nested errors. "
+                        "SB-KERNEL:*MAXIMUM-ERROR-DEPTH* exceeded.")
+           t)
+          (t
+           (/show0 "returning normally from INFINITE-ERROR-PROTECTOR")
+           nil))))
 
 ;;;; miscellaneous external functions
 
@@ -173,19 +174,19 @@ means to wait indefinitely.")
                                                     (load-time-value 1f9 t))))))))
     (declare (inline split-float))
     (typecase seconds
-      ((single-float 0f0 #.(float most-positive-fixnum 1f0))
+      ((single-float 0f0 #.(float sb!xc:most-positive-fixnum 1f0))
        (split-float))
-      ((double-float 0d0 #.(float most-positive-fixnum 1d0))
+      ((double-float 0d0 #.(float sb!xc:most-positive-fixnum 1d0))
        (split-float))
       (ratio
        (multiple-value-bind (quot rem) (truncate (numerator seconds)
                                                  (denominator seconds))
          (values quot
                  (* rem
-                    (if (typep 1000000000 'fixnum)
-                        (truncate 1000000000 (denominator seconds))
-                        ;; Can't truncate a bignum by a fixnum without consing
-                        (* 10 (truncate 100000000 (denominator seconds))))))))
+                    #.(if (sb!xc:typep 1000000000 'fixnum)
+                          '(truncate 1000000000 (denominator seconds))
+                          ;; Can't truncate a bignum by a fixnum without consing
+                          '(* 10 (truncate 100000000 (denominator seconds))))))))
       (t
        (multiple-value-bind (sec frac)
            (truncate seconds)
@@ -283,19 +284,6 @@ any non-negative real number."
             (force-output stream))))
       :next))
   (values))
-
-(defun stream-output-stream (stream)
-  (typecase stream
-    (fd-stream
-     stream)
-    (synonym-stream
-     (stream-output-stream
-      (symbol-value (synonym-stream-symbol stream))))
-    (two-way-stream
-     (stream-output-stream
-      (two-way-stream-output-stream stream)))
-    (t
-     stream)))
 
 (defun process-init-file (specified-pathname kind)
   (multiple-value-bind (context default-function)
@@ -500,7 +488,7 @@ any non-negative real number."
 
     ;; Disable debugger before processing initialization files & co.
     (when disable-debugger
-      (sb!ext:disable-debugger))
+      (disable-debugger))
 
     ;; Handle initialization files.
     (/show0 "handling initialization files in TOPLEVEL-INIT")

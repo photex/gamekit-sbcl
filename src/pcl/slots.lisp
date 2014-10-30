@@ -477,7 +477,7 @@
        ;; In the vast majority of cases location corresponds to the position
        ;; in list. The only exceptions are when there are non-local slots
        ;; before the one we want.
-       (let* ((slots (wrapper-slots (wrapper-of instance)))
+       (let* ((slots (layout-slot-list (layout-of instance)))
               (guess (nth position slots)))
          (if (eql position (slot-definition-location guess))
              (slot-definition-name guess)
@@ -491,9 +491,8 @@
 ;;; care of this for non-standard-classes.
 (defmethod allocate-instance ((class standard-class) &rest initargs)
   (declare (ignore initargs))
-  (unless (class-finalized-p class)
-    (finalize-inheritance class))
-  (allocate-standard-instance (class-wrapper class)))
+  (allocate-standard-instance
+   (class-wrapper (ensure-class-finalized class))))
 
 (defmethod allocate-instance ((class structure-class) &rest initargs)
   (declare (ignore initargs))
@@ -506,9 +505,11 @@
   (declare (ignore initargs))
   (allocate-condition (class-name class)))
 
-(defmethod allocate-instance ((class built-in-class) &rest initargs)
-  (declare (ignore initargs))
-  (error "Cannot allocate an instance of ~S." class)) ; So sayeth AMOP
+(macrolet ((def (name class)
+             `(defmethod ,name ((class ,class) &rest initargs)
+                (declare (ignore initargs))
+                (error "Cannot allocate an instance of ~S." class))))
+  (def allocate-instance system-class))
 
 ;;; AMOP says that CLASS-SLOTS signals an error for unfinalized classes.
 (defmethod class-slots :before ((class slot-class))

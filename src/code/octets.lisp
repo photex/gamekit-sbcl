@@ -186,32 +186,57 @@ one-past-the-end"
          ;; Create the lookup table.
          (sorted-lookup-table
           (reduce #'append sorted-pairs :from-end t :initial-value nil)))
-    `(progn
-       ; Can't inline it with a non-null lexical environment anyway.
+    (flet ((pick-type (vector &optional missing-points-p)
+             (if missing-points-p
+                 (let ((max (reduce #'max (remove nil vector))))
+                   (cond ((<= max #x7F) '(signed-byte 8))
+                         ((<= max #x7FFF) '(signed-byte 16))
+                         (t '(signed-byte 32))))
+                 (let ((max (reduce #'max vector)))
+                   (cond ((<= max #xFF) '(unsigned-byte 8))
+                         ((<= max #xFFFF) '(unsigned-byte 16))
+                         (t '(unsigned-byte 32)))))))
+      `(progn
+         ;; We *could* inline this, but it's not obviously the right thing,
+         ;; because each use of the inlined function in a different file
+         ;; would be forced to dump the large-ish array. To do things like
+         ;; this, you generally want a load-time ref to a global constant.
        ;(declaim (inline ,byte-char-name))
-       (let ((byte-to-code-table
-              ,(make-array 256 :element-type t #+nil 'char-code
-                           :initial-contents (loop for byte below 256
-                                                collect
-                                                (let ((exception (cdr (assoc byte exceptions))))
-                                                  (if exception
-                                                      (car exception)
-                                                      byte)))))
-             (code-to-byte-table
-              ,(make-array (length sorted-lookup-table)
-                           :initial-contents sorted-lookup-table)))
          (defun ,byte-char-name (byte)
            (declare (optimize speed (safety 0))
                     (type (unsigned-byte 8) byte))
-           (aref byte-to-code-table byte))
+           ,(let ((byte-to-code
+                   (loop for byte below 256
+                      collect (let ((exception (cdr (assoc byte exceptions))))
+                                (if exception
+                                    (car exception)
+                                    byte)))))
+              (if (position nil byte-to-code)
+                  ;; There are bytes with no translation. Represent "missing"
+                  ;; as -1 when stored, convert to NIL when accessed.
+                  ;; We could use a single otherwise-unused point to mean NIL,
+                  ;; but it would be confusing if in one table #xFFFF represents
+                  ;; NIL and another #xF00D represents NIL.
+                  `(let ((code (aref ,(!make-specialized-array
+                                       256 (pick-type byte-to-code t)
+                                       (substitute -1 nil byte-to-code))
+                                     byte)))
+                     (if (>= code 0) code))
+                  ;; Every byte has a translation
+                  `(aref ,(!make-specialized-array
+                           256 (pick-type byte-to-code) byte-to-code)
+                         byte))))
          (defun ,code-byte-name (code)
            (declare (optimize speed (safety 0))
                     (type char-code code))
            (if (< code ,lowest-non-equivalent-code)
                code
-               ;; We could toss in some TRULY-THEs if we really needed to
-               ;; make this faster...
-               (loop with low = 0
+               (loop with code-to-byte-table =
+                    ,(!make-specialized-array
+                      (length sorted-lookup-table)
+                      (pick-type sorted-lookup-table)
+                      sorted-lookup-table)
+                  with low = 0
                   with high = (- (length code-to-byte-table) 2)
                   while (< low high)
                   do (let ((mid (logandc2 (truncate (+ low high 2) 2) 1)))
@@ -336,12 +361,13 @@ one-past-the-end"
       ;; doesn't seem very sensible.
       #!-sb-unicode
       (setf *default-external-format* :latin-1)
-      (let ((external-format #!-win32 (intern (or (sb!alien:alien-funcall
-                                                    (extern-alien
-                                                      "nl_langinfo"
-                                                      (function (c-string :external-format :latin-1)
-                                                                int))
-                                                    sb!unix:codeset)
+      (let ((external-format #!-win32 (intern (or #!-android
+                                                  (alien-funcall
+                                                   (extern-alien
+                                                    "nl_langinfo"
+                                                    (function (c-string :external-format :latin-1)
+                                                              int))
+                                                   sb!unix:codeset)
                                                   "LATIN-1")
                                               "KEYWORD")
                              #!+win32 (sb!win32::ansi-codepage)))
@@ -349,7 +375,7 @@ one-past-the-end"
         #!+sb-show
         (cold-print external-format)
         (/show0 "matching to known aliases")
-        (let ((entry (sb!impl::get-external-format external-format)))
+        (let ((entry (get-external-format external-format)))
           (cond
             (entry
              (/show0 "matched"))
@@ -374,9 +400,9 @@ one-past-the-end"
 ;;;; public interface
 
 (defun maybe-defaulted-external-format (external-format)
-  (sb!impl::get-external-format-or-lose (if (eq external-format :default)
-                                            (default-external-format)
-                                            external-format)))
+  (get-external-format-or-lose (if (eq external-format :default)
+                                   (default-external-format)
+                                   external-format)))
 
 (defun octets-to-string (vector &key (external-format :default) (start 0) end)
   (declare (type (vector (unsigned-byte 8)) vector))
@@ -386,7 +412,7 @@ one-past-the-end"
                     :check-fill-pointer t)
     (declare (type (simple-array (unsigned-byte 8) (*)) vector))
     (let ((ef (maybe-defaulted-external-format external-format)))
-      (funcall (sb!impl::ef-octets-to-string-fun ef) vector start end))))
+      (funcall (ef-octets-to-string-fun ef) vector start end))))
 
 (defun string-to-octets (string &key (external-format :default)
                          (start 0) end null-terminate)
@@ -397,7 +423,7 @@ one-past-the-end"
                     :check-fill-pointer t)
     (declare (type simple-string string))
     (let ((ef (maybe-defaulted-external-format external-format)))
-      (funcall (sb!impl::ef-string-to-octets-fun ef) string start end
+      (funcall (ef-string-to-octets-fun ef) string start end
                (if null-terminate 1 0)))))
 
 #!+sb-unicode

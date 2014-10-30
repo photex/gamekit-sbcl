@@ -11,10 +11,6 @@
 
 (in-package "SB!VM")
 
-;;; the size of an INTEGER representation of a SYSTEM-AREA-POINTER, i.e.
-;;; size of a native memory address
-(deftype sap-int () '(unsigned-byte 32))
-
 ;;;; register specs
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -140,28 +136,6 @@
           (incf index))))
     `(progn
        ,@(forms))))
-
-;;; The DEFINE-STORAGE-CLASS call for CATCH-BLOCK refers to the size
-;;; of CATCH-BLOCK. The size of CATCH-BLOCK isn't calculated until
-;;; later in the build process, and the calculation is entangled with
-;;; code which has lots of predependencies, including dependencies on
-;;; the prior call of DEFINE-STORAGE-CLASS. The proper way to
-;;; unscramble this would be to untangle the code, so that the code
-;;; which calculates the size of CATCH-BLOCK can be separated from the
-;;; other lots-of-dependencies code, so that the code which calculates
-;;; the size of CATCH-BLOCK can be executed early, so that this value
-;;; is known properly at this point in compilation. However, that
-;;; would be a lot of editing of code that I (WHN 19990131) can't test
-;;; until the project is complete. So instead, I set the correct value
-;;; by hand here (a sort of nondeterministic guess of the right
-;;; answer:-) and add an assertion later, after the value is
-;;; calculated, that the original guess was correct.
-;;;
-;;; (What a KLUDGE! Anyone who wants to come in and clean up this mess
-;;; has my gratitude.) (FIXME: Maybe this should be me..)
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (def!constant kludge-nondeterministic-catch-block-size
-      #!-win32 5 #!+win32 7))
 
 (!define-storage-classes
 
@@ -325,7 +299,7 @@
                     :alternate-scs (complex-long-stack))
 
   ;; a catch or unwind block
-  (catch-block stack :element-size kludge-nondeterministic-catch-block-size))
+  (catch-block stack :element-size catch-block-size))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
 (defparameter *byte-sc-names*

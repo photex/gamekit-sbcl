@@ -131,9 +131,7 @@
     (weaken-integer-type-part type 'integer)))
 
 (defun-cached
-    (weaken-type :hash-bits 8
-                 :hash-function (lambda (x)
-                                  (logand (type-hash-value x) #xFF)))
+    (weaken-type :hash-bits 7 :hash-function #'type-hash-value)
     ((type eq))
   (declare (type ctype type))
   (cond ((named-type-p type)
@@ -420,6 +418,51 @@
     (cond ((not dest) nil)
           (t t))))
 
+;; Type specifiers handled by the general-purpose MAKE-TYPE-CHECK-FORM are often
+;; trivial enough to have an internal error number assigned to them that can be
+;; used in lieu of OBJECT-NOT-TYPE-ERROR. On x86-64 this saves 16 bytes: 1 word
+;; for the symbol in the function's constant area, a MOV instruction to load it,
+;; and an sc-offset in the error trap.
+(defglobal **type-spec-interr-symbols**
+    (let* ((entries
+            ;; read-time-eval so that during cold-init we can recreate the
+            ;; table using the target's sxhash function, but without relying
+            ;; on readiness of the type system for parsing/unparsing specifiers.
+            #.(map 'vector
+                   (lambda (entry)
+                     (cons (type-specifier (specifier-type (car entry)))
+                           (cdr entry)))
+                   (remove-if #'stringp sb!c:*backend-internal-errors*
+                              :key #'car)))
+           ;; This is effectively a compact read-only binned hashtable.
+           (hashtable (make-array (logior (length entries) 1)
+                                  :initial-element nil)))
+        ;; Older architectures don't have a VOP that can emit an arbitrary
+        ;; primitive trap (see "compiler/generic/type-error" - and fix that)
+        #!-(or alpha hppa mips)
+        (map nil
+             (lambda (entry)
+               (let* ((canon-type (car entry))
+                      (bucket (mod (sxhash canon-type) (length hashtable))))
+                 (push entry (svref hashtable bucket))))
+             entries)
+        hashtable))
+(defun %interr-symbol-for-type-spec (spec)
+  (let ((table **type-spec-interr-symbols**))
+    (cdr (assoc spec (svref table (rem (sxhash spec) (length table)))
+                :test #'equal))))
+#+nil ; some meta-analysis to decide what types should be in "generic/interr"
+(progn
+  (defvar *checkgen-used-types* (make-hash-table :test 'equal))
+  (defun interr-symbol-for-type-spec (spec)
+    (let ((answer (%interr-symbol-for-type-spec spec))
+          (meta (gethash spec *checkgen-used-types*)))
+      ;; spec -> (count . primitive-p)
+      (if meta
+          (incf (car meta))
+          (setf (gethash spec *checkgen-used-types*) (cons 1 answer)))
+      answer)))
+
 ;;; Return a lambda form that we can convert to do a hairy type check
 ;;; of the specified TYPES. TYPES is a list of the format returned by
 ;;; LVAR-CHECK-TYPES in the :HAIRY case.
@@ -436,11 +479,14 @@
                    (let* ((spec
                            (let ((*unparse-fun-type-simplify* t))
                              (type-specifier (second type))))
-                          (test (if (first type) `(not ,spec) spec)))
+                          (test (if (first type) `(not ,spec) spec))
+                          (external-spec (type-specifier (third type)))
+                          (interr-symbol
+                           (%interr-symbol-for-type-spec external-spec)))
                      `(unless (typep ,temp ',test)
-                        (%type-check-error
-                         ,temp
-                         ',(type-specifier (third type))))))
+                        ,(if interr-symbol
+                             `(%type-check-error/c ,temp ',interr-symbol)
+                             `(%type-check-error ,temp ',external-spec)))))
                  temps
                  types)
        (values ,@temps))))

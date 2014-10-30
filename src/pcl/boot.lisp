@@ -322,36 +322,40 @@ bootstrapping.
   (multiple-value-bind (qualifiers lambda-list body)
       (parse-defmethod args)
     `(progn
-      ;; KLUDGE: this double expansion is quite a monumental
-      ;; workaround: it comes about because of a fantastic interaction
-      ;; between the processing rules of CLHS 3.2.3.1 and the
-      ;; bizarreness of MAKE-METHOD-LAMBDA.
-      ;;
-      ;; MAKE-METHOD-LAMBDA can be called by the user, and if the
-      ;; lambda itself doesn't refer to outside bindings the return
-      ;; value must be compileable in the null lexical environment.
-      ;; However, the function must also refer somehow to the
-      ;; associated method object, so that it can call NO-NEXT-METHOD
-      ;; with the appropriate arguments if there is no next method --
-      ;; but when the function is generated, the method object doesn't
-      ;; exist yet.
-      ;;
-      ;; In order to resolve this issue, we insert a literal cons cell
-      ;; into the body of the method lambda, return the same cons cell
-      ;; as part of the second (initargs) return value of
-      ;; MAKE-METHOD-LAMBDA, and a method on INITIALIZE-INSTANCE fills
-      ;; in the cell when the method is created.  However, this
-      ;; strategy depends on having a fresh cons cell for every method
-      ;; lambda, which (without the workaround below) is skewered by
-      ;; the processing in CLHS 3.2.3.1, which permits implementations
-      ;; to macroexpand the bodies of EVAL-WHEN forms with both
-      ;; :COMPILE-TOPLEVEL and :LOAD-TOPLEVEL only once.  The
-      ;; expansion below forces the double expansion in those cases,
-      ;; while expanding only once in the common case.
-      (eval-when (:load-toplevel)
-        (%defmethod-expander ,name ,qualifiers ,lambda-list ,body))
-      (eval-when (:execute)
-        (%defmethod-expander ,name ,qualifiers ,lambda-list ,body)))))
+       (eval-when (:compile-toplevel :execute)
+         ;; :compile-toplevel is needed for subsequent forms
+         ;; :execute is needed for references to itself inside the body
+         (compile-or-load-defgeneric ',name))
+       ;; KLUDGE: this double expansion is quite a monumental
+       ;; workaround: it comes about because of a fantastic interaction
+       ;; between the processing rules of CLHS 3.2.3.1 and the
+       ;; bizarreness of MAKE-METHOD-LAMBDA.
+       ;;
+       ;; MAKE-METHOD-LAMBDA can be called by the user, and if the
+       ;; lambda itself doesn't refer to outside bindings the return
+       ;; value must be compileable in the null lexical environment.
+       ;; However, the function must also refer somehow to the
+       ;; associated method object, so that it can call NO-NEXT-METHOD
+       ;; with the appropriate arguments if there is no next method --
+       ;; but when the function is generated, the method object doesn't
+       ;; exist yet.
+       ;;
+       ;; In order to resolve this issue, we insert a literal cons cell
+       ;; into the body of the method lambda, return the same cons cell
+       ;; as part of the second (initargs) return value of
+       ;; MAKE-METHOD-LAMBDA, and a method on INITIALIZE-INSTANCE fills
+       ;; in the cell when the method is created.  However, this
+       ;; strategy depends on having a fresh cons cell for every method
+       ;; lambda, which (without the workaround below) is skewered by
+       ;; the processing in CLHS 3.2.3.1, which permits implementations
+       ;; to macroexpand the bodies of EVAL-WHEN forms with both
+       ;; :COMPILE-TOPLEVEL and :LOAD-TOPLEVEL only once.  The
+       ;; expansion below forces the double expansion in those cases,
+       ;; while expanding only once in the common case.
+       (eval-when (:load-toplevel)
+         (%defmethod-expander ,name ,qualifiers ,lambda-list ,body))
+       (eval-when (:execute)
+         (%defmethod-expander ,name ,qualifiers ,lambda-list ,body)))))
 
 (defmacro %defmethod-expander
     (name qualifiers lambda-list body &environment env)
@@ -455,6 +459,7 @@ bootstrapping.
 (defun make-defmethod-form
     (name qualifiers specializers unspecialized-lambda-list
      method-class-name initargs-form)
+  (declare (sb-ext:muffle-conditions sb-ext:code-deletion-note))
   (let (fn
         fn-lambda)
     (if (and (interned-symbol-p (fun-name-block-name name))
@@ -588,8 +593,13 @@ bootstrapping.
     ;; if there is are no non-standard prior MAKE-METHOD-LAMBDA methods -- or
     ;; unless they're fantastically unintrusive.
     (let* ((method-name *method-name*)
+           (method-lambda-list *method-lambda-list*)
+           ;; Macroexpansion caused by code-walking may call make-method-lambda and
+           ;; end up with wrong values
+           (*method-name* nil)
+           (*method-lambda-list* nil)
            (generic-function-name (when method-name (car method-name)))
-           (specialized-lambda-list (or *method-lambda-list*
+           (specialized-lambda-list (or method-lambda-list
                                         (ecase (car method-lambda)
                                           (lambda (second method-lambda))
                                           (named-lambda (third method-lambda)))))
@@ -897,33 +907,33 @@ bootstrapping.
                 (let ((class (specializer-nameoid-class)))
                   ;; CLASS can be null here if the user has
                   ;; erroneously tried to use a defined type as a
-                  ;; specializer; it can be a non-BUILT-IN-CLASS if
+                  ;; specializer; it can be a non-SYSTEM-CLASS if
                   ;; the user defines a type and calls (SETF
                   ;; FIND-CLASS) in a consistent way.
-                 (when (and class (typep class 'built-in-class))
-                   `(type ,(class-name class) ,parameter))))
-              ((:instance nil)
-               (let ((class (specializer-nameoid-class)))
-                 (cond
-                   (class
-                    (if (typep class '(or built-in-class structure-class))
-                        `(type ,class ,parameter)
-                        ;; don't declare CLOS classes as parameters;
-                        ;; it's too expensive.
-                        '(ignorable)))
-                   (t
-                    ;; we can get here, and still not have a failure
-                    ;; case, by doing MOP programming like (PROGN
-                    ;; (ENSURE-CLASS 'FOO) (DEFMETHOD BAR ((X FOO))
-                    ;; ...)).  Best to let the user know we haven't
-                    ;; been able to extract enough information:
-                    (style-warn
-                     "~@<can't find type for specializer ~S in ~S.~@:>"
-                     specializer-nameoid
-                     'parameter-specializer-declaration-in-defmethod)
-                    '(ignorable)))))
-              ((:forthcoming-defclass-type)
-               '(ignorable))))))))
+                  (when (and class (typep class 'system-class))
+                    `(type ,(class-name class) ,parameter))))
+               ((:instance nil)
+                (let ((class (specializer-nameoid-class)))
+                  (cond
+                    (class
+                     (if (typep class '(or system-class structure-class))
+                         `(type ,class ,parameter)
+                         ;; don't declare CLOS classes as parameters;
+                         ;; it's too expensive.
+                         '(ignorable)))
+                    (t
+                     ;; we can get here, and still not have a failure
+                     ;; case, by doing MOP programming like (PROGN
+                     ;; (ENSURE-CLASS 'FOO) (DEFMETHOD BAR ((X FOO))
+                     ;; ...)).  Best to let the user know we haven't
+                     ;; been able to extract enough information:
+                     (style-warn
+                      "~@<can't find type for specializer ~S in ~S.~@:>"
+                      specializer-nameoid
+                      'parameter-specializer-declaration-in-defmethod)
+                     '(ignorable)))))
+               ((:forthcoming-defclass-type)
+                '(ignorable))))))))
 
 ;;; For passing a list (groveled by the walker) of the required
 ;;; parameters whose bindings are modified in the method body to the
@@ -957,6 +967,7 @@ bootstrapping.
                                      parameters-setqd closurep applyp method-cell))
      &body body
      &environment env)
+  (declare (ignore parameters-setqd))
   (if (not (or call-next-method-p setq-p closurep next-method-p-p applyp))
       `(locally
            ,@body)
@@ -1722,11 +1733,11 @@ bootstrapping.
 
 (defvar *!early-generic-functions* ())
 
-(defun ensure-generic-function (fun-name
-                                &rest all-keys
-                                &key environment definition-source
-                                &allow-other-keys)
-  (declare (ignore environment))
+;; CLHS doesn't specify &allow-other-keys here but I guess the supposition
+;; is that they'll be checked by ENSURE-GENERIC-FUNCTION-USING-CLASS.
+;; Except we don't do that either, so I think the blame, if any, lies there
+;; for not catching errant keywords.
+(defun ensure-generic-function (fun-name &rest all-keys)
   (let ((existing (and (fboundp fun-name)
                        (gdefinition fun-name))))
     (cond ((and existing
@@ -2019,7 +2030,7 @@ bootstrapping.
                         (package (symbol-package symbol)))
                    (and (or (eq package *pcl-package*)
                             (memq package (package-use-list *pcl-package*)))
-                        (not (eq package #.(find-package "CL")))
+                        (not (eq package *cl-package*))
                         ;; FIXME: this test will eventually be
                         ;; superseded by the *internal-pcl...* test,
                         ;; above.  While we are in a process of

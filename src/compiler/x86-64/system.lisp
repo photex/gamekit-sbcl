@@ -238,6 +238,43 @@
                             fun-pointer-lowtag)))
     (storew temp function simple-fun-self-slot fun-pointer-lowtag)
     (move result new-self)))
+
+;;;; symbol frobbing
+
+;; only define if the feature is enabled to test building without it
+#!+symbol-info-vops
+(progn
+(define-vop (symbol-info-vector)
+  (:policy :fast-safe)
+  (:translate symbol-info-vector)
+  (:args (x :scs (descriptor-reg)))
+  (:results (res :scs (descriptor-reg)))
+  (:temporary (:sc unsigned-reg :offset rax-offset) rax)
+  (:generator 1
+    (loadw res x symbol-info-slot other-pointer-lowtag)
+    ;; If RES has list-pointer-lowtag, take its CDR. If not, use it as-is.
+    ;; This CMOV safely reads from memory when it does not move, because if
+    ;; there is an info-vector in the slot, it has at least one element.
+    ;; This would compile to almost the same code without a VOP,
+    ;; but using a jmp around a mov instead.
+    (inst lea rax (make-ea :dword :base res :disp (- list-pointer-lowtag)))
+    (inst test (reg-in-size rax :byte) lowtag-mask)
+    (inst cmov :e res
+          (make-ea-for-object-slot res cons-cdr-slot list-pointer-lowtag))))
+(define-vop (symbol-plist)
+  (:policy :fast-safe)
+  (:translate symbol-plist)
+  (:args (x :scs (descriptor-reg)))
+  (:results (res :scs (descriptor-reg)))
+  (:temporary (:sc unsigned-reg) temp)
+  (:generator 1
+    (loadw res x symbol-info-slot other-pointer-lowtag)
+    ;; Instruction pun: (CAR x) is the same as (VECTOR-LENGTH x)
+    ;; so if the info slot holds a vector, this gets a fixnum- it's not a plist.
+    (loadw res res cons-car-slot list-pointer-lowtag)
+    (inst mov temp nil-value)
+    (inst test (reg-in-size res :byte) fixnum-tag-mask)
+    (inst cmov :e res temp))))
 
 ;;;; other miscellaneous VOPs
 
@@ -256,20 +293,34 @@
     (emit-safepoint)))
 
 #!+sb-thread
-(defknown current-thread-offset-sap ((unsigned-byte 64))
+;; 28 unsigned bits is the max before shifting left by 3 that fits in the
+;; 'displacement' of an EA. This is hugely generous. The largest offset
+;; you'd ever supply is THREAD-NONPOINTER-DATA-SLOT + interrupt depth.
+(defknown current-thread-offset-sap ((unsigned-byte 28))
   system-area-pointer (flushable))
 
 #!+sb-thread
+(progn
+(define-vop (current-thread-offset-sap/c)
+  (:results (sap :scs (sap-reg)))
+  (:result-types system-area-pointer)
+  (:translate current-thread-offset-sap)
+  (:info n)
+  (:arg-types (:constant unsigned-byte))
+  (:policy :fast-safe)
+  (:generator 1
+    (inst mov sap (make-ea :qword :base thread-base-tn :disp (ash n 3)))))
 (define-vop (current-thread-offset-sap)
   (:results (sap :scs (sap-reg)))
   (:result-types system-area-pointer)
   (:translate current-thread-offset-sap)
-  (:args (n :scs (unsigned-reg) :target sap))
-  (:arg-types unsigned-num)
+  (:args (n :scs (any-reg) :target sap))
+  (:arg-types tagged-num)
   (:policy :fast-safe)
   (:generator 2
     (inst mov sap
-          (make-ea :qword :base thread-base-tn :disp 0 :index n :scale 8))))
+          (make-ea :qword :base thread-base-tn :index n
+                          :scale (ash 1 (- 3 n-fixnum-tag-bits)))))))
 
 (define-vop (halt)
   (:generator 1
@@ -339,6 +390,7 @@
      (move hi edx)))
 
 (defmacro with-cycle-counter (&body body)
+  #!+sb-doc
   "Returns the primary value of BODY as the primary value, and the
 number of CPU cycles elapsed as secondary value. EXPERIMENTAL."
   (with-unique-names (hi0 hi1 lo0 lo1)
@@ -395,3 +447,118 @@ number of CPU cycles elapsed as secondary value. EXPERIMENTAL."
   (:policy :fast-safe)
   (:generator 0
     (inst pause)))
+
+;;;;
+
+(defknown %cons-cas-pair (cons t t t t) (values t t &optional))
+;; These unsafely permits cmpxchg on any kind of vector, boxed or unboxed
+;; and the same goes for instances.
+(defknown %vector-cas-pair (simple-array index t t t t) (values t t &optional))
+(defknown %instance-cas-pair (instance index t t t t) (values t t &optional))
+
+;; 32-bit register names here are not an accident - it's a deliberate attempt
+;; to keep this exactly in sync with 32-bit code in the hope that somebody
+;; will invent a way to share things in common.
+(macrolet
+    ((define-cmpxchg-vop (name memory-operand more-stuff &optional index-arg)
+       `(define-vop (,name)
+          (:policy :fast)
+          ,@more-stuff
+          (:args (data :scs (descriptor-reg) :to :eval)
+                 ,@index-arg
+                 (expected-old-lo :scs (descriptor-reg any-reg) :target eax)
+                 (expected-old-hi :scs (descriptor-reg any-reg) :target edx)
+                 (new-lo :scs (descriptor-reg any-reg) :target ebx)
+                 (new-hi :scs (descriptor-reg any-reg) :target ecx))
+          (:results (result-lo :scs (descriptor-reg any-reg))
+                    (result-hi :scs (descriptor-reg any-reg)))
+          (:temporary (:sc unsigned-reg :offset eax-offset
+                       :from (:argument 2) :to (:result 0)) eax)
+          (:temporary (:sc unsigned-reg :offset edx-offset
+                       :from (:argument 3) :to (:result 0)) edx)
+          (:temporary (:sc unsigned-reg :offset ebx-offset
+                       :from (:argument 4) :to (:result 0)) ebx)
+          (:temporary (:sc unsigned-reg :offset ecx-offset
+                       :from (:argument 5) :to (:result 0)) ecx)
+          (:generator 7
+           (move eax expected-old-lo)
+           (move edx expected-old-hi)
+           (move ebx new-lo)
+           (move ecx new-hi)
+           (inst cmpxchg16b ,memory-operand :lock)
+           ;; EDX:EAX  hold the actual old contents of memory.
+           ;; Manually analyze result lifetimes to avoid clobbering.
+           (cond ((and (location= result-lo edx) (location= result-hi eax))
+                  (inst xchg eax edx)) ; unlikely, but possible
+                 ((location= result-lo edx) ; result-hi is not eax
+                  (move result-hi edx) ; move high part first
+                  (move result-lo eax))
+                 (t                    ; result-lo is not edx
+                  (move result-lo eax) ; move low part first
+                  (move result-hi edx)))))))
+  (define-cmpxchg-vop compare-and-exchange-pair
+      (make-ea :dword :base data :disp (- list-pointer-lowtag))
+      ((:translate %cons-cas-pair)))
+  (define-cmpxchg-vop compare-and-exchange-pair-indexed
+      (make-ea :dword :base data :disp offset :index index
+                      :scale (ash n-word-bytes (- n-fixnum-tag-bits)))
+      ((:variant-vars offset))
+      ((index :scs (descriptor-reg any-reg) :to :eval))))
+
+;; The CPU requires 16-byte alignment for the memory operand.
+;; A vector's data portion starts on a 16-byte boundary,
+;; so any even numbered index is OK.
+(define-vop (%vector-cas-pair compare-and-exchange-pair-indexed)
+  (:translate %vector-cas-pair)
+  (:variant (- (* n-word-bytes vector-data-offset) other-pointer-lowtag)))
+
+;; Here you specify an odd numbered slot, otherwise get a bus error.
+;; An instance's first user-visible slot at index 1 is 16-byte-aligned.
+(define-vop (%instance-cas-pair compare-and-exchange-pair-indexed)
+  (:translate %instance-cas-pair)
+  (:variant (- (* n-word-bytes instance-slots-offset) instance-pointer-lowtag)))
+
+(defknown %cpu-identification ((unsigned-byte 32) (unsigned-byte 32))
+    (values (unsigned-byte 32) (unsigned-byte 32)
+            (unsigned-byte 32) (unsigned-byte 32)))
+
+;; This instruction does in fact not utilize all bits of the full width (Rxx)
+;; regs so it would be wonderful to share this verbatim with x86 32-bit.
+(define-vop (%cpu-identification)
+  (:policy :fast-safe)
+  (:translate %cpu-identification)
+  (:args (function :scs (unsigned-reg) :target eax)
+         (subfunction :scs (unsigned-reg) :target ecx))
+  (:arg-types unsigned-num unsigned-num)
+  (:results (a :scs (unsigned-reg))
+            (b :scs (unsigned-reg))
+            (c :scs (unsigned-reg))
+            (d :scs (unsigned-reg)))
+  (:result-types unsigned-num unsigned-num unsigned-num unsigned-num)
+  (:temporary (:sc unsigned-reg :from (:argument 0) :to (:result 0)
+               :offset eax-offset) eax)
+  (:temporary (:sc unsigned-reg :from (:argument 1) :to (:result 2)
+               :offset ecx-offset) ecx)
+  (:temporary (:sc unsigned-reg :from :eval :to (:result 3)
+               :offset edx-offset) edx)
+  (:temporary (:sc unsigned-reg :from :eval :to (:result 1)
+               :offset ebx-offset) ebx)
+  (:generator 5
+   (move eax function)
+   (move ecx subfunction)
+   (inst cpuid)
+   (move a eax)
+   (move b ebx)
+   (move c ecx)
+   (move d edx)))
+
+;; In the architectures where tls-index is an ordinary slot holding a tagged
+;; object, it represents the byte offset to an aligned object and looks
+;; in Lisp like a fixnum that is off by a factor of (EXPT 2 N-FIXNUM-TAG-BITS).
+;; We're reading with a raw SAP accessor, so must make it look equally "off".
+;; Also we don't get the defknown automatically.
+(defknown symbol-tls-index (t) fixnum (flushable))
+(define-source-transform symbol-tls-index (sym)
+  `(ash (sap-ref-32 (int-sap (get-lisp-obj-address (the symbol ,sym)))
+                    (- 4 other-pointer-lowtag))
+        (- n-fixnum-tag-bits)))

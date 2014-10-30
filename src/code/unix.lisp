@@ -97,7 +97,7 @@ SYSCALL-FORM. Repeat evaluation of SYSCALL-FORM if it is interrupted."
   `(let (,value ,errno)
      (loop (multiple-value-setq (,value ,errno)
              ,syscall-form)
-        (unless #!-win32 (eql ,errno sb!unix:eintr) #!+win32 nil
+        (unless #!-win32 (eql ,errno eintr) #!+win32 nil
           (return (values ,value ,errno))))
      ,@body))
 
@@ -112,6 +112,7 @@ SYSCALL-FORM. Repeat evaluation of SYSCALL-FORM if it is interrupted."
 
 #!-win32
 (define-alien-routine ("getenv" posix-getenv) c-string
+  #!+sb-doc
   "Return the \"value\" part of the environment string \"name=value\" which
 corresponds to NAME, or NIL if there is none."
   (name (c-string :not-null t)))
@@ -273,6 +274,7 @@ corresponds to NAME, or NIL if there is none."
   #!+win32 (sb!win32::windows-isatty fd))
 
 (defun unix-lseek (fd offset whence)
+  #!+sb-doc
   "Unix-lseek accepts a file descriptor and moves the file pointer by
    OFFSET octets.  Whence can be any of the following:
 
@@ -385,17 +387,25 @@ corresponds to NAME, or NIL if there is none."
   ;;
   ;; Signal an error at compile-time, since it's needed for the
   ;; runtime to start up
-  #!-(or linux openbsd freebsd netbsd sunos osf1 darwin hpux win32)
+  #!-(or android linux openbsd freebsd netbsd sunos osf1 darwin hpux win32 dragonfly)
   #.(error "POSIX-GETCWD is not implemented.")
-  #!+(or linux openbsd freebsd netbsd sunos osf1 darwin hpux win32)
-  (or (newcharstar-string (alien-funcall (extern-alien "getcwd"
-                                                       (function (* char)
-                                                                 (* char)
-                                                                 size-t))
-                                         nil
-                                         #!+(or linux openbsd freebsd netbsd darwin win32) 0
-                                         #!+(or sunos osf1 hpux) 1025))
-      (simple-perror "getcwd")))
+  (or
+   #!+(or linux openbsd freebsd netbsd sunos osf1 darwin hpux win32 dragonfly)
+   (newcharstar-string (alien-funcall (extern-alien "getcwd"
+                                                    (function (* char)
+                                                              (* char)
+                                                              size-t))
+                                      nil
+                                      #!+(or linux openbsd freebsd netbsd darwin win32 dragonfly) 0
+                                      #!+(or sunos osf1 hpux) 1025))
+   #!+android
+   (with-alien ((ptr (array char #.path-max)))
+     ;; Older bionic versions do not have the above feature.
+     (alien-funcall
+      (extern-alien "getcwd"
+                    (function c-string (array char #.path-max) int))
+      ptr path-max))
+   (simple-perror "getcwd")))
 
 ;;; Return the Unix current directory as a SIMPLE-STRING terminated
 ;;; by a slash character.
@@ -764,17 +774,17 @@ avoiding atexit(3) hooks, etc. Otherwise exit(2) is called."
           (values nil nil)
           (multiple-value-bind (to-sec to-msec2) (truncate to-msec 1000)
             (values to-sec (* to-msec2 1000))))
-    (sb!unix:with-restarted-syscall (count errno)
-      (sb!alien:with-alien ((fds (sb!alien:struct sb!unix:fd-set)))
-        (sb!unix:fd-zero fds)
-        (sb!unix:fd-set fd fds)
+    (with-restarted-syscall (count errno)
+      (with-alien ((fds (struct fd-set)))
+        (fd-zero fds)
+        (fd-set fd fds)
         (multiple-value-bind (read-fds write-fds)
             (ecase direction
               (:input
                (values (addr fds) nil))
               (:output
                (values nil (addr fds))))
-          (sb!unix:unix-fast-select (1+ fd)
+          (unix-fast-select (1+ fd)
                                     read-fds write-fds nil
                                     to-sec to-usec)))
       (case count
@@ -807,7 +817,7 @@ avoiding atexit(3) hooks, etc. Otherwise exit(2) is called."
 (define-alien-type nil
   (struct wrapped_stat
     (st-dev wst-dev-t)
-    (st-ino ino-t)
+    (st-ino wst-ino-t)
     (st-mode mode-t)
     (st-nlink wst-nlink-t)
     (st-uid wst-uid-t)
@@ -883,23 +893,23 @@ avoiding atexit(3) hooks, etc. Otherwise exit(2) is called."
 (defun fd-type (fd)
   (declare (type unix-fd fd))
   (let ((fmt (logand
-              sb!unix:s-ifmt
+              s-ifmt
               (or (with-alien ((buf (struct wrapped_stat)))
                     (syscall ("fstat_wrapper" int (* (struct wrapped_stat)))
                              (slot buf 'st-mode)
                              fd (addr buf)))
                   0))))
-    (cond ((logtest sb!unix:s-ififo fmt)
+    (cond ((logtest s-ififo fmt)
            :fifo)
-          ((logtest sb!unix:s-ifchr fmt)
+          ((logtest s-ifchr fmt)
            :character)
-          ((logtest sb!unix:s-ifdir fmt)
+          ((logtest s-ifdir fmt)
            :directory)
-          ((logtest sb!unix:s-ifblk fmt)
+          ((logtest s-ifblk fmt)
            :block)
-          ((logtest sb!unix:s-ifreg fmt)
+          ((logtest s-ifreg fmt)
            :regular)
-          ((logtest sb!unix:s-ifsock fmt)
+          ((logtest s-ifsock fmt)
            :socket)
           (t
            :unknown))))
@@ -932,10 +942,10 @@ avoiding atexit(3) hooks, etc. Otherwise exit(2) is called."
                (rem (struct timespec)))
     (setf (slot req 'tv-sec) secs
           (slot req 'tv-nsec) nsecs)
-    (loop while (and (eql sb!unix:eintr
+    (loop while (and (eql eintr
                           (nth-value 1
                                      (int-syscall ("sb_nanosleep" (* (struct timespec))
-                                                               (* (struct timespec)))
+                                                                  (* (struct timespec)))
                                                   (addr req) (addr rem))))
                      ;; KLUDGE: On Darwin, if an interrupt cases nanosleep to
                      ;; take longer than the requested time, the call will
@@ -991,7 +1001,8 @@ avoiding atexit(3) hooks, etc. Otherwise exit(2) is called."
 
 #!-win32
 (defun unix-getitimer (which)
-  "Unix-getitimer returns the INTERVAL and VALUE slots of one of
+  #!+sb-doc
+  "UNIX-GETITIMER returns the INTERVAL and VALUE slots of one of
    three system timers (:real :virtual or :profile). On success,
    unix-getitimer returns 5 values,
    T, it-interval-secs, it-interval-usec, it-value-secs, it-value-usec."
@@ -1014,7 +1025,8 @@ avoiding atexit(3) hooks, etc. Otherwise exit(2) is called."
 
 #!-win32
 (defun unix-setitimer (which int-secs int-usec val-secs val-usec)
-  " Unix-setitimer sets the INTERVAL and VALUE slots of one of
+  #!+sb-doc
+  "UNIX-SETITIMER sets the INTERVAL and VALUE slots of one of
    three system timers (:real :virtual or :profile). A SIGALRM signal
    will be delivered VALUE <seconds+microseconds> from now. INTERVAL,
    when non-zero, is <seconds+microseconds> to be loaded each time
@@ -1064,6 +1076,7 @@ avoiding atexit(3) hooks, etc. Otherwise exit(2) is called."
 
   #!-sb-fluid (declaim (inline get-time-of-day))
   (defun get-time-of-day ()
+    #!+sb-doc
     "Return the number of seconds and microseconds since the beginning of
 the UNIX epoch (January 1st 1970.)"
     #!+(or darwin netbsd)

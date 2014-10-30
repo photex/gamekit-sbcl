@@ -16,7 +16,8 @@
 ;;; The current level we are printing at, to be compared against
 ;;; *PRINT-LEVEL*. See the macro DESCEND-INTO for a handy interface to
 ;;; depth abbreviation.
-(defvar *current-level-in-print* 0)
+(declaim (index *current-level-in-print*))
+(!defvar *current-level-in-print* 0)
 
 ;;; Automatically handle *PRINT-LEVEL* abbreviation. If we are too
 ;;; deep, then a #\# is printed to STREAM and BODY is ignored.

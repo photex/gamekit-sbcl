@@ -114,4 +114,54 @@
                     (setf (getf y :y 0) 4)
                     (setf (get 'z :z 0) 4)))))
 
+(with-test (:name :setf-fun-and-macro-full-warn)
+  (multiple-value-bind (fun warnings-p failure-p)
+      (compile nil '(lambda (x) (setf (shoe-color x) 'cordovan)))
+    (assert (and fun warnings-p (not failure-p))))
+  (assert (typep (handler-case (eval '(defsetf shoe-color set-shoe-color))
+                   (warning (c) c))
+                 '(and warning (not style-warning)))))
+
+(with-test (:name :setf-fun-and-macro-style-1)
+  (eval '(defun (setf shoe-size) (new x) x new))
+  (assert (typep (handler-case (eval '(defsetf shoe-size set-shoe-size))
+                   (warning (c) c))
+                 'style-warning)))
+
+;; This is a test of the compiler, but it belongs with the above.
+(defvar *tmpfile* "setf-tmp.lisp")
+(with-test (:name :setf-fun-and-macro-style-2)
+  (unwind-protect
+       (progn
+         ;; verify the test's precondition, for sanity
+         (assert (not (fboundp '(setf shoe-count))))
+         (with-open-file (f *tmpfile* :direction :output
+                                      :if-exists :supersede)
+           (prin1 '(defun (setf shoe-count) (new x) (print x) new) f)
+           (prin1 '(defsetf shoe-count set-shoe-count) f))
+         ;; Expect a warning because the compiler knows about
+         ;; (SETF SHOE-COUNT), which isn't yet FBOUNDP,
+         ;; and then we also compile a SETF inverse.
+         (multiple-value-bind (output warnings-p failure-p)
+             (compile-file *tmpfile*)
+           (ignore-errors (delete-file output))
+           (assert (and output warnings-p (not failure-p)))))
+      (ignore-errors (delete-file *tmpfile*))))
+
+;; Make sure that the second values of INFO :SETF :EXPANDER/:INVERSE
+;; are not both T.  Each of :EXPANDER and :INVERSE set the other one
+;; to NIL but the WINP return value from INFO was still T so could not
+;; reliably be used to test existence or non-existence.
+(defsetf foo1 set-foo1)
+(define-setf-expander foo1 (a b) (declare (ignore a b)))
+
+(define-setf-expander foo2 (a b) (declare (ignore a b)))
+(defsetf foo2 set-foo2)
+
+(with-test (:name :setf-inverse-clears-expander-and-vice-versa)
+  (multiple-value-bind (val winp) (sb-int:info :setf :inverse 'foo1)
+    (assert (and (not val) (not winp))))
+  (multiple-value-bind (val winp) (sb-int:info :setf :expander 'foo2)
+    (assert (and (not val) (not winp)))))
+
 ;;; success

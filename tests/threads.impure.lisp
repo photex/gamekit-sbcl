@@ -14,6 +14,7 @@
 ; WHITE-BOX TESTS
 
 (in-package "SB-THREAD")
+(shadowing-import 'assertoid:assert-error)
 (use-package :test-util)
 (use-package "ASSERTOID")
 
@@ -168,8 +169,8 @@
                                  :default sym)))))
 
 (with-test (:name (:join-thread :nlx :error))
-  (raises-error? (join-thread (make-thread (lambda () (sb-thread:abort-thread))))
-                 join-thread-error))
+  (assert-error (join-thread (make-thread (lambda () (sb-thread:abort-thread))))
+                join-thread-error))
 
 (with-test (:name (:join-thread :multiple-values))
   (assert (equal '(1 2 3)
@@ -893,6 +894,27 @@
            (sleep 4))
       (mapc #'sb-thread:terminate-thread threads))))
 
+(with-test (:name :test-%thread-local-references)
+  (let ((mysym (gensym))
+        (fool1 (cons 1 2))
+        (fool2 (cons 2 3)))
+    (progv (list mysym) '(nil)
+      (let* ((i (get-lisp-obj-address (sb-vm:symbol-tls-index mysym)))
+             (j (+ i sb-vm:n-word-bytes)))
+        (assert (eql (sap-ref-word (current-thread-sap) j)
+                     sb-vm:no-tls-value-marker-widetag))
+        (setf (sap-ref-lispobj (current-thread-sap) i) fool1
+              (sap-ref-lispobj (current-thread-sap) j) fool2)
+        ;; assert that my pointer arithmetic worked as expected
+        (assert (eq (symbol-value mysym) fool1))
+        ;; assert that FOOL1 is found by the TLS scan and that FOOL2 is not.
+        (let ((list (%thread-local-references)))
+          (assert (memq fool1 list))
+          (assert (not (memq fool2 list))))
+        ;; repair the TLS entry that was corrupted by the test
+        (setf (sap-ref-word (current-thread-sap) j)
+              sb-vm:no-tls-value-marker-widetag)))))
+
 (format t "~&binding test done~%")
 
 ;;; HASH TABLES
@@ -1198,39 +1220,6 @@
       (setf a (make-mutex)))))
 
 (format t "mutex finalization test done~%")
-
-;;; Check that INFO is thread-safe, at least when we're just doing reads.
-
-(let* ((symbols (loop repeat 10000 collect (gensym)))
-       (functions (loop for (symbol . rest) on symbols
-                        for next = (car rest)
-                        for fun = (let ((next next))
-                                    (lambda (n)
-                                      (if next
-                                          (funcall next (1- n))
-                                          n)))
-                        do (setf (symbol-function symbol) fun)
-                        collect fun)))
-  (defun infodb-test ()
-    (funcall (car functions) 9999)))
-
-(with-test (:name (:infodb :read))
-  (let* ((ok t)
-         (threads (loop for i from 0 to 10
-                        collect (sb-thread:make-thread
-                                 (lambda ()
-                                   (dotimes (j 100)
-                                     (write-char #\-)
-                                     (finish-output)
-                                     (let ((n (infodb-test)))
-                                       (unless (zerop n)
-                                         (setf ok nil)
-                                         (format t "N != 0 (~A)~%" n)
-                                         (abort-thread)))))))))
-    (wait-for-threads threads)
-    (assert ok)))
-
-(format t "infodb test done~%")
 
 (with-test (:name :backtrace)
   ;; Printing backtraces from several threads at once used to hang the
@@ -1565,3 +1554,22 @@
    (sb-thread:make-thread
     (lambda ()
       (alien-funcall (extern-alien "alloca_test" (function void)))))))
+
+(with-test (:name :fp-mode-inheritance-threads)
+  (flet ((test ()
+           (let ((thread-fp-mode)
+                 (fp-mode (dpb 0 sb-vm::float-sticky-bits (sb-vm:floating-point-modes))))
+             (sb-thread:join-thread
+              (sb-thread:make-thread
+               (lambda ()
+                 (setf thread-fp-mode
+                       (dpb 0 sb-vm::float-sticky-bits (sb-vm:floating-point-modes))))))
+             (assert (= fp-mode thread-fp-mode)))))
+    (test)
+    (sb-int:with-float-traps-masked (:divide-by-zero)
+      (test))
+    (setf (sb-vm:floating-point-modes)
+          (dpb sb-vm:float-divide-by-zero-trap-bit
+               sb-vm::float-traps-byte
+               (sb-vm:floating-point-modes)))
+    (test)))

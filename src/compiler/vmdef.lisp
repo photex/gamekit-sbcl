@@ -26,24 +26,13 @@
            (error "~S is not a defined storage class." x))))
 (defun sb-or-lose (x)
   (the sb
-       (or (gethash x *backend-sb-names*)
-           (error "~S is not a defined storage base." x))))
+       (dolist (sb *backend-sb-list*
+                (error "~S is not a defined storage base." x))
+         (when (eq (sb-name sb) x)
+           (return sb)))))
+
 (defun sc-number-or-lose (x)
   (the sc-number (sc-number (sc-or-lose x))))
-
-;;; This is like the non-meta versions, except we go for the
-;;; meta-compile-time info. These should not be used after load time,
-;;; since compiling the compiler changes the definitions.
-(defun meta-sc-or-lose (x)
-  (the sc
-       (or (gethash x *backend-meta-sc-names*)
-           (error "~S is not a defined storage class." x))))
-(defun meta-sb-or-lose (x)
-  (the sb
-       (or (gethash x *backend-meta-sb-names*)
-           (error "~S is not a defined storage base." x))))
-(defun meta-sc-number-or-lose (x)
-  (the sc-number (sc-number (meta-sc-or-lose x))))
 
 ;;;; side effect classes
 
@@ -189,7 +178,7 @@
              (when targets
                (dotimes (i (length targets))
                  (let ((target (aref targets i)))
-                   (target-if-desirable
+                   (sb!regalloc:target-if-desirable
                     (aref refs (ldb (byte 8 8) target))
                     (aref refs (ldb (byte 8 0) target)))))))
            vop)

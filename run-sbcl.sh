@@ -13,23 +13,25 @@
 
 set -e
 
-BASE=`dirname "$0"`
-if (readlink -f "${BASE}") >/dev/null 2>&1; then
-    BASE=`readlink -f ${BASE}`
-else
-    opwd=`pwd`
-    cd "${BASE}"
-    BASE=`pwd`
-    cd "${opwd}"
-fi
-if [ "$OSTYPE" = "cygwin" ]
-then
-    BASE=`cygpath -w "$BASE"`
-fi
+this="$0"
+
+# OSX 10.8 readlink doesn't have -f
+while [ -h "$this" ]; do
+    # [ -h should guarantee that readlink output will be non-null
+    link=`readlink -n "$this"`
+    # if absolute path
+    if expr "$link" : '^/.*' > /dev/null; then
+        this="$link"
+    else
+        this=`dirname "$this"`/"$link"
+    fi
+done
+BASE=`dirname "$this"`
+
 CORE_DEFINED=no
 
-for arg in $*; do
-    case $arg in
+for arg in "$@"; do
+    case "$arg" in
         --core)
           CORE_DEFINED=yes
           ;;
@@ -53,7 +55,7 @@ fi
 
 if [ -x "$BASE"/src/runtime/sbcl -a -f "$BASE"/output/sbcl.core ]; then
     echo "(running SBCL from: $BASE)" 1>&2
-    SBCL_HOME="$BASE"/contrib "$BASE"/src/runtime/sbcl $ARGUMENTS "$@"
+    SBCL_HOME="$BASE/obj/sbcl-home" exec "$BASE"/src/runtime/sbcl $ARGUMENTS "$@"
 else
     echo "No built SBCL here ($BASE): run 'sh make.sh' first!"
     exit 1

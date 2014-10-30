@@ -101,7 +101,7 @@
           ((simple-array base-char (*))
            (data-vector-ref string index))
           ((simple-array nil (*))
-           (data-vector-ref string index))))))
+           (data-nil-vector-ref string index))))))
 
 ;;; This and the corresponding -SET transform work equally well on non-simple
 ;;; arrays, but after benchmarking (on x86), Nikodemus didn't find any cases
@@ -125,10 +125,13 @@
            (%data-vector-and-index array index)
          (declare (type (simple-array ,element-type-specifier 1) array))
          ,(let ((bare-form '(data-vector-ref array index)))
-            (if (type= element-ctype declared-element-ctype)
-                bare-form
-                `(the ,(type-specifier declared-element-ctype)
-                      ,bare-form)))))))
+            (cond ((eql element-ctype *empty-type*)
+                   `(data-nil-vector-ref array index))
+                  ((type= element-ctype declared-element-ctype)
+                   bare-form)
+                  (t
+                   `(the ,(type-specifier declared-element-ctype)
+                         ,bare-form))))))))
 
 ;;; Transform multi-dimensional array to one dimensional data vector
 ;;; access.
@@ -286,6 +289,7 @@
   (def array-storage-vector))
 
 (defoptimizer (%data-vector-and-index derive-type) ((array index))
+  (declare (ignore index))
   (let ((spec (maybe-array-data-vector-type-specifier array)))
     (when spec
       (values-specifier-type `(values ,spec index)))))
@@ -622,7 +626,7 @@
   ;; don't have a true Alpha64 port yet, we'll have to stick to
   ;; SB!VM:N-MACHINE-WORD-BITS for the time being.  --njf, 2004-08-14
   #.`(progn
-       #!+(or x86 x86-64)
+       #!+(or x86 x86-64 arm)
        (def sb!vm::ash-left-modfx
            :tagged ,(- sb!vm:n-word-bits sb!vm:n-fixnum-tag-bits) t)
        (def ,(intern (format nil "ASH-LEFT-MOD~D" sb!vm:n-machine-word-bits)

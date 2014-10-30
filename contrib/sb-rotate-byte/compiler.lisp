@@ -37,6 +37,7 @@
 (defoptimizer (%rotate-byte derive-type) ((count size posn num))
   ;; FIXME: this looks fairly unwieldy.  I'm sure it can be made
   ;; simpler, and also be made to deal with negative integers too.
+  (declare (ignore count posn))
   (let ((size (sb-c::lvar-type size)))
     (if (numeric-type-p size)
         (let ((size-high (numeric-type-high size))
@@ -60,7 +61,7 @@
 
 ;; Generic implementation for platforms that don't supply VOPs for 32-bit
 ;; rotate.
-#-(or x86 x86-64 ppc)
+#-(or x86 x86-64 ppc arm)
 (deftransform %unsigned-32-rotate-byte ((.count. .integer.)
                                         ((integer -31 31)
                                          (unsigned-byte 32)) *)

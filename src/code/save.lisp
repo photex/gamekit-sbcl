@@ -23,7 +23,8 @@
   (prepend-runtime int)
   (save-runtime-options int)
   (compressed int)
-  (compression-level int))
+  (compression-level int)
+  (application-type int))
 
 #!+gencgc
 (define-alien-routine "gc_and_save" void
@@ -31,10 +32,36 @@
   (prepend-runtime int)
   (save-runtime-options int)
   (compressed int)
-  (compression-level int))
+  (compression-level int)
+  (application-type int))
 
 #!+gencgc
 (defvar sb!vm::*restart-lisp-function*)
+
+(define-condition save-condition (reference-condition)
+  ()
+  (:default-initargs
+   :references (list '(:sbcl :node "Saving a Core Image"))))
+
+(define-condition save-error (error save-condition)
+  ()
+  (:report "Could not save core."))
+
+(define-condition save-with-multiple-threads-error (save-error)
+  ((interactive-thread :initarg :interactive-threads
+                       :reader save-with-multiple-threads-error-interactive-threads)
+   (other-threads :initarg :other-threads
+                  :reader save-with-multiple-threads-error-other-threads))
+  (:report (lambda (condition stream)
+             (let ((interactive (save-with-multiple-threads-error-interactive-threads condition))
+                   (other (save-with-multiple-threads-error-other-threads condition)))
+               (format stream  "~@<Cannot save core with multiple threads running.~
+                                ~@:_~@:_Interactive thread~P (of current session):~
+                                ~@:_~2@T~<~{~A~^, ~}~:>~
+                                ~@:_~@:_Other thread~P:~
+                                ~@:_~2@T~<~{~A~^, ~}~:>~@:>"
+                       (length interactive) (list interactive)
+                       (length other) (list other))))))
 
 (defun save-lisp-and-die (core-file-name &key
                                          (toplevel #'toplevel-init)
@@ -43,7 +70,9 @@
                                          (purify t)
                                          (root-structures ())
                                          (environment-name "auxiliary")
-                                         (compression nil))
+                                         (compression nil)
+                                         #!+win32
+                                         (application-type :console))
   #!+sb-doc
   "Save a \"core image\", i.e. enough information to restart a Lisp
 process later in the same state, in the file of the specified name.
@@ -100,6 +129,12 @@ The following &KEY arguments are defined:
      an integer from -1 to 9, corresponding to zlib compression levels, or T
      (which is equivalent to the default compression level, -1).
 
+  :APPLICATION-TYPE
+     Present only on Windows and is meaningful only with :EXECUTABLE T.
+     Specifies the subsystem of the executable, :CONSOLE or :GUI.
+     The notable difference is that :GUI doesn't automatically create a console
+     window. The default is :CONSOLE.
+
 The save/load process changes the values of some global variables:
 
   *STANDARD-OUTPUT*, *DEBUG-IO*, etc.
@@ -136,6 +171,14 @@ sufficiently motivated to do lengthy fixes."
   #!-sb-core-compression
   (when compression
     (error "Unable to save compressed core: this runtime was not built with zlib support"))
+  (when *dribble-stream*
+    (restart-case (error "Dribbling to ~s is enabled." (pathname *dribble-stream*))
+      (continue ()
+        :report "Stop dribbling and save the core."
+        (dribble))
+      (abort ()
+        :report "Abort saving the core."
+        (return-from save-lisp-and-die))))
   (when (eql t compression)
     (setf compression -1))
   (tune-hashtable-sizes-of-all-packages)
@@ -147,7 +190,7 @@ sufficiently motivated to do lengthy fixes."
   (labels ((restart-lisp ()
              (handling-end-of-the-world
                (reinit)
-               #!+hpux (sb!sys:%primitive sb!vm::setup-return-from-lisp-stub)
+               #!+hpux (%primitive sb!vm::setup-return-from-lisp-stub)
                (funcall toplevel)))
            (foreign-bool (value)
              (if value 1 0))
@@ -165,14 +208,24 @@ sufficiently motivated to do lengthy fixes."
                                         (foreign-bool executable)
                                         (foreign-bool save-runtime-options)
                                         (foreign-bool compression)
-                                        (or compression 0)))
+                                        (or compression 0)
+                                        #!+win32
+                                        (ecase application-type
+                                          (:console 0)
+                                          (:gui 1))
+                                        #!-win32 0))
                (without-gcing
                  (save name
                        (get-lisp-obj-address #'restart-lisp)
                        (foreign-bool executable)
                        (foreign-bool save-runtime-options)
                        (foreign-bool compression)
-                       (or compression 0))))))
+                       (or compression 0)
+                       #!+win32
+                       (ecase application-type
+                         (:console 0)
+                         (:gui 1))
+                       #!-win32 0)))))
     ;; Save the restart function into a static symbol, to allow GC-AND-SAVE
     ;; access to it even after the GC has moved it.
     #!+gencgc
@@ -183,24 +236,30 @@ sufficiently motivated to do lengthy fixes."
                    :environment-name environment-name)
            (save-core nil))
           (t
-           ;; Compact the environment even though we're skipping the
-           ;; other purification stages.
-           (sb!kernel::compact-environment-aux "Auxiliary" 200)
            (save-core t)))
     ;; Something went very wrong -- reinitialize to have a prayer
     ;; of being able to report the error.
     (reinit)
-    (error "Could not save core.")))
+    (error 'save-error)))
 
 (defun deinit ()
   (call-hooks "save" *save-hooks*)
   #!+sb-wtimer
   (itimer-emulation-deinit)
-  (when (rest (sb!thread:list-all-threads))
-    (error "Cannot save core with multiple threads running."))
+  (let ((threads (sb!thread:list-all-threads)))
+    (unless (= 1 (length threads))
+      (let* ((interactive (sb!thread::interactive-threads))
+             (other (set-difference threads interactive)))
+        (error 'save-with-multiple-threads-error
+               :interactive-threads interactive
+               :other-threads other))))
   (float-deinit)
   (profile-deinit)
   (foreign-deinit)
   (stream-deinit)
   (deinit-finalizers)
-  (drop-all-hash-caches))
+  (drop-all-hash-caches)
+  (os-deinit)
+  (setf * nil ** nil *** nil
+        - nil + nil ++ nil +++ nil
+        /// nil // nil / nil))

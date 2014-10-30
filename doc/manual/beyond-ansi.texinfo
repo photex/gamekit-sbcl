@@ -14,6 +14,7 @@ it still has quite a few.  @xref{Contributed Modules}.
 * Metaobject Protocol::
 * Extensible Sequences::
 * Support For Unix::
+* Unicode Support::
 * Customization Hooks for Users::
 * Tools To Help Developers::
 * Resolution of Name Conflicts::
@@ -45,6 +46,18 @@ Example:
 
 Doesn't alter @code{*package*}: if @code{foo::bar} would cause a
 read-time package lock violation, so does @code{foo::(bar)}.
+
+SBCL also extends the reader to normalize all symbols to Normalization
+Form KC in builds with Unicode enabled. Whether symbols are normalized
+is controlled by
+
+@include fun-sb-ext-readtable-normalization.texinfo
+
+Symbols created by
+@findex @cl{intern}
+@code{intern} and similar functions are not affected by this setting. If
+@code{sb-ext:readtable-normalization} is @code{t}, symbols that are not
+normalized are escaped during printing.
 
 @node  Package-Local Nicknames
 @comment  node-name,  next,  previous,  up
@@ -182,7 +195,7 @@ indicate, and apparently no clients for it.
 @tindex @sbmop{funcallable-standard-object}
 @tindex @cl{standard-object}
 @tindex @cl{function}
-The direct superclasses of @code{sb-mop:funcallable-standard-object} are
+The direct superclasses of @code{funcallable-standard-object} are
 @code{(function standard-object)}, not @code{(standard-object function)}.
 
 This is to ensure that the @code{standard-object} class is the last of
@@ -223,9 +236,9 @@ of metaclass @code{funcallable-standard-class} must have
 @findex @cl{subtypep}
 After a class has been finalized, it is associated with a class
 prototype which is accessible by a standard mop function
-@code{sb-mop:class-prototype}.  The user can then ask whether this
-object is a @code{function} or not in several different ways: whether it
-is a function according to @code{typep}; whether its @code{class-of} is
+@code{class-prototype}.  The user can then ask whether this object is a
+@code{function} or not in several different ways: whether it is a
+function according to @code{typep}; whether its @code{class-of} is
 @code{subtypep} @code{function}, or whether @code{function} appears in
 the superclasses of the class.  The additional consistency requirement
 comes from the desire to make all of these answers the same.
@@ -254,8 +267,8 @@ and leads to a class whose instances are funcallable and have one slot.
 
 @tindex @sbmop{funcallable-standard-object}
 Note that this requirement also applies to the class
-@code{sb-mop:funcallable-standard-object}, which has metaclass
-@code{sb-mop:funcallable-standard-class} rather than
+@code{funcallable-standard-object}, which has metaclass
+@code{funcallable-standard-class} rather than
 @code{standard-class} as AMOP specifies.
 
 @item
@@ -277,8 +290,8 @@ of software from colliding with each other.
 @findex @setf{@sbmop{slot-value-using-class}}
 @findex @sbmop{slot-boundp-using-class}
 specializations of the @code{new-value} argument to @code{(setf
-sb-mop:slot-value-using-class)} are not allowed: all user-defined
-methods must have a specializer of the class @code{t}.
+slot-value-using-class)} are not allowed: all user-defined methods must
+have a specializer of the class @code{t}.
 
 This prohibition is motivated by a separation of layers: the
 @code{slot-value-using-class} family of functions is intended for use in
@@ -308,6 +321,37 @@ as the functional version of @code{defclass}, which has this behaviour;
 however, it is not consistent with the weaker requirement in AMOP, which
 states that any class found by @code{find-class}, no matter what its
 @code{class-name}, is redefined.
+
+@item
+@findex @sbmop{slot-definition-name}
+@tindex @cl{structure-class}
+@findex @cl{defstruct}
+an error is not signaled in the case of the @code{:name} initialization
+argument for @code{slot-definition} objects being a constant, when the
+slot definition is of type @code{structure-slot-definition} (i.e. it is
+associated with a class of type @code{structure-class}).
+
+This allows code which uses constant names for structure slots to
+continue working as specified in ANSI, while enforcing the constraint
+for all other types of slot.
+
+@item
+@tindex @cl{t}
+@tindex @cl{built-in-class}
+@findex @sbmop{validate-superclass}
+@findex @cl{defclass}
+the class named @code{t} is not an instance of the @code{built-in-class}
+metaclass.
+
+AMOP specifies, in the ``Inheritance Structure of Metaobject Classes''
+section, that the class named @code{t} should be an instance of
+@code{built-in-class}.  However, it also specifies that
+@code{validate-superclass} should return true (indicating that a direct
+superclass relationship is permissible) if the second argument is the
+class named @code{t}.  Also, ANSI specifies that classes with metaclass
+@code{built-in-class} may not be subclassed using @code{defclass}, and
+also that the class named @code{t} is the universal superclass,
+inconsistent with it being a @code{built-in-class}.
 
 @end itemize
 
@@ -386,7 +430,7 @@ at
 @findex @cl{find}
 @findex @cl{subseq}
 
-Users of this extension just make instances of @cl{sequence} subclasses
+Users of this extension just make instances of @code{sequence} subclasses
 and transparently operate on them using sequence functions:
 @lisp
 (coerce (subseq (make-instance 'my-sequence) 5 10) 'list)
@@ -430,8 +474,24 @@ performance penalty @xref{Iterator Protocol}.
 @findex @cl{copy-seq}
 @findex @sequence{adjust-sequence}
 
-In addition to the mandatory functions above, methods on the following
-sequence functions can be defined:
+In addition to the mandatory functions above, methods on the sequence
+functions listed below can be defined.
+
+There are two noteworthy irregularities:
+@itemize
+@item
+The function @code{sb-sequence:emptyp} does not have a counterpart in
+the @code{cl} package. It is intended to be used instead of
+@code{length} when working with lazy or infinite sequences.
+
+@item
+The functions @code{map}, @code{concatenate} and @code{merge} receive a
+type designator specifying the type of the constructed sequence as their
+first argument. However, the corresponding generic functions
+@code{sb-sequence:map}, @code{sb-sequence:concatenate} and
+@code{sb-sequence:merge} receive a prototype instance of the requested
+@code{sequence} subclass instead.
+@end itemize
 
 @include fun-sb-sequence-emptyp.texinfo
 
@@ -455,6 +515,9 @@ sequence functions can be defined:
 @code{sb-sequence:fill}
 
 @item
+@include fun-sb-sequence-map.texinfo
+
+@item
 @code{sb-sequence:nsubstitute}, @code{sb-sequence:nsubstitute-if},
 @code{sb-sequence:nsubstitute-if-not}, @code{sb-sequence:substitute},
 @code{sb-sequence:substitute-if}, @code{sb-sequence:substitute-if-not}
@@ -464,6 +527,9 @@ sequence functions can be defined:
 
 @item
 @code{sb-sequence:nreverse}, @code{sb-sequence:reverse}
+
+@item
+@include fun-sb-sequence-concatenate.texinfo
 
 @item
 @code{sb-sequence:reduce}
@@ -483,6 +549,9 @@ sequence functions can be defined:
 
 @item
 @code{sb-sequence:sort}, @code{sb-sequence:stable-sort}
+
+@item
+@include fun-sb-sequence-merge.texinfo
 @end itemize
 
 In the spirit of @code{dolist}, generic sequences can be traversed using
@@ -635,6 +704,170 @@ following functions are available for use with processes:
 @include fun-sb-ext-process-close.texinfo
 
 @include fun-sb-ext-process-kill.texinfo
+
+@node  Unicode Support
+@comment  node-name,  next,  previous,  up
+@section Unicode Support
+
+SBCL provides support for working with Unicode text and querying the
+standard Unicode database for information about individual codepoints.
+Unicode-related functions are located in the @code{sb-unicode} package.
+
+SBCL also extends ANSI character literal syntax to support Unicode
+codepoints. You can either specify a character by its Unicode name, with
+spaces replaced by underscores, if a unique name exists @footnote{aPlease
+note that the codepoint U+1F5CF (PAGE) introduced in Unicode 7.0 is
+named @code{UNICODE_PAGE}, since the name ``Page'' is required to be
+assigned to form-feed (U+0C) by the ANSI standard.} or
+by giving its hexadecimal codepoint preceded by a ``U'', an optional
+``+'', and an arbitrary number of leading zeros. You may also input the
+character directly into your source code if it can be encoded in your
+file. If a character had an assigned name in Unicode 1.0 that was
+distinct from its current name, you may also use that name (with spaces
+replaced by underscares) prefixed by ``UNICODE1_'' to specify the character.
+
+For example, you can specify the codepoint U+00E1 (``Latin
+Small Letter A With Acute'') as
+@itemize @bullet
+@item
+@code{#\LATIN_SMALL_LETTER_A_WITH_ACUTE}
+@item
+@code{#\UNICODE1_LATIN_SMALL_LETTER_A_ACUTE}
+@item
+@code{#\á} assuming a Unicode source file
+@item
+@code{#\U00E1}
+@item
+@code{#\UE1}
+@item
+@code{#\U+00E1}
+@end itemize
+
+@subsection Unicode property access
+
+The following functions can be used to find information about a Unicode
+codepoint.
+
+@include fun-sb-unicode-general-category.texinfo
+
+@include fun-sb-unicode-bidi-class.texinfo
+
+@include fun-sb-unicode-combining-class.texinfo
+
+@include fun-sb-unicode-decimal-value.texinfo
+
+@include fun-sb-unicode-digit-value.texinfo
+
+@include fun-sb-unicode-numeric-value.texinfo
+
+@include fun-sb-unicode-mirrored-p.texinfo
+
+@include fun-sb-unicode-bidi-mirroring-glyph.texinfo
+
+@include fun-sb-unicode-age.texinfo
+
+@include fun-sb-unicode-hangul-syllable-type.texinfo
+
+@include fun-sb-unicode-east-asian-width.texinfo
+
+@include fun-sb-unicode-script.texinfo
+
+@include fun-sb-unicode-char-block.texinfo
+
+@include fun-sb-unicode-unicode-1-name.texinfo
+
+@include fun-sb-unicode-proplist-p.texinfo
+
+@include fun-sb-unicode-uppercase-p.texinfo
+
+@include fun-sb-unicode-lowercase-p.texinfo
+
+@include fun-sb-unicode-cased-p.texinfo
+
+@include fun-sb-unicode-case-ignorable-p.texinfo
+
+@include fun-sb-unicode-alphabetic-p.texinfo
+
+@include fun-sb-unicode-ideographic-p.texinfo
+
+@include fun-sb-unicode-math-p.texinfo
+
+@include fun-sb-unicode-whitespace-p.texinfo
+
+@include fun-sb-unicode-soft-dotted-p.texinfo
+
+@include fun-sb-unicode-hex-digit-p.texinfo
+
+@include fun-sb-unicode-default-ignorable-p.texinfo
+
+@include fun-sb-unicode-grapheme-break-class.texinfo
+
+@include fun-sb-unicode-word-break-class.texinfo
+
+@include fun-sb-unicode-sentence-break-class.texinfo
+
+@include fun-sb-unicode-line-break-class.texinfo
+
+@subsection String operations
+
+SBCL can normalize strings using:
+
+@include fun-sb-unicode-normalize-string.texinfo
+
+@include fun-sb-unicode-normalized-p.texinfo
+
+SBCL implements the full range of Unicode case operations with the
+functions
+
+@include fun-sb-unicode-uppercase.texinfo
+
+@include fun-sb-unicode-lowercase.texinfo
+
+@include fun-sb-unicode-titlecase.texinfo
+
+@include fun-sb-unicode-casefold.texinfo
+
+It also extends standard Common Lisp case functions such as
+@findex @cl{string-upcase}
+@code{string-upcase} and
+@findex @cl{char-downcase}
+@code{string-downcase} to support a subset of Unicode's casing behavior.
+Specifically, a character is
+@findex @cl{both-case-p} 
+@code{both-case-p} if its case mapping in Unicode is one-to-one and
+invertable.
+
+The @code{sb-unicode} package also provides functions for
+collating/sorting strings according to the Unicode Collation Algorithm. 
+
+@include fun-sb-unicode-unicode-lt.texinfo
+
+@include fun-sb-unicode-unicode=.texinfo
+
+@include fun-sb-unicode-unicode-equal.texinfo
+
+@include fun-sb-unicode-unicode-lt=.texinfo
+
+@include fun-sb-unicode-unicode-gt.texinfo
+
+@include fun-sb-unicode-unicode-gt=.texinfo
+
+The following functions are provided for detecting visually confusable strings:
+
+@include fun-sb-unicode-confusable-p.texinfo
+
+@subsection Breaking strings
+
+The @code{sb-unicode} package includes several functions for breaking a
+Unicode string into useful parts.
+
+@include fun-sb-unicode-graphemes.texinfo
+
+@include fun-sb-unicode-words.texinfo
+
+@include fun-sb-unicode-sentences.texinfo
+
+@include fun-sb-unicode-lines.texinfo
 
 @node  Customization Hooks for Users
 @comment  node-name,  next,  previous,  up
@@ -795,6 +1028,7 @@ different type of generator.
 @include fun-sb-ext-delete-directory.texinfo
 @include fun-sb-ext-get-time-of-day.texinfo
 @include macro-sb-ext-wait-for.texinfo
+@include fun-sb-ext-assert-version-gt=.texinfo
 
 @node Stale Extensions
 @comment  node-name,  next,  previous,  up

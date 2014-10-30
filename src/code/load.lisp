@@ -76,6 +76,10 @@
          ((zerop ,n-cnt) ,n-res)
        (declare (type index ,n-pos ,n-cnt)))))
 
+;;; FIXME: why do all of these reading functions and macros declare
+;;; (SPEED 0)?  was there some bug in the compiler which has since
+;;; been fixed?  --njf, 2004-09-08
+
 ;;; Read a signed integer.
 (defmacro fast-read-s-integer (n)
   (declare (optimize (speed 0)))
@@ -97,6 +101,12 @@
       `(with-fast-read-byte ((unsigned-byte 8) *fasl-input-stream*)
          (fast-read-u-integer ,n))))
 
+;; FIXME: on x86-64, these functions exceed 600, 900, and 1200 bytes of code
+;; respectively. Either don't inline them, or make a "really" fast inline case
+;; that punts if inapplicable. e.g. if the fast-read-byte buffer will not be
+;; refilled, then SAP-REF-WORD could work to read 8 bytes.
+;; But this would only be feasible on machines that are little-endian
+;; and that allow unaligned reads. (like x86)
 (declaim (inline read-byte-arg read-halfword-arg read-word-arg))
 (defun read-byte-arg ()
   (declare (optimize (speed 0)))
@@ -182,17 +192,22 @@
 (defvar *fop-stack*)
 (declaim (simple-vector *fop-stack*))
 
+(declaim (inline fop-stack-empty-p))
 (defun fop-stack-empty-p ()
   (eql 0 (svref *fop-stack* 0)))
 
-(defun pop-fop-stack ()
+;; Ensure that N arguments can be popped from the FOP stack.
+;; Return the stack and the pointer to the first argument.
+;; Update the new top-of-stack to reflect that all N have been popped.
+(defun fop-stack-pop-n (n)
+  (declare (type index n))
   (let* ((stack *fop-stack*)
-         (top (svref stack 0)))
-    (declare (type index top))
-    (when (eql 0 top)
-      (error "FOP stack empty"))
-    (setf (svref stack 0) (1- top))
-    (svref stack top)))
+         (top (the index (svref stack 0)))
+         (new-top (- top n)))
+    (if (minusp new-top) ; 0 is ok at this point
+        (error "FOP stack underflow")
+        (progn (setf (svref stack 0) new-top)
+               (values stack (1+ new-top))))))
 
 (defun push-fop-stack (value)
   (let* ((stack *fop-stack*)
@@ -204,38 +219,6 @@
     (setf (svref stack 0) next
           (svref stack next) value)))
 
-;;; Define a local macro to pop from the stack. Push the result of evaluation
-;;; if PUSHP.
-(defmacro with-fop-stack (pushp &body forms)
-  (aver (member pushp '(nil t :nope)))
-  `(macrolet ((pop-stack ()
-                `(pop-fop-stack))
-              (push-stack (value)
-                `(push-fop-stack ,value)))
-     ,(if pushp
-          `(push-fop-stack (progn ,@forms))
-          `(progn ,@forms))))
-
-;;; Call FUN with N arguments popped from STACK.
-(defmacro call-with-popped-args (fun n)
-  ;; N's integer value must be known at macroexpansion time.
-  (declare (type index n))
-  (with-unique-names (n-stack old-top new-top)
-    (let ((argtmps (make-gensym-list n)))
-      `(let* ((,n-stack *fop-stack*)
-              (,old-top (svref ,n-stack 0))
-              (,new-top (- ,old-top ,n))
-              ,@(loop for i from 1 upto n collecting
-                      `(,(nth (1- i) argtmps)
-                        (aref ,n-stack (+ ,new-top ,i)))))
-         (declare (simple-vector ,n-stack))
-         (setf (svref ,n-stack 0) ,new-top)
-        ;; (For some applications it might be appropriate to FILL the
-        ;; popped area with NIL here, to avoid holding onto garbage. For
-        ;; sbcl-0.8.7.something, though, it shouldn't matter, because
-        ;; we're using this only to pop stuff off *FOP-STACK*, and the
-        ;; entire *FOP-STACK* can be GCed as soon as LOAD returns.)
-        (,fun ,@argtmps)))))
 
 ;;;; Conditions signalled on invalid fasls (wrong fasl version, etc),
 ;;;; so that user code (esp. ASDF) can reasonably handle attempts to
@@ -435,7 +418,17 @@
 ;;; Return true if we successfully load a group from the stream, or
 ;;; NIL if EOF was encountered while trying to read from the stream.
 ;;; Dispatch to the right function for each fop.
-(defun load-fasl-group (stream)
+(defun load-fasl-group (stream print)
+  ;;
+  ;; PRINT causes most tlf-equivalent forms to print their primary value.
+  ;; This differs from loading of Lisp source, which prints all values of
+  ;; only truly-toplevel forms.  This is permissible per CLHS -
+  ;;  "If print is true, load incrementally prints information to standard
+  ;;   output showing the progress of the loading process. [...]
+  ;;   For a compiled file, what is printed might not reflect precisely the
+  ;;   contents of the source file, but some information is generally printed."
+  ;;
+  (declare (ignorable print))
   (when (check-fasl-header stream)
     (catch 'fasl-group-end
       (reset-fop-table)
@@ -446,33 +439,34 @@
             ;; Do some debugging output.
             #!+sb-show
             (when *show-fops-p*
-              (let* ((stack *fop-stack*)
-                     (ptr (svref stack 0)))
-                (fresh-line *trace-output*)
-                ;; The FOP operations are stack based, so it's sorta
-                ;; logical to display the operand before the operator.
-                ;; ("reverse Polish notation")
-                (unless (= ptr 0)
-                  (write-char #\space *trace-output*)
-                  (prin1 (aref stack ptr) *trace-output*)
-                  (terpri *trace-output*))
-                ;; Display the operator.
-                (format *trace-output*
-                        "~&~S (#X~X at ~D) (~S)~%"
-                        (aref *fop-names* byte)
-                        byte
-                        (1- (file-position stream))
-                        (svref *fop-funs* byte))))
-
+              (format *trace-output* "~&~6x : [~D,~D] ~2,'0x(~A)"
+                      (1- (file-position stream))
+                      (svref *fop-stack* 0) ; stack pointer
+                      (svref *fop-table* 0) ; table pointer
+                      byte (aref *fop-names* byte)))
             ;; Actually execute the fop.
-            (funcall (the function (svref *fop-funs* byte)))))))))
+            (let ((result (funcall (the function (svref *fop-funs* byte)))))
+              (declare (ignorable result))
+              #!+sb-show
+              (when *show-fops-p*
+                (let* ((stack *fop-stack*)
+                       (ptr (svref stack 0)))
+                  (format *trace-output* " -- ~[<empty>,~D~:;[~:*~D,~D] ~S~]"
+                          ptr (svref *fop-table* 0)
+                          (unless (eql ptr 0) (aref stack ptr)))
+                  (terpri *trace-output*)))
+              #-sb-xc-host
+              (macrolet ((terminator-opcode ()
+                           (or (get 'sb!fasl::fop-funcall-for-effect
+                                    'sb!fasl::fop-code)
+                               (error "Missing FOP definition?"))))
+                (when (and print
+                           (eq byte (terminator-opcode))
+                           (fop-stack-empty-p)) ; (presumed) end of TLF
+                  (load-fresh-line)
+                  (prin1 result))))))))))
 
 (defun load-as-fasl (stream verbose print)
-  ;; KLUDGE: ANSI says it's good to do something with the :PRINT
-  ;; argument to LOAD when we're fasloading a file, but currently we
-  ;; don't. (CMU CL did, but implemented it in a non-ANSI way, and I
-  ;; just disabled that instead of rewriting it.) -- WHN 20000131
-  (declare (ignore print))
   (when (zerop (file-length stream))
     (error "attempt to load an empty FASL file:~%  ~S" (namestring stream)))
   (maybe-announce-load stream verbose)
@@ -480,7 +474,7 @@
          (*fop-table* (make-fop-vector 1000))
          (*fop-stack* (make-fop-vector 100)))
     (unwind-protect
-         (loop while (load-fasl-group stream))
+         (loop while (load-fasl-group stream print))
       ;; Nuke the table and stack to avoid keeping garbage on
       ;; conservatively collected platforms.
       (nuke-fop-vector *fop-table*)

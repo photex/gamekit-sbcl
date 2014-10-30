@@ -1,10 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 
 platform="${SBCL_SOFTWARE_TYPE}-${SBCL_MACHINE_TYPE}"
 
-if [ -z "$CC" ]
-then
-    CC=gcc
+if [ -z $CC ]; then
+    if [ -x "`which cc`" ]; then
+        CC=cc
+    else
+        CC=gcc
+    fi
 fi
 
 args=
@@ -14,6 +17,7 @@ case "$platform" in
     SunOS-X86-64)  args=-m64 ;;
     Linux-X86)     args="-m32" ;;
     Linux-PowerPC) args="-m32" ;;
+    FreeBSD-X86)   args="-m32" ;;
 esac
 
 while [ $# -gt 0 ]; do
@@ -23,6 +27,7 @@ while [ $# -gt 0 ]; do
         -sbcl-pic)
             case "$platform" in
                 FreeBSD-X86-64)  new=-fPIC ;;
+                Linux-ARM)       new=-fPIC ;;
                 Linux-MIPS)      new=-fPIC ;;
                 Linux-X86-64)    new=-fPIC ;;
                 Linux-PowerPC)   new=-fPIC ;;
@@ -33,6 +38,8 @@ while [ $# -gt 0 ]; do
                 SunOS-SPARC)     new=-fPIC ;;
                 SunOS-X86)       new=-fPIC ;;
                 SunOS-X86-64)    new=-fPIC ;;
+                DragonFly-X86-64)new=-fPIC ;;
+                DragonFly-X86)   new=-fPIC ;;
             esac
             ;;
 

@@ -49,12 +49,13 @@
 ;;; {str1,str2,...,strn} - matches any of str1, str2, ..., or strn.
 ;;;   (FIXME: no it doesn't)
 ;;;
-;;; Any of these special characters can be preceded by a backslash to
-;;; cause it to be treated as a regular character.
-(defun remove-backslashes (namestr start end)
+;;; Any of these special characters can be preceded by an escape
+;;; character to cause it to be treated as a regular character.
+(defun remove-escape-characters (namestr start end escape-char)
   #!+sb-doc
-  "Remove any occurrences of #\\ from the string because we've already
-   checked for whatever they may have protected."
+  "Remove any occurrences of escape characters from the string
+   because we've already checked for whatever they may have
+   protected."
   (declare (type simple-string namestr)
            (type index start end))
   (let* ((result (make-string (- end start) :element-type 'character))
@@ -68,21 +69,22 @@
              (incf dst))
             (t
              (let ((char (schar namestr src)))
-               (cond ((char= char #\\)
+               (cond ((char= char escape-char)
                       (setq quoted t))
                      (t
                       (setf (schar result dst) char)
                       (incf dst)))))))
     (when quoted
       (error 'namestring-parse-error
-             :complaint "backslash in a bad place"
+             :complaint "escape char in a bad place"
              :namestring namestr
              :offset (1- end)))
     (%shrink-vector result dst)))
 
-(defun maybe-make-pattern (namestr start end)
+(defun maybe-make-pattern (namestr start end escape-char)
   (declare (type simple-string namestr)
-           (type index start end))
+           (type index start end)
+           (type character escape-char))
   (collect ((pattern))
     (let ((quoted nil)
           (any-quotes nil)
@@ -91,9 +93,9 @@
       (flet ((flush-pending-regulars ()
                (when last-regular-char
                  (pattern (if any-quotes
-                              (remove-backslashes namestr
-                                                  last-regular-char
-                                                  index)
+                              (remove-escape-characters
+                               namestr last-regular-char
+                               index escape-char)
                               (subseq namestr last-regular-char index)))
                  (setf any-quotes nil)
                  (setf last-regular-char nil))))
@@ -104,7 +106,7 @@
             (cond (quoted
                    (incf index)
                    (setf quoted nil))
-                  ((char= char #\\)
+                  ((char= char escape-char)
                    (setf quoted t)
                    (setf any-quotes t)
                    (unless last-regular-char
@@ -149,24 +151,30 @@
           (t
            (make-pattern (pattern))))))
 
-(defun unparse-physical-piece (thing)
+(defun unparse-physical-piece (thing escape-char)
   (etypecase thing
     ((member :wild) "*")
     (simple-string
      (let* ((srclen (length thing))
             (dstlen srclen))
        (dotimes (i srclen)
-         (case (schar thing i)
-           ((#\* #\? #\[)
-            (incf dstlen))))
+         (let ((char (schar thing i)))
+           (case char
+             ((#\* #\? #\[)
+              (incf dstlen))
+             (t (when (char= char escape-char)
+                  (incf dstlen))))))
        (let ((result (make-string dstlen))
              (dst 0))
          (dotimes (src srclen)
            (let ((char (schar thing src)))
              (case char
                ((#\* #\? #\[)
-                (setf (schar result dst) #\\)
-                (incf dst)))
+                (setf (schar result dst) escape-char)
+                (incf dst))
+               (t (when (char= char escape-char)
+                    (setf (schar result dst) escape-char)
+                    (incf dst))))
              (setf (schar result dst) char)
              (incf dst)))
          result)))
@@ -204,18 +212,18 @@
 
 (/show0 "filesys.lisp 160")
 
-(defun extract-name-type-and-version (namestr start end)
+(defun extract-name-type-and-version (namestr start end escape-char)
   (declare (type simple-string namestr)
            (type index start end))
   (let* ((last-dot (position #\. namestr :start (1+ start) :end end
                              :from-end t)))
     (cond
       (last-dot
-       (values (maybe-make-pattern namestr start last-dot)
-               (maybe-make-pattern namestr (1+ last-dot) end)
+       (values (maybe-make-pattern namestr start last-dot escape-char)
+               (maybe-make-pattern namestr (1+ last-dot) end escape-char)
                :newest))
       (t
-       (values (maybe-make-pattern namestr start end)
+       (values (maybe-make-pattern namestr start end escape-char)
                nil
                :newest)))))
 
@@ -286,10 +294,12 @@
              :format-control "~@<can't find the ~A of wild pathname ~A~
                               (physicalized from ~A).~:>"
              :format-arguments (list query-for pathname pathspec)))
-    (flet ((fail (note-format pathname errno)
-             (if errorp
-                 (simple-file-perror note-format pathname errno)
-                 (return-from query-file-system nil))))
+    (macrolet ((fail (note-format pathname errno)
+                 ;; Do this as a macro to avoid evaluating format
+                 ;; calls when ERROP is NIL
+                 `(if errorp
+                      (simple-file-perror ,note-format ,pathname ,errno)
+                      (return-from query-file-system nil))))
       (let ((filename (native-namestring pathname :as-file t)))
         #!+win32
         (case query-for
@@ -308,12 +318,12 @@
                    (pathname-host pathname)
                    (sane-default-pathname-defaults)
                    :as-directory (eq :directory kind)))
-                 (fail "couldn't resolve ~A" filename
-                       (- (sb!win32:get-last-error))))))
+                 (fail (format nil "Failed to find the ~A of ~~A" query-for) filename
+                       (sb!win32:get-last-error)))))
           (:write-date
            (or (sb!win32::native-file-write-date filename)
-               (fail "couldn't query write date of ~A" filename
-                     (- (sb!win32:get-last-error))))))
+               (fail (format nil "Failed to find the ~A of ~~A" query-for) filename
+                       (sb!win32:get-last-error)))))
         #!-win32
         (multiple-value-bind (existsp errno ino mode nlink uid gid rdev size
                                       atime mtime)
@@ -390,7 +400,7 @@
                              (:write-date (+ unix-to-universal-time mtime))))))
                      ;; If we're still here, the file doesn't exist; error.
                      (fail
-                      (format nil "failed to find the ~A of ~~A" query-for)
+                      (format nil "Failed to find the ~A of ~~A" query-for)
                       pathspec errno)))
             (if existsp
                 (case query-for
@@ -485,7 +495,7 @@ file, then the associated file is renamed."
   "Delete the specified FILE.
 
 If FILE is a stream, on Windows the stream is closed immediately. On Unix
-plaforms the stream remains open, allowing IO to continue: the OS resources
+platforms the stream remains open, allowing IO to continue: the OS resources
 associated with the deleted file remain available till the stream is closed as
 per standard Unix unlink() behaviour."
   (let* ((pathname (translate-logical-pathname
@@ -497,7 +507,7 @@ per standard Unix unlink() behaviour."
     (multiple-value-bind (res err)
         #!-win32 (sb!unix:unix-unlink namestring)
         #!+win32 (or (sb!win32::native-delete-file namestring)
-                     (values nil (- (sb!win32:get-last-error))))
+                     (values nil (sb!win32:get-last-error)))
         (unless res
           (simple-file-perror "couldn't delete ~A" namestring err))))
   t)
@@ -512,6 +522,7 @@ per standard Unix unlink() behaviour."
       pathname))
 
 (defun delete-directory (pathspec &key recursive)
+  #!+sb-doc
   "Deletes the directory designated by PATHSPEC (a pathname designator).
 Returns the truename of the directory deleted.
 
@@ -556,7 +567,7 @@ exist or if is a file or a symbolic link."
                  (multiple-value-bind (res errno)
                      #!+win32
                      (or (sb!win32::native-delete-directory namestring)
-                         (values nil (- (sb!win32:get-last-error))))
+                         (values nil (sb!win32:get-last-error)))
                      #!-win32
                      (values
                       (not (minusp (alien-funcall
@@ -579,19 +590,26 @@ exist or if is a file or a symbolic link."
     ;; SBCL_HOME isn't set for :EXECUTABLE T embedded cores
     (when (and sbcl-home (not (string= sbcl-home "")))
       (parse-native-namestring sbcl-home
-                               #!-win32 sb!impl::*unix-host*
-                               #!+win32 sb!impl::*win32-host*
+                               *physical-host*
                                *default-pathname-defaults*
                                :as-directory t))))
 
 (defun user-homedir-namestring (&optional username)
-  (if username
-      (sb!unix:user-homedir username)
-      (let ((env-home (posix-getenv "HOME")))
-        (if (and env-home (not (string= env-home "")))
-            env-home
+  (flet ((not-empty (x)
+           (and (not (equal x "")) x)))
+    (if username
+        (sb!unix:user-homedir username)
+        (or (not-empty (posix-getenv "HOME"))
+            #!+win32
+            (not-empty (posix-getenv "USERPROFILE"))
+            #!+win32
+            (let ((drive (not-empty (posix-getenv "HOMEDRIVE")))
+                  (path (not-empty (posix-getenv "HOMEPATH"))))
+              (and drive path
+                   (concatenate 'string drive path)))
             #!-win32
-            (sb!unix:uid-homedir (sb!unix:unix-getuid))))))
+            (not-empty (sb!unix:uid-homedir (sb!unix:unix-getuid)))
+            (error "Couldn't find home directory.")))))
 
 ;;; (This is an ANSI Common Lisp function.)
 (defun user-homedir-pathname (&optional host)
@@ -606,8 +624,7 @@ system. HOST argument is ignored by SBCL."
     (or (user-homedir-namestring)
         #!+win32
         (sb!win32::get-folder-namestring sb!win32::csidl_profile))
-    #!-win32 sb!impl::*unix-host*
-    #!+win32 sb!impl::*win32-host*
+    *physical-host*
     *default-pathname-defaults*
     :as-directory t)))
 

@@ -115,6 +115,9 @@
             :set-trans (setf %array-available-elements)
             :set-known ())
   (data :type array
+        ;; FIXME: terrible name for the accessor.
+        ;; It is in general just an ARRAY,
+        ;; and should be named %ARRAY-DATA.
         :ref-trans %array-data-vector
         :ref-known (flushable foldable)
         :set-trans (setf %array-data-vector)
@@ -145,9 +148,13 @@
           :type index)
   (data :rest-p t :c-type #!-alpha "uword_t" #!+alpha "u32"))
 
+;;; The header contains the size of slots and constants in words.
 (define-primitive-object (code :type code-component
                                :lowtag other-pointer-lowtag
                                :widetag t)
+  ;; This is the size of instructions in bytes, not aligned.
+  ;; Adding the size from the header and aligned code-size will yield
+  ;; the total size of the code-object.
   (code-size :type index
              :ref-known (flushable movable)
              :ref-trans %code-code-size)
@@ -161,7 +168,6 @@
               :ref-trans %code-debug-info
               :set-known ()
               :set-trans (setf %code-debug-info))
-  (trace-table-offset)
   (constants :rest-p t))
 
 (define-primitive-object (fdefn :type fdefn
@@ -178,6 +184,9 @@
                                      :widetag simple-fun-header-widetag)
   #!-(or x86 x86-64) (self :ref-trans %simple-fun-self
                :set-trans (setf %simple-fun-self))
+  ;; FIXME: we don't currently detect/prevent at compile-time the bad
+  ;; scenario this comment claims to disallow, as determined by re-enabling
+  ;; these SET- and REF- specifiers, which led to a cold-init crash.
   #!+(or x86 x86-64) (self
           ;; KLUDGE: There's no :SET-KNOWN, :SET-TRANS, :REF-KNOWN, or
           ;; :REF-TRANS here in this case. Instead, there's separate
@@ -232,7 +241,12 @@
 
 (define-primitive-object (closure :lowtag fun-pointer-lowtag
                                   :widetag closure-header-widetag)
-  (fun :init :arg :ref-trans %closure-fun)
+  ;; %CLOSURE-FUN should never be invoked on x86[-64].
+  ;; The above remark at %SIMPLE-FUN-SELF is relevant in its sentiment,
+  ;; but actually no longer true - the confusing situation is not caught
+  ;; until too late. But at least this one was nonfatal.
+  #!-(or x86 x86-64) (fun :init :arg :ref-trans %closure-fun)
+  #!+(or x86 x86-64) (fun :init :arg)
   (info :rest-p t))
 
 (define-primitive-object (funcallable-instance
@@ -301,10 +315,6 @@
   #!+(and win32 x86) seh-frame-handler
   tag
   (previous-catch :c-type #!-alpha "struct catch_block *" #!+alpha "u32"))
-
-;;; (For an explanation of this, see the comments at the definition of
-;;; KLUDGE-NONDETERMINISTIC-CATCH-BLOCK-SIZE.)
-(aver (= kludge-nondeterministic-catch-block-size catch-block-size))
 
 ;;;; symbols
 
@@ -330,17 +340,19 @@
   ;; care for this reason, as hash values must be fixnums.
   (hash :set-trans %set-symbol-hash)
 
-  (plist :ref-trans symbol-plist
-         :set-trans %set-symbol-plist
-         :cas-trans %compare-and-swap-symbol-plist
-         :type list
-         :init :null)
+  (info :ref-trans symbol-info :ref-known (flushable)
+        :set-trans (setf symbol-info)
+        :set-known ()
+        :cas-trans %compare-and-swap-symbol-info
+        :type (or simple-vector list)
+        :init :null)
   (name :ref-trans symbol-name :init :arg)
   (package :ref-trans symbol-package
            :set-trans %set-symbol-package
            :init :null)
   ;; 0 tls-index means no tls-index is allocated
-  #!+sb-thread
+  ;; x86-64 puts the tls-index in the header word.
+  #!+(and sb-thread (not x86-64))
   (tls-index :ref-known (flushable) :ref-trans symbol-tls-index))
 
 (define-primitive-object (complex-single-float
@@ -386,13 +398,31 @@
   ;; Kept here so that when the thread dies we can release the whole
   ;; memory we reserved.
   (os-address :c-type "void *" :length #!+alpha 2 #!-alpha 1)
-  ;; Keep these next four slots close to the beginning of the structure.
-  ;; Doing so reduces code size for x86-64 allocation sequences and
-  ;; special variable manipulations.
+
+  ;; Keep these next six slots (alloc-region being figured in as 1 slot)
+  ;; near the beginning of the structure so that x86[-64] assembly code
+  ;; can use single-byte displacements from thread-base-tn.
+  ;; Doing so reduces code size for allocation sequences and special variable
+  ;; manipulations by fixing their TLS offsets to be < 2^7, the largest
+  ;; aligned displacement fitting in a signed byte.
   #!+gencgc (alloc-region :c-type "struct alloc_region" :length 5)
-  #!+(or x86 x86-64 sb-thread) (pseudo-atomic-bits)
-  (binding-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
-  (binding-stack-pointer :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
+  #!+(or x86 x86-64 sb-thread) (pseudo-atomic-bits :special *pseudo-atomic-bits*)
+  ;; next two not used in C, but this wires the TLS offsets to small values
+  #!+(and x86-64 sb-thread)
+  (current-catch-block :special *current-catch-block*)
+  #!+(and x86-64 sb-thread)
+  (current-unwind-protect-block :special *current-unwind-protect-block*)
+  (alien-stack-pointer :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1
+                       :special *alien-stack-pointer*)
+  (binding-stack-pointer :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1
+                         :special *binding-stack-pointer*)
+  ;; END of slots to keep near the beginning.
+
+  ;; These aren't accessed (much) from Lisp, so don't really care
+  ;; if it takes a 4-byte displacement.
+  (alien-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
+  (binding-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1
+                       :special *binding-stack-start*)
   #!+sb-thread
   (os-attr :c-type "pthread_attr_t *" :length #!+alpha 2 #!-alpha 1)
   #!+sb-thread
@@ -405,11 +435,11 @@
   (state-not-stopped-sem :c-type "os_sem_t *" :length #!+alpha 2 #!-alpha 1)
   #!+sb-thread
   (state-not-stopped-waitcount :c-type "int" :length 1)
-  (control-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
-  (control-stack-end :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
+  (control-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1
+                       :special *control-stack-start*)
+  (control-stack-end :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1
+                     :special *control-stack-end*)
   (control-stack-guard-page-protected)
-  (alien-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
-  (alien-stack-pointer :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
   #!+win32 (private-events :c-type "struct private_events" :length 2)
   (this :c-type "struct thread *" :length #!+alpha 2 #!-alpha 1)
   (prev :c-type "struct thread *" :length #!+alpha 2 #!-alpha 1)

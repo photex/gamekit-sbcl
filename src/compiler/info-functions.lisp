@@ -41,7 +41,6 @@
   ;; legal name?
   (check-fun-name name)
 
-
   ;; KLUDGE: This can happen when eg. compiling a NAMED-LAMBDA, and isn't
   ;; guarded against elsewhere -- so we want to assert package locks here. The
   ;; reason we do it only when stomping on existing stuff is because we want
@@ -74,7 +73,19 @@
   (when (boundp '*free-funs*)       ; when compiling
     (remhash name *free-funs*))
 
-  (note-if-setf-fun-and-macro name)
+  ;; It's uncommon for users to define both a SETF macro and function for
+  ;; the same thing, so usually we warn about it, but offer a somewhat arbitrary
+  ;; escape to avoid a warning - if the function gets an ftype proclaimed
+  ;; before DEFSETF (or -EXPANDER) is used, we don't complain about the macro.
+  ;; SBCL itself provides most SETFable things both ways even when CLHS does not
+  ;; say specifically that #'(SETF x) exists.
+  ;; But when building SBCL the order of function/macro definition is not
+  ;; directly controlled because most SETF functions are defined en masse by
+  ;; 'setf-funs' with no regard for what exists, and we also have to respect
+  ;; all other constraints on build order to make bootstrap work.
+  ;; So, ... just don't warn when running the cross-compiler, which means
+  ;; don't compile this line in when building the cross-compiler.
+  #-sb-xc-host(note-if-setf-fun-and-macro name)
 
   (values))
 
@@ -87,31 +98,37 @@
 (defun note-if-setf-fun-and-macro (name)
   (when (and (consp name)
              (eq (car name) 'setf))
-    (when (or (info :setf :inverse (second name))
-              (info :setf :expander (second name)))
-      (compiler-style-warn
-       "defining as a SETF function a name that already has a SETF macro:~
-       ~%  ~S"
-       name)))
+    (let ((stem (second name)))
+      (when (or (info :setf :inverse stem) (info :setf :expander stem))
+        (compiler-style-warn
+         "defining function ~S when ~S already has a SETF macro"
+         name stem))))
   (values))
 
 ;;; Make NAME no longer be a function name: clear everything back to
 ;;; the default.
 (defun undefine-fun-name (name)
   (when name
-    (macrolet ((frob (type &optional val)
-                 `(unless (eq (info :function ,type name) ,val)
-                    (setf (info :function ,type name) ,val))))
-      (frob :info)
-      (frob :type (specifier-type 'function))
-      (frob :where-from :assumed)
-      (frob :inlinep)
-      (frob :kind)
-      (frob :macro-function)
-      (frob :inline-expansion-designator)
-      (frob :source-transform)
-      (frob :structure-accessor)
-      (frob :assumed-type)))
+    (macrolet ((frob (&rest types)
+                 `(clear-info-values
+                   name ',(mapcar (lambda (x)
+                                    (type-info-number
+                                     (type-info-or-lose :function x)))
+                                  types))))
+      ;; Note that this does not clear the :DEFINITION.
+      ;; That's correct, because if we lose the association between a
+      ;; symbol and its #<fdefn> object, it could lead to creation of
+      ;; a non-unique #<fdefn> for a name.
+      (frob :info
+            :type
+            :where-from
+            :inlinep
+            :kind
+            :macro-function
+            :inline-expansion-designator
+            :source-transform
+            :structure-accessor
+            :assumed-type)))
   (values))
 
 ;;; part of what happens with DEFUN, also with some PCL stuff: Make
@@ -121,7 +138,7 @@
   (when (eq (info :function :where-from name) :assumed)
     (setf (info :function :where-from name) :defined)
     (if (info :function :assumed-type name)
-        (setf (info :function :assumed-type name) nil))))
+        (clear-info :function :assumed-type name))))
 
 ;;; Decode any raw (INFO :FUNCTION :INLINE-EXPANSION-DESIGNATOR FUN-NAME)
 ;;; value into a lambda expression, or return NIL if there is none.
@@ -269,25 +286,42 @@ return NIL. Can be set with SETF when ENV is NIL."
 
 (defun (setf fdocumentation) (string name doc-type)
   (declare (type (or null string) string))
-  (case doc-type
-    (variable (setf (info :variable :documentation name) string))
-    (function
-     ;; KLUDGE: FDEFINITION isn't ready early enough during cold-init, so
-     ;; special case for symbols.
-     (if (symbolp name)
-         (setf (%fun-doc (symbol-function name)) string)
-         (when (legal-fun-name-p name)
-           (setf (%fun-doc (fdefinition name)) string))))
-    (structure (cond
-                 ((eq (info :type :kind name) :instance)
-                  (setf (info :type :documentation name) string))
-                 ((info :typed-structure :info name)
-                  (setf (info :typed-structure :documentation name) string))))
-    (type (setf (info :type :documentation name) string))
-    (setf (setf (info :setf :documentation name) string))
-    (t
-     (when (typep name '(or symbol cons))
-       (setf (random-documentation name doc-type) string))))
+  (let ((info-number
+         (macrolet ((info-number (class type)
+                      (type-info-number (type-info-or-lose class type))))
+           (case doc-type
+             (variable (info-number :variable :documentation))
+             (structure
+              (cond ((eq (info :type :kind name) :instance)
+                     (info-number :type :documentation))
+                    ((info :typed-structure :info name)
+                     (info-number :typed-structure :documentation))))
+             (type (info-number :type :documentation))
+             (setf (info-number :setf :documentation))))))
+    (cond (info-number
+           (if string
+               (set-info-value name info-number string)
+               (clear-info-values name (list info-number))))
+          ((eq doc-type 'function)
+           ;; FIXME: this silently loses
+           ;; * (setf (documentation '(a bad name) 'function) "x") => "x"
+           ;; * (documentation '(a bad name) 'function) => NIL
+           ;; which is fine because as noted in pcl/documentation.lsp
+           ;;   even for supported doc types an implementation is permitted
+           ;;   to discard docs at any time
+           ;; but should a warning be issued just as for an unknown DOC-TYPE?
+           ;;
+           ;; And there's additional weirdness if you do, in this order -
+           ;;  * (setf (documentation 'foo 'function) "hi")
+           ;;  * (defun foo () "hey" 1)
+           ;;  * (documentation 'foo 'function) => "hi" ; should be "hey"
+           ;; CLHS says regarding DEFUN:
+           ;; " Documentation is attached as a documentation string to
+           ;;   /name/ (as kind function) and to the /function object/."
+           (when (legal-fun-name-p name)
+             (setf (%fun-doc (fdefinition name)) string)))
+          ((typep name '(or symbol cons))
+           (setf (random-documentation name doc-type) string))))
   string)
 
 (defun random-documentation (name type)

@@ -48,31 +48,8 @@
 (declaim (type hash-table *backend-template-names*))
 
 ;;; hashtables mapping from SC and SB names to the corresponding structures
-;;;
-;;; CMU CL comment:
-;;;   The META versions are only used at meta-compile and load times,
-;;;   so the defining macros can change these at meta-compile time
-;;;   without breaking the compiler.
-;;; FIXME: Couldn't the META versions go away in SBCL now that we don't
-;;; have to worry about metacompiling and breaking the compiler?
 (defvar *backend-sc-names* (make-hash-table :test 'eq))
-(defvar *backend-sb-names* (make-hash-table :test 'eq))
-(defvar *backend-meta-sc-names* (make-hash-table :test 'eq))
-(defvar *backend-meta-sb-names* (make-hash-table :test 'eq))
-(declaim (type hash-table
-               *backend-sc-names*
-               *backend-sb-names*
-               *backend-meta-sc-names*
-               *backend-meta-sb-names*))
-
-
-;;; like *SC-NUMBERS*, but updated at meta-compile time
-;;;
-;;; FIXME: As per *BACKEND-META-SC-NAMES* and *BACKEND-META-SB-NAMES*,
-;;; couldn't we get rid of this in SBCL?
-(defvar *backend-meta-sc-numbers*
-  (make-array sc-number-limit :initial-element nil))
-(declaim (type sc-vector *backend-meta-sc-numbers*))
+(declaim (type hash-table *backend-sc-names*))
 
 ;;; translations from primitive type names to the corresponding
 ;;; primitive-type structure.
@@ -84,15 +61,8 @@
 ;;; whatever. These names can only be used as the :ARG-TYPES or
 ;;; :RESULT-TYPES for VOPs and can map to anything else that can be
 ;;; used as :ARG-TYPES or :RESULT-TYPES (e.g. :OR, :CONSTANT).
-(defvar *backend-primitive-type-aliases* (make-hash-table :test 'eq))
-(declaim (type hash-table *backend-primitive-type-aliases*))
-
-;;; meta-compile time translation from names to primitive types
-;;;
-;;; FIXME: As per *BACKEND-META-SC-NAMES* and *BACKEND-META-SB-NAMES*,
-;;; couldn't we get rid of this in SBCL?
-(defvar *backend-meta-primitive-type-names* (make-hash-table :test 'eq))
-(declaim (type hash-table *meta-primitive-type-names*))
+(defvar *backend-primitive-type-aliases* nil)
+(declaim (type list *backend-primitive-type-aliases*))
 
 ;;; The primitive type T is somewhat magical, in that it is the only
 ;;; primitive type that overlaps with other primitive types. An object
@@ -112,15 +82,6 @@
 (defvar *backend-parsed-vops* (make-hash-table :test 'eq))
 (declaim (type hash-table *backend-parsed-vops*))
 
-;;; support for the assembler
-(defvar *backend-instruction-formats* (make-hash-table :test 'eq))
-(defvar *backend-instruction-flavors* (make-hash-table :test 'equal))
-(defvar *backend-special-arg-types* (make-hash-table :test 'eq))
-(declaim (type hash-table
-               *backend-instruction-formats*
-               *backend-instruction-flavors*
-               *backend-special-arg-types*))
-
 ;;; mappings between CTYPE structures and the corresponding predicate.
 ;;; The type->predicate mapping is implemented as an alist because
 ;;; there is no such thing as a TYPE= hash table.
@@ -129,10 +90,10 @@
 (declaim (type hash-table *backend-predicate-types*))
 (declaim (type list *backend-type-predicates*))
 
-;;; a vector of the internal errors defined for this backend, or NIL if
-;;; they haven't been installed yet
-(defvar *backend-internal-errors* nil)
-(declaim (type (or simple-vector null) *backend-internal-errors*))
+;;; a vector of the internal errors defined for this backend.
+;;; Empty if they haven't been installed yet.
+(defvar *backend-internal-errors* #())
+(declaim (type simple-vector *backend-internal-errors*))
 
 ;;;; VM support routines which backends need to implement
 

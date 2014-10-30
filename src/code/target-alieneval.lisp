@@ -120,7 +120,7 @@ This is SETFable."
     (dolist (binding (reverse bindings))
       (/show binding)
       (destructuring-bind
-            (symbol type &optional (opt1 nil opt1p) (opt2 nil opt2p))
+          (symbol type &optional opt1 (opt2 nil opt2p))
           binding
         (/show symbol type opt1 opt2)
         (let* ((alien-type (parse-alien-type type env))
@@ -182,12 +182,14 @@ This is SETFable."
                        ;; it could just save and restore the number-stack pointer once,
                        ;; instead of doing multiple decrements if there are multiple bindings.
                        #!-(or x86 x86-64)
-                       `((let (,var)
-                           (unwind-protect
-                               (progn
-                                 (setf ,var (make-local-alien ',info))
-                                 (let ((,var ,var))
-                                   ,@body-forms))
+                       `((let ((,var (make-local-alien ',info)))
+                           (multiple-value-prog1
+                               (progn ,@body-forms)
+                             ;; No need for unwind protect here, since
+                             ;; allocation involves modifying NSP, and
+                             ;; NSP is saved and restored during NLX.
+                             ;; And in non-transformed case it
+                             ;; performs finalization.
                              (dispose-local-alien ',info ,var))))))))))))
     (/show "revised" body)
     (verify-local-auxiliaries-okay)
@@ -196,7 +198,7 @@ This is SETFable."
                         ,(append *new-auxiliary-types*
                                  (auxiliary-type-definitions env))))
        #!+(or x86 x86-64)
-       (let ((sb!vm::*alien-stack* sb!vm::*alien-stack*))
+       (let ((sb!vm::*alien-stack-pointer* sb!vm::*alien-stack-pointer*))
          ,@body)
        #!-(or x86 x86-64)
        ,@body)))
@@ -208,11 +210,14 @@ This is SETFable."
 #!-sb-fluid (declaim (freeze-type alien-value))
 (def!method print-object ((value alien-value) stream)
   (print-unreadable-object (value stream)
-    (format stream
+    ;; See identical kludge in host-alieneval.
+    (let ((sb!pretty:*pprint-quote-with-syntactic-sugar* nil))
+      (declare (special sb!pretty:*pprint-quote-with-syntactic-sugar*))
+      (format stream
             "~S ~S #X~8,'0X ~S ~S"
             'alien-value
             :sap (sap-int (alien-value-sap value))
-            :type (unparse-alien-type (alien-value-type value)))))
+            :type (unparse-alien-type (alien-value-type value))))))
 
 #!-sb-fluid (declaim (inline null-alien))
 (defun null-alien (x)
@@ -257,7 +262,7 @@ interpreted depends on TYPE:
 
   * When TYPE is a foreign array type, an array of that type is
     allocated, and a pointer to it is returned. Note that you
-    must use DEREF to first access the arrey through the pointer.
+    must use DEREF to first access the array through the pointer.
 
     If supplied, SIZE is used as the first dimension for the array.
 
@@ -274,8 +279,7 @@ Examples:
   (type-of *foo*)                 ; => (alien (* (array (signed 8) 10)))
   (setf (deref (deref foo) 0) 10) ; => 10
 
-  (make-alien char 12)            ; => (alien (* (signed 8)))
-"
+  (make-alien char 12)            ; => (alien (* (signed 8)))"
   (let ((alien-type (if (alien-type-p type)
                         type
                         (parse-alien-type type env))))
@@ -362,6 +366,7 @@ allocated by MAKE-ALIEN, MAKE-ALIEN-STRING or malloc(3)."
                                  &key (start 0) end
                                       (external-format :default)
                                       (null-terminate t))
+  #!+sb-doc
   "Copy part of STRING delimited by START and END into freshly
 allocated foreign memory, freeable using free(3) or FREE-ALIEN.
 Returns the allocated string as a (* CHAR) alien, and the number of
@@ -369,8 +374,7 @@ bytes allocated as secondary value.
 
 The string is encoded using EXTERNAL-FORMAT. If NULL-TERMINATE is
 true (the default), the alien string is terminated by an additional
-null byte.
-"
+null byte."
   (declare (ignore start end external-format null-terminate))
   (multiple-value-bind (sap bytes)
       (apply #'%make-alien-string string rest)
@@ -489,7 +493,7 @@ null byte.
 ;;; Dereference the alien and return the results.
 (defun deref (alien &rest indices)
   #!+sb-doc
-  "De-reference an Alien pointer or array. If an array, the indices are used
+  "Dereference an Alien pointer or array. If an array, the indices are used
    as the indices of the array element to access. If a pointer, one index can
    optionally be specified, giving the equivalent of C pointer arithmetic."
   (declare (type alien-value alien)
@@ -596,6 +600,9 @@ null byte.
     (error "~S isn't forced to memory. Something went wrong." alien))
   alien)
 
+;; It's not mandatory that this function not exist for x86[-64],
+;; however for sanity, it should not, because no call to it can occur.
+#!-(or x86 x86-64)
 (defun dispose-local-alien (info alien)
   (declare (ignore info))
   (cancel-finalization alien)
@@ -683,7 +690,7 @@ null byte.
 (defun alien-funcall (alien &rest args)
   #!+sb-doc
   "Call the foreign function ALIEN with the specified arguments. ALIEN's
-   type specifies the argument and result types."
+type specifies the argument and result types."
   (declare (type alien-value alien))
   (let ((type (alien-value-type alien)))
     (typecase type
@@ -717,41 +724,41 @@ null byte.
   #!+sb-doc
   "DEFINE-ALIEN-ROUTINE Name Result-Type {(Arg-Name Arg-Type [Style])}*
 
-  Define a foreign interface function for the routine with the specified NAME.
-  Also automatically DECLAIM the FTYPE of the defined function.
+Define a foreign interface function for the routine with the specified NAME.
+Also automatically DECLAIM the FTYPE of the defined function.
 
-  NAME may be either a string, a symbol, or a list of the form (string symbol).
+NAME may be either a string, a symbol, or a list of the form (string symbol).
 
-  RETURN-TYPE is the alien type for the function return value. VOID may be
-  used to specify a function with no result.
+RETURN-TYPE is the alien type for the function return value. VOID may be
+used to specify a function with no result.
 
-  The remaining forms specify individual arguments that are passed to the
-  routine. ARG-NAME is a symbol that names the argument, primarily for
-  documentation. ARG-TYPE is the C type of the argument. STYLE specifies the
-  way that the argument is passed.
+The remaining forms specify individual arguments that are passed to the
+routine. ARG-NAME is a symbol that names the argument, primarily for
+documentation. ARG-TYPE is the C type of the argument. STYLE specifies the
+way that the argument is passed.
 
-  :IN
-        An :IN argument is simply passed by value. The value to be passed is
-        obtained from argument(s) to the interface function. No values are
-        returned for :In arguments. This is the default mode.
+:IN
+      An :IN argument is simply passed by value. The value to be passed is
+      obtained from argument(s) to the interface function. No values are
+      returned for :In arguments. This is the default mode.
 
-  :OUT
-        The specified argument type must be a pointer to a fixed sized object.
-        A pointer to a preallocated object is passed to the routine, and the
-        the object is accessed on return, with the value being returned from
-        the interface function. :OUT and :IN-OUT cannot be used with pointers
-        to arrays, records or functions.
+:OUT
+      The specified argument type must be a pointer to a fixed sized object.
+      A pointer to a preallocated object is passed to the routine, and the
+      the object is accessed on return, with the value being returned from
+      the interface function. :OUT and :IN-OUT cannot be used with pointers
+      to arrays, records or functions.
 
-  :COPY
-        This is similar to :IN, except that the argument values are stored
-        on the stack, and a pointer to the object is passed instead of
-        the value itself.
+:COPY
+      This is similar to :IN, except that the argument values are stored
+      on the stack, and a pointer to the object is passed instead of
+      the value itself.
 
-  :IN-OUT
-        This is a combination of :OUT and :COPY. A pointer to the argument is
-        passed, with the object being initialized from the supplied argument
-        and the return value being determined by accessing the object on
-        return."
+:IN-OUT
+      This is a combination of :OUT and :COPY. A pointer to the argument is
+      passed, with the object being initialized from the supplied argument
+      and the return value being determined by accessing the object on
+      return."
   (multiple-value-bind (lisp-name alien-name)
       (pick-lisp-and-alien-names name)
     (collect ((docs) (lisp-args) (lisp-arg-types)
@@ -838,6 +845,7 @@ null byte.
 ;;;; See "Foreign Linkage / Callbacks" in the SBCL Internals manual.
 
 (defvar *alien-callback-info* nil
+  #!+sb-doc
   "Maps SAPs to corresponding CALLBACK-INFO structures: contains all the
 information we need to manipulate callbacks after their creation. Used for
 changing the lisp-side function they point to, invalidation, etc.")
@@ -855,17 +863,20 @@ changing the lisp-side function they point to, invalidation, etc.")
   (cdr (assoc (alien-sap alien) *alien-callback-info* :test #'sap=)))
 
 (defvar *alien-callbacks* (make-hash-table :test #'equal)
+  #!+sb-doc
   "Cache of existing callback SAPs, indexed with (SPECIFER . FUNCTION). Used for
 memoization: we don't create new callbacks if one pointing to the correct
 function with the same specifier already exists.")
 
 (defvar *alien-callback-wrappers* (make-hash-table :test #'equal)
-  "Cache of existing lisp weappers, indexed with SPECIFER. Used for memoization:
+  #!+sb-doc
+  "Cache of existing lisp wrappers, indexed with SPECIFER. Used for memoization:
 we don't create new wrappers if one for the same specifier already exists.")
 
 (defvar *alien-callback-trampolines* (make-array 32 :fill-pointer 0 :adjustable t)
+  #!+sb-doc
   "Lisp trampoline store: assembler wrappers contain indexes to this, and
-ENTER-ALIEN-CALLBACK pulls the corresponsing trampoline out and calls it.")
+ENTER-ALIEN-CALLBACK pulls the corresponding trampoline out and calls it.")
 
 (defun %alien-callback-sap (specifier result-type argument-types function wrapper
                             &optional call-type)
@@ -959,12 +970,10 @@ ENTER-ALIEN-CALLBACK pulls the corresponsing trampoline out and calls it.")
   (declare (ignore arguments))
   (error "Invalid alien callback called."))
 
-
 (defun parse-callback-specification (result-type lambda-list)
   (values
    `(function ,result-type ,@(mapcar #'second lambda-list))
    (mapcar #'first lambda-list)))
-
 
 (defun parse-alien-ftype (specifier env)
   (destructuring-bind (function result-type &rest argument-types)
@@ -1010,6 +1019,7 @@ ENTER-ALIEN-CALLBACK pulls the corresponsing trampoline out and calls it.")
 ;;;; interface (not public, yet) for alien callbacks
 
 (defmacro alien-callback (specifier function &environment env)
+  #!+sb-doc
   "Returns an alien-value with of alien ftype SPECIFIER, that can be passed to
 an alien function as a pointer to the FUNCTION. If a callback for the given
 SPECIFIER and FUNCTION already exists, it is returned instead of consing a new
@@ -1030,6 +1040,7 @@ one."
       ',(parse-alien-type specifier env))))
 
 (defun alien-callback-p (alien)
+  #!+sb-doc
   "Returns true if the alien is associated with a lisp-side callback,
 and a secondary return value of true if the callback is still valid."
   (let ((info (alien-callback-info alien)))
@@ -1037,12 +1048,14 @@ and a secondary return value of true if the callback is still valid."
       (values t (and (callback-info-function info) t)))))
 
 (defun alien-callback-function (alien)
+  #!+sb-doc
   "Returns the lisp function designator associated with the callback."
   (let ((info (alien-callback-info alien)))
     (when info
       (callback-info-function info))))
 
 (defun (setf alien-callback-function) (function alien)
+  #!+sb-doc
   "Changes the lisp function designated by the callback."
   (let ((info (alien-callback-info alien)))
     (unless info
@@ -1059,6 +1072,7 @@ and a secondary return value of true if the callback is still valid."
     function))
 
 (defun invalidate-alien-callback (alien)
+  #!+sb-doc
   "Invalidates the callback designated by the alien, if any, allowing the
 associated lisp function to be GC'd, and causing further calls to the same
 callback signal an error."
@@ -1090,6 +1104,7 @@ callback signal an error."
 ;;; the FDEFINITION should invalidate the callback, and redefining the
 ;;; callback should change existing callbacks to point to the new defintion.
 (defmacro define-alien-callback (name result-type typed-lambda-list &body forms)
+  #!+sb-doc
   "Defines #'NAME as a function with the given body and lambda-list, and NAME as
 the alien callback for that function with the given alien type."
   (declare (symbol name))

@@ -12,17 +12,13 @@
 
 (in-package "SB!IMPL")
 
-(!begin-collecting-cold-init-forms)
-
 ;;; Current deadline as internal time units or NIL.
 (declaim (type (or unsigned-byte null) *deadline*))
-(defvar *deadline*)
-(!cold-init-forms (setq *deadline* nil))
+(!defvar *deadline* nil)
 
 ;;; The relative number of seconds the current deadline corresponds
 ;;; to. Used for continuing from TIMEOUT conditions.
-(defvar *deadline-seconds*)
-(!cold-init-forms (setq *deadline-seconds* nil))
+(!defvar *deadline-seconds* nil)
 
 (declaim (inline seconds-to-internal-time))
 (defun seconds-to-internal-time (seconds)
@@ -30,6 +26,7 @@
 
 (defmacro with-deadline ((&key seconds override)
                          &body body)
+  #!+sb-doc
   "Arranges for a TIMEOUT condition to be signalled if an operation
 respecting deadlines occurs either after the deadline has passed, or
 would take longer than the time left to complete.
@@ -111,12 +108,14 @@ for calling this when a deadline is reached."
   nil)
 
 (defun defer-deadline (seconds &optional condition)
+  #!+sb-doc
   "Find the DEFER-DEADLINE restart associated with CONDITION, and
 invoke it with SECONDS as argument (deferring the deadline by that many
 seconds.) Otherwise return NIL if the restart is not found."
   (try-restart 'defer-deadline condition seconds))
 
 (defun cancel-deadline (&optional condition)
+  #!+sb-doc
   "Find and invoke the CANCEL-DEADLINE restart associated with
 CONDITION, or return NIL if the restart is not found."
   (try-restart 'cancel-deadline condition))
@@ -151,7 +150,7 @@ current real time."
 global deadlines into account: TO-SEC, TO-USEC, STOP-SEC, STOP-USEC,
 DEADLINEP.
 
-TO-SEC and TO-USEC indicate the relative timeout in seconds and microsconds.
+TO-SEC and TO-USEC indicate the relative timeout in seconds and microseconds.
 STOP-SEC and STOP-USEC indicate the absolute timeout in seconds and
 microseconds. DEADLINEP is true if the returned values reflect a global
 deadline instead of the local timeout indicated by SECONDS.
@@ -193,5 +192,3 @@ it will signal a timeout condition."
                      (decode-internal-time final-deadline)
                    (values (max 0 to-sec) (max 0 to-usec) stop-sec stop-usec signalp)))
                (values nil nil nil nil nil)))))))
-
-(!defun-from-collected-cold-init-forms !deadline-cold-init)

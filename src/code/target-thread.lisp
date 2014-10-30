@@ -220,7 +220,7 @@ potentially stale even before the function returns, as the thread may exit at
 any time."
   (thread-%alive-p thread))
 
-(defun thread-emphemeral-p (thread)
+(defun thread-ephemeral-p (thread)
   #!+sb-doc
   "Return T if THREAD is `ephemeral', which indicates that this thread is
 used by SBCL for internal purposes, and specifically that it knows how to
@@ -278,14 +278,17 @@ created and old ones may exit at any time."
     (setq *all-threads* (list initial-thread))))
 
 (defun main-thread ()
+  #!+sb-doc
   "Returns the main thread of the process."
   *initial-thread*)
 
 (defun main-thread-p (&optional (thread *current-thread*))
+  #!+sb-doc
   "True if THREAD, defaulting to current thread, is the main thread of the process."
   (eq thread *initial-thread*))
 
 (defmacro return-from-thread (values-form &key allow-exit)
+  #!+sb-doc
   "Unwinds from and terminates the current thread, with values from
 VALUES-FORM as the results visible to JOIN-THREAD.
 
@@ -312,6 +315,7 @@ See also: ABORT-THREAD and SB-EXT:EXIT."
            (throw '%return-from-thread (values-list values))))))
 
 (defun abort-thread (&key allow-exit)
+  #!+sb-doc
   "Unwinds from and terminates the current thread abnormally, causing
 JOIN-THREAD on current thread to signal an error unless a
 default-value is provided.
@@ -388,6 +392,20 @@ See also: RETURN-FROM-THREAD and SB-EXT:EXIT."
         int (word unsigned) (n unsigned-long))))
 
 ;;; used by debug-int.lisp to access interrupt contexts
+
+;;; The two uses immediately below of (unsigned-byte 27) are arbitrary,
+;;; as a more reasonable type restriction is an integer from 0 to
+;;;  (+ (primitive-object-size
+;;;      (find 'thread *primitive-objects* :key #'primitive-object-name))
+;;;     MAX-INTERRUPTS) ; defined only for C in 'interrupt.h'
+;;;
+;;; The x86 32-bit port is helped slightly by having a stricter constraint
+;;; than the (unsigned-byte 32) from its DEFKNOWN of this function.
+;;; Ideally a single defknown would work for any backend because the thread
+;;; structure is, after all, defined in the generic objdefs. But the VM needs
+;;; the defknown before the VOP, and this file comes too late, so we'd
+;;; need to pick some other place - maybe 'thread.lisp'?
+
 #!-(or sb-fluid sb-thread) (declaim (inline sb!vm::current-thread-offset-sap))
 #!-sb-thread
 (defun sb!vm::current-thread-offset-sap (n)
@@ -447,6 +465,7 @@ See also: RETURN-FROM-THREAD and SB-EXT:EXIT."
   (defconstant +lock-contested+ 2))
 
 (defun mutex-owner (mutex)
+  #!+sb-doc
   "Current owner of the mutex, NIL if the mutex is free. Naturally,
 this is racy by design (another thread may acquire the mutex after
 this function returns), it is intended for informative purposes. For
@@ -1003,6 +1022,7 @@ future."
   (mutex (make-mutex))
   (queue (make-waitqueue)))
 
+#!+sb-doc
 (setf (fdocumentation 'semaphore-name 'function)
       "The name of the semaphore INSTANCE. Setfable.")
 
@@ -1014,6 +1034,7 @@ TRY-SEMAPHORE as the :NOTIFICATION argument. Consequences are undefined if
 multiple threads are using the same notification object in parallel."
   (%status nil :type boolean))
 
+#!+sb-doc
 (setf (fdocumentation 'make-semaphore-notification 'function)
       "Constructor for SEMAPHORE-NOTIFICATION objects. SEMAPHORE-NOTIFICATION-STATUS
 is initially NIL.")
@@ -1022,7 +1043,7 @@ is initially NIL.")
 (defun semaphore-notification-status (semaphore-notification)
   #!+sb-doc
   "Returns T if a WAIT-ON-SEMAPHORE or TRY-SEMAPHORE using
-SEMAPHORE-NOTICATION has succeeded since the notification object was created
+SEMAPHORE-NOTIFICATION has succeeded since the notification object was created
 or cleared."
   (barrier (:read))
   (semaphore-notification-%status semaphore-notification))
@@ -1177,9 +1198,10 @@ on this semaphore, then N of them is woken up."
 (defun %delete-thread-from-session (thread session)
   (with-session-lock (session)
     (setf (session-threads session)
-          (delete thread (session-threads session))
+          ;; DELQ never conses, but DELETE does. (FIXME)
+          (delq thread (session-threads session))
           (session-interactive-threads session)
-          (delete thread (session-interactive-threads session)))))
+          (delq thread (session-interactive-threads session)))))
 
 (defun call-with-new-session (fn)
   (%delete-thread-from-session *current-thread* *session*)
@@ -1202,7 +1224,7 @@ on this semaphore, then N of them is woken up."
   (with-all-threads-lock
     (setf (thread-%alive-p thread) nil)
     (setf (thread-os-thread thread) nil)
-    (setq *all-threads* (delete thread *all-threads*))
+    (setq *all-threads* (delq thread *all-threads*))
     (when *session*
       (%delete-thread-from-session thread *session*))))
 
@@ -1268,6 +1290,7 @@ thread is not the foreground thread."
 
 ;;; called from top of invoke-debugger
 (defun debugger-wait-until-foreground-thread (stream)
+  #!+sb-doc
   "Returns T if thread had been running in background, NIL if it was
 interactive."
   (declare (ignore stream))
@@ -1316,8 +1339,17 @@ have the foreground next."
                    (delete next (session-interactive-threads *session*)))))
     (condition-broadcast (session-interactive-threads-queue *session*))))
 
-(defun foreground-thread ()
-  (car (session-interactive-threads *session*)))
+(defun interactive-threads (&optional (session *session*))
+  #!+sb-doc
+  "Return the interactive threads of SESSION defaulting to the current
+session."
+  (session-interactive-threads session))
+
+(defun foreground-thread (&optional (session *session*))
+  #!+sb-doc
+  "Return the foreground thread of SESSION defaulting to the current
+session."
+  (first (interactive-threads session)))
 
 (defun make-listener-thread (tty-name)
   (assert (probe-file tty-name))
@@ -1369,11 +1401,12 @@ have the foreground next."
   (let* ((*current-thread* thread)
          (*restart-clusters* nil)
          (*handler-clusters* (sb!kernel::initial-handler-clusters))
-         (*condition-restarts* nil)
          (*exit-in-process* nil)
          (sb!impl::*deadline* nil)
          (sb!impl::*deadline-seconds* nil)
          (sb!impl::*step-out* nil)
+         ;; internal reader variables
+         (sb!impl::*token-buf-pool* nil)
          ;; internal printer variables
          (sb!impl::*previous-case* nil)
          (sb!impl::*previous-readtable-case* nil)
@@ -1383,10 +1416,14 @@ have the foreground next."
     (setf sb!vm:*alloc-signal* *default-alloc-signal*)
     (setf (thread-os-thread thread) (current-thread-os-thread))
     (with-mutex ((thread-result-lock thread))
-      (with-all-threads-lock
-        (push thread *all-threads*))
-      (with-session-lock (*session*)
-        (push thread (session-threads *session*)))
+      (let* ((cell1 (shiftf (thread-result thread) nil))
+             (cell2 (cdr cell1)))
+        (with-all-threads-lock
+          (setf *all-threads* (rplacd (rplaca cell1 thread) *all-threads*)))
+        (let ((session *session*))
+          (with-session-lock (session)
+            (setf (session-threads session)
+                  (rplacd (rplaca cell2 thread) (session-threads session))))))
       (setf (thread-%alive-p thread) t)
       (when setup-sem (signal-semaphore setup-sem))
       ;; Using handling-end-of-the-world would be a bit tricky
@@ -1436,7 +1473,7 @@ list designator provided (defaults to no argument). Thread exits when
 the function returns. The return values of FUNCTION are kept around
 and can be retrieved by JOIN-THREAD.
 
-Invoking the initial ABORT restart estabilished by MAKE-THREAD
+Invoking the initial ABORT restart established by MAKE-THREAD
 terminates the thread.
 
 See also: RETURN-FROM-THREAD, ABORT-THREAD."
@@ -1454,8 +1491,15 @@ See also: RETURN-FROM-THREAD, ABORT-THREAD."
            (arguments     (if (listp arguments)
                               arguments
                               (list arguments)))
+           #!+win32
+           (fp-modes (dpb 0 sb!vm::float-sticky-bits ;; clear accrued bits
+                          (sb!vm:floating-point-modes)))
            (initial-function
              (named-lambda initial-thread-function ()
+               ;; Win32 doesn't inherit parent thread's FP modes,
+               ;; while it seems to happen everywhere else
+               #!+win32
+               (setf (sb!vm:floating-point-modes) fp-modes)
                ;; As it is, this lambda must not cons until we are
                ;; ready to run GC. Be very careful.
                (initial-thread-function-trampoline
@@ -1487,7 +1531,7 @@ Trying to join the main thread will cause JOIN-THREAD to block until
 TIMEOUT occurs or the process exits: when main thread exits, the
 entire process exits.
 
-NOTE: Return convention in case of a timeout is exprimental and
+NOTE: Return convention in case of a timeout is experimental and
 subject to change."
   (let ((lock (thread-result-lock thread))
         (got-it nil)
@@ -1603,16 +1647,16 @@ With those caveats in mind, what you need to know when using it:
    given that asynch-unwind-safety does not compose: a function calling
    only asynch-unwind-safe function isn't automatically asynch-unwind-safe.
 
-   This means that in order for an asych unwind to be safe, the entire
+   This means that in order for an asynch unwind to be safe, the entire
    callstack at the point of interruption needs to be asynch-unwind-safe.
 
  * In addition to asynch-unwind-safety you must consider the issue of
-   re-entrancy. INTERRUPT-THREAD can cause function that are never normally
+   reentrancy. INTERRUPT-THREAD can cause function that are never normally
    called recursively to be re-entered during their dynamic contour,
    which may cause them to misbehave. (Consider binding of special variables,
    values of global variables, etc.)
 
-Take togather, these two restrict the \"safe\" things to do using
+Take together, these two restrict the \"safe\" things to do using
 INTERRUPT-THREAD to a fairly minimal set. One useful one -- exclusively for
 interactive development use is using it to force entry to debugger to inspect
 the state of a thread:
@@ -1714,10 +1758,10 @@ assume that unknown code can safely be terminated using TERMINATE-THREAD."
     ;; area...
     (with-all-threads-lock
       (if (thread-alive-p thread)
-          (let* ((offset (sb!kernel:get-lisp-obj-address
+          (let* ((offset (get-lisp-obj-address
                           (sb!vm::symbol-tls-index symbol)))
                  (obj (sap-ref-lispobj (%thread-sap thread) offset))
-                 (tl-val (sb!kernel:get-lisp-obj-address obj)))
+                 (tl-val (get-lisp-obj-address obj)))
             (cond ((zerop offset)
                    (values nil :no-tls-value))
                   ((or (eql tl-val sb!vm:no-tls-value-marker-widetag)
@@ -1733,7 +1777,7 @@ assume that unknown code can safely be terminated using TERMINATE-THREAD."
       ;; area...
       (with-all-threads-lock
         (if (thread-alive-p thread)
-            (let ((offset (sb!kernel:get-lisp-obj-address
+            (let ((offset (get-lisp-obj-address
                            (sb!vm::symbol-tls-index symbol))))
               (cond ((zerop offset)
                      (values nil :no-tls-value))
@@ -1747,22 +1791,27 @@ assume that unknown code can safely be terminated using TERMINATE-THREAD."
 
   ;; Get values from the TLS area of the current thread.
   (defun %thread-local-references ()
-    (without-gcing
-      (let ((sap (%thread-sap *current-thread*)))
-        (loop for index from tls-index-start
-                below (symbol-value 'sb!vm::*free-tls-index*)
-              for value = (sap-ref-word sap (* sb!vm:n-word-bytes index))
-              for (obj ok) = (multiple-value-list (sb!kernel:make-lisp-obj value nil))
-              unless (or (not ok)
-                         (typep obj '(or fixnum character))
-                         (member value
-                                 '(#.sb!vm:no-tls-value-marker-widetag
-                                   #.sb!vm:unbound-marker-widetag))
-                         (member obj seen :test #'eq))
-                collect obj into seen
-              finally (return seen))))))
+    ;; TLS-INDEX-START is a word number relative to thread base.
+    ;; *FREE-TLS-INDEX* - which should only be read by machine code  - is an
+    ;; offset from thread base to the next usable TLS cell as a raw word
+    ;; manifesting in Lisp as a fixnum. Convert it from byte number to word
+    ;; number before using it as the upper bound for the sequential scan.
+    (declare (special sb!vm::*free-tls-index*))
+    (loop for index from tls-index-start
+          below (ash (get-lisp-obj-address sb!vm::*free-tls-index*)
+                     (- sb!vm:word-shift))
+          for obj = (sb!kernel:%make-lisp-obj
+                     (sb!sys:sap-int (sb!vm::current-thread-offset-sap index)))
+          unless (or (member (widetag-of obj)
+                             `(,sb!vm:no-tls-value-marker-widetag
+                               ,sb!vm:unbound-marker-widetag))
+                     (typep obj '(or fixnum character))
+                     (memq obj seen))
+          collect obj into seen
+          finally (return seen))))
 
 (defun symbol-value-in-thread (symbol thread &optional (errorp t))
+  #!+sb-doc
   "Return the local value of SYMBOL in THREAD, and a secondary value of T
 on success.
 

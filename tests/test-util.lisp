@@ -20,8 +20,6 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (require :sb-posix))
 
-;;; run-program on Windows doesn't have an :environment parameter,
-;;; set these globally
 (sb-posix:putenv (format nil "SBCL_MACHINE_TYPE=~A" (machine-type)))
 (sb-posix:putenv (format nil "SBCL_SOFTWARE_TYPE=~A" (software-type)))
 
@@ -97,7 +95,7 @@
                       (unless (or (not (sb-thread:thread-alive-p thread))
                                   (eql thread sb-thread:*current-thread*)
                                   (member thread ,threads)
-                                  (sb-thread:thread-emphemeral-p thread))
+                                  (sb-thread:thread-ephemeral-p thread))
                         (setf any-leftover thread)
                         (ignore-errors (sb-thread:terminate-thread thread))))
                     (when any-leftover

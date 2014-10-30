@@ -225,6 +225,7 @@
                         (unsupported-warning ',lisp-name ,c-name)
                         form)
                       (export ',lisp-name)))))
+    ;; FIXME: The man page for it says "Never use mktemp()"
     (def-mk*temp mktemp "mktemp" (* char) null-alien nil nil)
     ;; FIXME: Windows does have _mktemp, which has a slightly different
     ;; interface
@@ -445,7 +446,7 @@ not supported."
  (define-call ("mmap" :options :largefile) sb-sys:system-area-pointer
    (lambda (res)
      (= (sb-sys:sap-int res) #.(1- (expt 2 sb-vm::n-machine-word-bits))))
-   (addr sap-or-nil) (length unsigned) (prot unsigned)
+   (addr sap-or-nil) (length size-t) (prot unsigned)
    (flags unsigned) (fd file-descriptor) (offset off-t))
 
  (define-call "munmap" int minusp
@@ -488,7 +489,7 @@ not supported."
 ;;; passwd database
 ;; The docstrings are copied from the descriptions in SUSv3,
 ;; where present.
-#-win32
+#-(or android win32)
 (define-protocol-class passwd alien-passwd ()
   ((name :initarg :name :accessor passwd-name
          :documentation "User's login name.")
@@ -506,18 +507,18 @@ not supported."
         :documentation "Initial working directory.")
    (shell :initarg :shell :accessor passwd-shell
           :documentation "Program to use as shell."))
-  (:documentation "Instances of this class represent entries in
-                   the system's user database."))
+  (:documentation
+   "Instances of this class represent entries in the system's user database."))
 
 ;;; group database
-#-win32
+#-(or android win32)
 (define-protocol-class group alien-group ()
   ((name :initarg :name :accessor group-name)
    (passwd :initarg :passwd :accessor group-passwd)
    (gid :initarg :gid :accessor group-gid)))
 
 (defmacro define-obj-call (name arg type conv)
-  #-win32
+  #-(or win32 android)
   ;; FIXME: this isn't the documented way of doing this, surely?
   (let ((lisp-name (intern (string-upcase name) :sb-posix)))
     `(progn
@@ -572,9 +573,8 @@ not supported."
    (mtime :initarg :mtime :reader stat-mtime
           :documentation "Time of last data modification.")
    (ctime :initarg :ctime :reader stat-ctime
-          :documentation "Time of last status change"))
-  (:documentation "Instances of this class represent Posix file
-                   metadata."))
+          :documentation "Time of last status change."))
+  (:documentation "Instances of this class represent POSIX file metadata."))
 
 (defmacro define-stat-call (name arg designator-fun type)
   ;; FIXME: this isn't the documented way of doing this, surely?
@@ -653,8 +653,8 @@ not supported."
           :documentation "Local modes.")
    (cc :initarg :cc :accessor sb-posix:termios-cc :array-length nccs
        :documentation "Control characters."))
-  (:documentation "Instances of this class represent I/O
-                   characteristics of the terminal."))
+  (:documentation
+   "Instances of this class represent I/O characteristics of the terminal."))
 
 #-win32
 (progn
@@ -775,7 +775,7 @@ not supported."
              (if (minusp value)
                  (syscall-error 'utimes)
                  value)))
-      (let ((fun (extern-alien "utimes" (function int (c-string :not-null t)
+      (let ((fun (extern-alien "sb_utimes" (function int (c-string :not-null t)
                                                   (* (array alien-timeval 2)))))
             (name (filename filename)))
         (if (not (and access-time modification-time))

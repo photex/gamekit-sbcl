@@ -153,8 +153,7 @@
 ;;; (The reason for implementing this as coupled closures, with the
 ;;; counts built into the lexical environment, is that we hope this
 ;;; will minimize profiling overhead.)
-(defun profile-encapsulation-lambdas (encapsulated-fun)
-  (declare (type function encapsulated-fun))
+(defun profile-encapsulation-lambdas ()
   (let* ((count (make-counter))
          (ticks (make-counter))
          (consing (make-counter))
@@ -163,18 +162,18 @@
     (declare (counter count ticks consing profiles gc-run-time))
     (values
      ;; ENCAPSULATION-FUN
-     (lambda (&more arg-context arg-count)
-       (declare (optimize speed safety))
+     (lambda (function &rest args)
+       (declare (optimize speed safety)
+                (function function))
        ;; Make sure that we're not recursing infinitely.
        (when (boundp '*computing-profiling-data-for*)
-         (unprofile-all) ; to avoid further recursion
+         (unprofile-all)                ; to avoid further recursion
          (error "~@<When computing profiling data for ~S, the profiled ~
                     function ~S was called. To get out of this infinite recursion, all ~
                     functions have been unprofiled. (Since the profiling system evidently ~
                     uses ~S in its computations, it looks as though it's a bad idea to ~
                     profile it.)~:@>"
-                *computing-profiling-data-for* encapsulated-fun
-                encapsulated-fun))
+                *computing-profiling-data-for* function function))
        (incf-counter count 1)
        (let ((dticks 0)
              (dconsing 0)
@@ -182,7 +181,7 @@
              (dgc-run-time 0))
          (declare (truly-dynamic-extent dticks dconsing inner-enclosed-profiles))
          (unwind-protect
-             (let* ((start-ticks (get-internal-ticks))
+              (let ((start-ticks (get-internal-ticks))
                     (start-gc-run-time *gc-run-time*)
                     (*enclosed-ticks* (make-counter))
                     (*enclosed-consing* (make-counter))
@@ -190,27 +189,25 @@
                     (nbf0 *n-bytes-freed-or-purified*)
                     (dynamic-usage-0 (sb-kernel:dynamic-usage))
                     (*enclosed-gc-run-time* (make-counter)))
-               (declare (dynamic-extent *enclosed-ticks* *enclosed-consing* *enclosed-profiles* *enclosed-gc-run-time*))
-               (unwind-protect
-                   (multiple-value-call encapsulated-fun
-                                        (sb-c:%more-arg-values arg-context
-                                                               0
-                                                               arg-count))
-                 (let ((*computing-profiling-data-for* encapsulated-fun)
-                       (dynamic-usage-1 (sb-kernel:dynamic-usage)))
-                   (setf dticks (- (get-internal-ticks) start-ticks)
-                         dconsing (if (eql *n-bytes-freed-or-purified* nbf0)
-                                      ;; common special case where we can avoid
-                                      ;; bignum arithmetic
-                                      (- dynamic-usage-1 dynamic-usage-0)
-                                      ;; general case
-                                      (- (get-bytes-consed) nbf0 dynamic-usage-0))
-                         inner-enclosed-profiles (counter-count *enclosed-profiles*)
-                         dgc-run-time (- *gc-run-time* start-gc-run-time))
-                   (incf-counter ticks (- dticks (counter-count *enclosed-ticks*)))
-                   (incf-counter gc-run-time (- dgc-run-time (counter-count *enclosed-gc-run-time*)))
-                   (incf-counter consing (- dconsing (counter-count *enclosed-consing*)))
-                   (incf-counter profiles inner-enclosed-profiles))))
+                (declare (dynamic-extent *enclosed-ticks* *enclosed-consing*
+                                         *enclosed-profiles* *enclosed-gc-run-time*))
+                (unwind-protect
+                     (apply function args)
+                  (let ((*computing-profiling-data-for* function)
+                        (dynamic-usage-1 (sb-kernel:dynamic-usage)))
+                    (setf dticks (- (get-internal-ticks) start-ticks)
+                          dconsing (if (eql *n-bytes-freed-or-purified* nbf0)
+                                       ;; common special case where we can avoid
+                                       ;; bignum arithmetic
+                                       (- dynamic-usage-1 dynamic-usage-0)
+                                       ;; general case
+                                       (- (get-bytes-consed) nbf0 dynamic-usage-0))
+                          inner-enclosed-profiles (counter-count *enclosed-profiles*)
+                          dgc-run-time (- *gc-run-time* start-gc-run-time))
+                    (incf-counter ticks (- dticks (counter-count *enclosed-ticks*)))
+                    (incf-counter gc-run-time (- dgc-run-time (counter-count *enclosed-gc-run-time*)))
+                    (incf-counter consing (- dconsing (counter-count *enclosed-consing*)))
+                    (incf-counter profiles inner-enclosed-profiles))))
            (when (boundp '*enclosed-ticks*)
              (incf-counter *enclosed-ticks* dticks)
              (incf-counter *enclosed-consing* dconsing)
@@ -260,10 +257,9 @@
 (defun profile-1-unprofiled-fun (name)
   (let ((encapsulated-fun (fdefinition name)))
     (multiple-value-bind (encapsulation-fun read-stats-fun clear-stats-fun)
-        (profile-encapsulation-lambdas encapsulated-fun)
+        (profile-encapsulation-lambdas)
       (without-package-locks
-       (setf (fdefinition name)
-             encapsulation-fun))
+        (encapsulate name 'profile encapsulation-fun))
       (setf (gethash name *profiled-fun-name->info*)
             (make-profile-info :name name
                                :encapsulated-fun encapsulated-fun
@@ -288,11 +284,8 @@
   (let ((pinfo (gethash name *profiled-fun-name->info*)))
     (cond (pinfo
            (remhash name *profiled-fun-name->info*)
-           (if (eq (fdefinition name) (profile-info-encapsulation-fun pinfo))
-               (without-package-locks
-                (setf (fdefinition name) (profile-info-encapsulated-fun pinfo)))
-               (warn "preserving current definition of redefined function ~S"
-                     name)))
+           (without-package-locks
+             (unencapsulate name 'profile)))
           (t
            (warn "~S is not a profiled function." name))))
   (values))
@@ -333,6 +326,7 @@
     (unprofile-1-fun name)))
 
 (defun reset ()
+  #+sb-doc
   "Reset the counters for all profiled functions."
   (dohash ((name profile-info) *profiled-fun-name->info* :locked t)
     (declare (ignore name))
@@ -369,6 +363,7 @@
     (max raw-compensated 0.0)))
 
 (defun report (&key limit (print-no-call-list t))
+  #+sb-doc
   "Report results from profiling. The results are approximately
 adjusted for profiling overhead. The compensation may be rather
 inaccurate when bignums are involved in runtime calculation, as in a

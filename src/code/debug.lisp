@@ -77,6 +77,7 @@ provide bindings for printer control variables.")
 ;;; get out of the system with Ctrl-C or (EXIT) or EXIT or whatever.
 ;;; But after memorizing them the wasted screen space gets annoying..
 (defvar *debug-beginner-help-p* t
+  #!+sb-doc
   "Should the debugger display beginner-oriented help messages?")
 
 (defun debug-prompt (stream)
@@ -153,7 +154,7 @@ Other commands:
     deeply nested input syntax, and now the reader is confused.)")
 
 (defmacro with-debug-io-syntax (() &body body)
-  (let ((thunk (gensym "THUNK")))
+  (let ((thunk (sb!xc:gensym "THUNK")))
     `(dx-flet ((,thunk ()
                        ,@body))
        (funcall-with-debug-io-syntax #',thunk))))
@@ -178,10 +179,12 @@ Other commands:
 
 (declaim (unsigned-byte *backtrace-frame-count*))
 (defvar *backtrace-frame-count* 1000
+  #!+sb-doc
   "Default number of frames to backtrace. Defaults to 1000.")
 
 (declaim (type (member :minimal :normal :full) *method-frame-style*))
 (defvar *method-frame-style* :normal
+  #!+sb-doc
   "Determines how frames corresponding to method functions are represented in
 backtraces. Possible values are :MINIMAL, :NORMAL, and :FULL.
 
@@ -214,10 +217,12 @@ backtraces. Possible values are :MINIMAL, :NORMAL, and :FULL.
   :value nil)
 
 (defun backtrace (&optional (count *backtrace-frame-count*) (stream *debug-io*))
+  #!+sb-doc
   "Replaced by PRINT-BACKTRACE, will eventually be deprecated."
   (print-backtrace :count count :stream stream))
 
 (defun backtrace-as-list (&optional (count *backtrace-frame-count*))
+  #!+sb-doc
   "Replaced by LIST-BACKTRACE, will eventually be deprecated."
   (list-backtrace :count count))
 
@@ -269,7 +274,7 @@ is :DEBUGGER-FRAME.
 
   :INTERRUPTED-FRAME
     specifies the first interrupted frame on the stack \(typically the frame
-    where the error occured, as opposed to error handling frames) if any,
+    where the error occurred, as opposed to error handling frames) if any,
     otherwise behaving as :CURRENT-FRAME.
 
   :DEBUGGER-FRAME
@@ -425,6 +430,7 @@ information."
       obj))
 
 (defun stack-allocated-p (obj)
+  #!+sb-doc
   "Returns T if OBJ is allocated on the stack of the current
 thread, NIL otherwise."
   (with-pinned-objects (obj)
@@ -524,7 +530,7 @@ thread, NIL otherwise."
     (let ((error-number (sb!vm:internal-error-args
                          (sb!di::compiled-frame-escaped frame))))
       (when (array-in-bounds-p sb!c:*backend-internal-errors* error-number)
-        (car (svref sb!c:*backend-internal-errors* error-number))))))
+        (cdr (svref sb!c:*backend-internal-errors* error-number))))))
 
 (defun clean-xep (frame name args info)
   (values (second name)
@@ -603,6 +609,7 @@ thread, NIL otherwise."
 
 (defun frame-call (frame &key (method-frame-style *method-frame-style*)
                               replace-dynamic-extent-objects)
+  #!+sb-doc
   "Returns as multiple values a descriptive name for the function responsible
 for FRAME, arguments that that function, and a list providing additional
 information about the frame.
@@ -660,19 +667,22 @@ the current thread are replaced with dummy objects which can safely escape."
   (multiple-value-bind (name args info)
       (frame-call frame :method-frame-style method-frame-style)
     (pprint-logical-block (stream nil :prefix "(" :suffix ")")
-      ;; Since we go to some trouble to make nice informative function
-      ;; names like (PRINT-OBJECT :AROUND (CLOWN T)), let's make sure
-      ;; that they aren't truncated by *PRINT-LENGTH* and *PRINT-LEVEL*.
-      ;; For the function arguments, we can just print normally.
-      (let ((*print-length* nil)
-            (*print-level* nil)
-            (*print-pretty* nil)
-            (*print-circle* t)
-            (name (ensure-printable-object name)))
-        (write name :stream stream :escape t :pretty (equal '(lambda ()) name))
-        ;; If we hit a &REST arg, then print as many of the values as
-        ;; possible, punting the loop over lambda-list variables since any
-        ;; other arguments will be in the &REST arg's list of values.
+      (let ((*print-pretty* nil)
+            (*print-circle* t))
+        ;; Since we go to some trouble to make nice informative
+        ;; function names like (PRINT-OBJECT :AROUND (CLOWN T)), let's
+        ;; make sure that they aren't truncated by *PRINT-LENGTH* and
+        ;; *PRINT-LEVEL*.
+        (let ((*print-length* nil)
+              (*print-level* nil)
+              (name (ensure-printable-object name)))
+          (write name :stream stream :escape t :pretty (equal '(lambda ()) name)))
+
+        ;; For the function arguments, we can just print normally.  If
+        ;; we hit a &REST arg, then print as many of the values as
+        ;; possible, punting the loop over lambda-list variables since
+        ;; any other arguments will be in the &REST arg's list of
+        ;; values.
         (let ((args (ensure-printable-object args)))
           (if (listp args)
               (format stream "~{ ~_~S~}" args)
@@ -750,7 +760,7 @@ the current thread are replaced with dummy objects which can safely escape."
                 ;;     debugging failures in PRINT-OBJECT logic.
                 ;; We try to address all these issues with explicit
                 ;; rebindings here.
-                (sb!kernel:*current-level-in-print* 0)
+                (*current-level-in-print* 0)
                 (*package* original-package)
                 (*print-pretty* original-print-pretty)
                 ;; Clear the circularity machinery to try to to reduce the
@@ -1023,6 +1033,7 @@ the current thread are replaced with dummy objects which can safely escape."
 ;;; halt-on-failures and prompt-on-failures modes, suitable for
 ;;; noninteractive and interactive use respectively
 (defun disable-debugger ()
+  #!+sb-doc
   "When invoked, this function will turn off both the SBCL debugger
 and LDB (the low-level debugger).  See also ENABLE-DEBUGGER."
   ;; *DEBUG-IO* used to be set here to *ERROR-OUTPUT* which is sort
@@ -1039,6 +1050,7 @@ and LDB (the low-level debugger).  See also ENABLE-DEBUGGER."
                                                  (function sb!alien:void))))
 
 (defun enable-debugger ()
+  #!+sb-doc
   "Restore the debugger if it has been turned off by DISABLE-DEBUGGER."
   (when (eql *invoke-debugger-hook* 'debugger-disabled-hook)
     (setf *invoke-debugger-hook* *old-debugger-hook*
@@ -1080,7 +1092,8 @@ and LDB (the low-level debugger).  See also ENABLE-DEBUGGER."
              (incf count))))))
 
 (defvar *debug-loop-fun* #'debug-loop-fun
-  "a function taking no parameters that starts the low-level debug loop")
+  #!+sb-doc
+  "A function taking no parameters that starts the low-level debug loop.")
 
 ;;; When the debugger is invoked due to a stepper condition, we don't
 ;;; want to print the current frame before the first prompt for aesthetic
@@ -1175,8 +1188,8 @@ and LDB (the low-level debugger).  See also ENABLE-DEBUGGER."
 (defvar *auto-eval-in-frame* t
   #!+sb-doc
   "When set (the default), evaluations in the debugger's command loop occur
-   relative to the current frame's environment without the need of debugger
-   forms that explicitly control this kind of evaluation.")
+relative to the current frame's environment without the need of debugger
+forms that explicitly control this kind of evaluation.")
 
 (defun debug-eval (expr)
   (cond ((not (and (fboundp 'compile) *auto-eval-in-frame*))
@@ -1645,7 +1658,7 @@ and LDB (the low-level debugger).  See also ENABLE-DEBUGGER."
               (t
                (format *debug-io* "~&Non-continuable error, cannot start stepping.~%"))))))
 
-(defmacro def-step-command (command-name restart-name)
+(defmacro !def-step-command (command-name restart-name)
   `(!def-debug-command ,command-name ()
      (if (typep *debug-condition* 'step-condition)
          (let ((restart (find-restart ',restart-name *debug-condition*)))
@@ -1653,9 +1666,9 @@ and LDB (the low-level debugger).  See also ENABLE-DEBUGGER."
            (invoke-restart restart))
          (format *debug-io* "~&Not currently single-stepping. (Use START to activate the single-stepper)~%"))))
 
-(def-step-command "STEP" step-into)
-(def-step-command "NEXT" step-next)
-(def-step-command "STOP" step-continue)
+(!def-step-command "STEP" step-into)
+(!def-step-command "NEXT" step-next)
+(!def-step-command "STOP" step-continue)
 
 (!def-debug-command-alias "S" "STEP")
 (!def-debug-command-alias "N" "NEXT")

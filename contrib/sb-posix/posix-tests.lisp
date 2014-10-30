@@ -443,7 +443,7 @@
                   sb-posix::o-nonblock)))
   t)
 
-#-(or hpux win32) ; fix: cant handle c-vargs
+#-(or hpux win32 netbsd) ; fix: cant handle c-vargs
 (deftest fcntl.flock.1
     (locally (declare (sb-ext:muffle-conditions sb-ext:compiler-note))
       (let ((flock (make-instance 'sb-posix:flock
@@ -586,19 +586,19 @@
           (values retval (read-line inf)))))
   3 "foo")
 
-#-win32
+#-(or android win32)
 (deftest pwent.1
   ;; make sure that we found something
   (not (sb-posix:getpwuid 0))
   nil)
 
-#-win32
+#-(or android win32)
 (deftest pwent.2
   ;; make sure that we found something
   (not (sb-posix:getpwnam "root"))
   nil)
 
-#-win32
+#-(or android win32)
 (deftest pwent.non-existing
     ;; make sure that we get something sensible, not an error
     (handler-case (progn (sb-posix:getpwnam "almost-certainly-does-not-exist")
@@ -606,19 +606,19 @@
       (t (cond) t))
   nil)
 
-#-win32
+#-(or android win32)
 (deftest grent.1
   ;; make sure that we found something
   (not (sb-posix:getgrgid 0))
   nil)
 
-#-win32
+#-(or android win32)
 (deftest grent.2
   ;; make sure that we found something
   (not (sb-posix:getgrnam "sys"))
   nil)
 
-#-win32
+#-(or android win32)
 (deftest grent.non-existing
     ;; make sure that we get something sensible, not an error
     (handler-case (progn (sb-posix:getgrnam "almost-certainly-does-not-exist")
@@ -662,7 +662,7 @@
     (plusp (sb-posix:time))
   t)
 
-#-win32
+#-(or win32)
 (deftest utimes.1
     (let ((file (merge-pathnames #p"utimes.1" *test-directory*))
           (atime (random (1- (expt 2 31))))

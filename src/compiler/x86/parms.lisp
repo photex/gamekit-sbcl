@@ -187,13 +187,14 @@
 ;;; NetBSD configuration used to have this comment regarding the linkage
 ;;; table: "In CMUCL: 0xB0000000->0xB1000000"
 
-#!+win32   (!gencgc-space-setup #x22000000 nil nil #x10000)
-#!+linux   (!gencgc-space-setup #x01000000 #x09000000)
-#!+sunos   (!gencgc-space-setup #x20000000 #x48000000)
-#!+freebsd (!gencgc-space-setup #x01000000 #x58000000)
-#!+openbsd (!gencgc-space-setup #x1b000000 #x40000000)
-#!+netbsd  (!gencgc-space-setup #x20000000 #x60000000)
-#!+darwin  (!gencgc-space-setup #x04000000 #x10000000)
+#!+win32     (!gencgc-space-setup #x22000000 nil nil #x10000)
+#!+linux     (!gencgc-space-setup #x01000000 #x09000000)
+#!+sunos     (!gencgc-space-setup #x20000000 #x48000000)
+#!+freebsd   (!gencgc-space-setup #x01000000 #x58000000)
+#!+dragonfly (!gencgc-space-setup #x01000000 #x58000000)
+#!+openbsd   (!gencgc-space-setup #x1b000000 #x40000000)
+#!+netbsd    (!gencgc-space-setup #x20000000 #x60000000)
+#!+darwin    (!gencgc-space-setup #x04000000 #x10000000)
 
 ;;; Size of one linkage-table entry in bytes.
 (def!constant linkage-table-entry-size 8)
@@ -239,7 +240,7 @@
   (append
    *common-static-symbols*
    *c-callable-static-symbols*
-   '(*alien-stack*
+   '(*alien-stack-pointer*
 
      ;; interrupt handling
      *pseudo-atomic-bits*
@@ -274,21 +275,21 @@
 
 (defparameter *static-funs*
   '(length
-    sb!kernel:two-arg-+
-    sb!kernel:two-arg--
-    sb!kernel:two-arg-*
-    sb!kernel:two-arg-/
-    sb!kernel:two-arg-<
-    sb!kernel:two-arg->
-    sb!kernel:two-arg-=
+    two-arg-+
+    two-arg--
+    two-arg-*
+    two-arg-/
+    two-arg-<
+    two-arg->
+    two-arg-=
     eql
-    sb!kernel:%negate
-    sb!kernel:two-arg-and
-    sb!kernel:two-arg-ior
-    sb!kernel:two-arg-xor
-    sb!kernel:two-arg-gcd
-    sb!kernel:two-arg-lcm
-    sb!kernel:%coerce-callable-to-fun))
+    %negate
+    two-arg-and
+    two-arg-ior
+    two-arg-xor
+    two-arg-gcd
+    two-arg-lcm
+    %coerce-callable-to-fun))
 
 #!+win32
 (defconstant +win32-tib-arbitrary-field-offset+ #.(+ #xE10 (* 4 63)))

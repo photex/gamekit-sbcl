@@ -100,6 +100,18 @@
   (eql (find-symbol (symbol-name symbol) :cl)
        symbol))
 
+;; Return T if SYMBOL is a predicate acceptable for use in a SATISFIES type
+;; specifier. We assume that anything in CL: is allowed (see explanation at
+;; call point), and beyond that, anything we define has to be expressly listed
+;; here, for fear of later unexpected confusion.
+(defun acceptable-cross-typep-pred (symbol)
+  (and (fboundp symbol)
+       (or (in-cl-package-p symbol)
+           ;; KLUDGE: rather than extensible list of predicates that match
+           ;; in behavior between the host and target lisp, hardcode a few.
+           (memq symbol '(sb!vm:static-symbol-p
+                          sb!vm::wired-tls-symbol-p)))))
+
 ;;; This is like TYPEP, except that it asks whether HOST-OBJECT would
 ;;; be of TARGET-TYPE when instantiated on the target SBCL. Since this
 ;;; is hard to determine in some cases, and since in other cases we
@@ -140,7 +152,7 @@
              ;; ever change, ugh!
              (if (consp target-type)
                  (member (car target-type)
-                         '(sb!alien:alien))
+                         '(alien))
                  (member target-type
                          '(system-area-pointer
                            sb!alien-internals:alien-value)))
@@ -156,7 +168,7 @@
              (values nil t))
             ((and (symbolp target-type)
                   (find-class target-type nil)
-                  (subtypep target-type 'sb!kernel::structure!object))
+                  (subtypep target-type 'structure!object))
              (values (typep host-object target-type) t))
             (;; easy cases of arrays and vectors
              (target-type-is-in
@@ -240,6 +252,9 @@
              (values (typep host-object 'classoid) t))
             ((target-type-is-in '(fixnum))
              (values (fixnump host-object) t))
+            ((target-type-is-in '(bignum))
+             (values (and (integerp host-object) (not (fixnump host-object)))
+                     t))
             ;; Some types are too hard to handle in the positive
             ;; case, but at least we can be confident in a large
             ;; fraction of the negative cases..
@@ -299,8 +314,7 @@
                  ;; to grok (SATISFIES KEYWORDP).
                  (satisfies
                   (destructuring-bind (predicate-name) rest
-                    (if (and (in-cl-package-p predicate-name)
-                             (fboundp predicate-name))
+                    (if (acceptable-cross-typep-pred predicate-name)
                         ;; Many predicates like KEYWORDP, ODDP, PACKAGEP,
                         ;; and NULL correspond between host and target.
                         ;; But we still need to handle errors, because
@@ -381,6 +395,26 @@
              (values nil t)))
         ((union-type-p ctype)
          (any/type #'ctypep obj (union-type-types ctype)))
+        ((array-type-p ctype)
+         ;; This is essentially just the ARRAY-TYPE case of %%TYPEP
+         ;; using !SPECIALIZED-ARRAY-ELEMENT-TYPE, not ARRAY-ELEMENT-TYPE.
+         (if (and (arrayp obj)
+                  (case (array-type-complexp ctype)
+                    ((t) (not (typep obj 'simple-array)))
+                    ((nil) (typep obj 'simple-array)))
+                  (or (eq (array-type-element-type ctype) *wild-type*)
+                      (type= (specifier-type
+                              (!specialized-array-element-type obj))
+                             (array-type-specialized-element-type ctype)))
+                  (or (eq (array-type-dimensions ctype) '*)
+                      (and (= (length (array-type-dimensions ctype))
+                              (array-rank obj)))
+                      (every (lambda (required actual)
+                               (or (eq required '*) (eql required actual)))
+                             (array-type-dimensions ctype)
+                             (array-dimensions obj))))
+               (values t t)
+               (values nil t)))
         (t
          (let ( ;; the Common Lisp type specifier corresponding to CTYPE
                (type (type-specifier ctype)))
@@ -403,14 +437,13 @@
      (make-member-type :members (list x)))
     (number
      (ctype-of-number x))
-    (string
-     (make-array-type :dimensions (array-dimensions x)
-                      :complexp (not (typep x 'simple-array))
-                      :element-type (specifier-type 'base-char)
-                      :specialized-element-type (specifier-type 'base-char)))
     (array
-     (let ((etype (specifier-type (array-element-type x))))
-       (make-array-type :dimensions (array-dimensions x)
+     ;; It is critical not to inquire of the host for the array's element type.
+     (let ((etype (specifier-type (!specialized-array-element-type x))))
+       (make-array-type (array-dimensions x)
+                        ;; complexp relies on the host implementation,
+                        ;; but in practice any array for which we need to
+                        ;; call ctype-of will be a simple-array.
                         :complexp (not (typep x 'simple-array))
                         :element-type etype
                         :specialized-element-type etype)))

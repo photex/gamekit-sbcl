@@ -104,7 +104,7 @@
     (dolist (slot-names slot-name-lists)
       (when slot-names
         (let* ((wrapper (pop wrappers))
-               (std-p (typep wrapper 'wrapper))
+               (std-p (layout-for-std-class-p wrapper))
                (class (wrapper-class* wrapper)))
           (dolist (slot-name (cdr slot-names))
             (let ((cell
@@ -156,6 +156,12 @@
       (finalize-inheritance class)
       t)))
 
+(declaim (ftype (sfunction (class) class) ensure-class-finalized))
+(defun ensure-class-finalized (class)
+  (unless (class-finalized-p class)
+    (finalize-inheritance class))
+  class)
+
 (defun can-optimize-access (form required-parameters env)
   (destructuring-bind (op var-form slot-name-form &optional new-value) form
     (let ((type (ecase op
@@ -182,7 +188,7 @@
                        (when (boundp 'sb-c:*lexenv*)
                          (sb-c:compiler-notify
                           "~@<Cannot optimize slot access, inheritance of ~S is not ~
-                           yet finaliable due to forward-referenced superclasses:~
+                           yet finalizable due to forward-referenced superclasses:~
                            ~%  ~S~:@>"
                           class form))
                        (setf class nil))))
@@ -819,10 +825,7 @@
   (let* ((method-function nil)
          (snl (getf plist :slot-name-lists))
          (pv-table (when snl
-                     (intern-pv-table :slot-name-lists snl)))
-         (arg-info (getf plist :arg-info))
-         (nreq (car arg-info))
-         (restp (cdr arg-info)))
+                     (intern-pv-table :slot-name-lists snl))))
     (setq method-function
           (lambda (method-args next-methods)
             (let* ((pv (when pv-table
@@ -848,10 +851,7 @@
 ;;; over the actual PV-CELL in this case.
 (defun method-function-from-fast-method-call (fmc)
   (let* ((fmf (fast-method-call-function fmc))
-         (pv (fast-method-call-pv fmc))
-         (arg-info (fast-method-call-arg-info fmc))
-         (nreq (car arg-info))
-         (restp (cdr arg-info)))
+         (pv (fast-method-call-pv fmc)))
     (lambda (method-args next-methods)
       (let* ((nm (car next-methods))
              (nms (cdr next-methods))

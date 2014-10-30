@@ -321,20 +321,20 @@
                    (declare (sb-ext:disable-package-locks t))
                    (symbol-macrolet ((t nil)) t)))
   (assert failure-p)
-  (assert (raises-error? (funcall function) program-error)))
+  (assert-error (funcall function) program-error))
 (multiple-value-bind (function warnings-p failure-p)
     (compile nil
              '(lambda ()
                ;; not interested in the package lock violation here
                (declare (sb-ext:disable-package-locks *standard-input*))
-                (symbol-macrolet ((*standard-input* nil))
-                  *standard-input*)))
+               (symbol-macrolet ((*standard-input* nil))
+                 *standard-input*)))
   (assert failure-p)
-  (assert (raises-error? (funcall function) program-error)))
+  (assert-error (funcall function) program-error))
 (multiple-value-bind (function warnings-p failure-p)
     (compile nil '(lambda () (symbol-macrolet ((s nil)) (declare (special s)) s)))
   (assert failure-p)
-  (assert (raises-error? (funcall function) program-error)))
+  (assert-error (funcall function) program-error))
 
 ;;; bug 120a: Turned out to be constraining code looking like (if foo
 ;;; <X> <X>) where <X> was optimized by the compiler to be the exact
@@ -372,8 +372,9 @@
     (setf y (the single-float (the integer x)))
     (list y y)))
 
-(raises-error? (foo 3) type-error)
-(raises-error? (foo 3f0) type-error)
+(with-test (:name :non-intersecting-the)
+  (assert-error (non-intersecting-the 3) type-error)
+  (assert-error (non-intersecting-the 3f0) type-error))
 
 ;;; until 0.8.2 SBCL did not check THEs in arguments
 (defun the-in-arguments-aux (x)
@@ -446,7 +447,7 @@
 ;;; bugs 178, 199: compiler failed to compile a call of a function
 ;;; with a hairy type
 (defun bug178 (x)
-      (funcall (the function (the standard-object x))))
+  (funcall (the function (the standard-object x))))
 
 (defun bug199-aux (f)
   (eq nil (funcall f)))
@@ -454,6 +455,15 @@
 (defun bug199 (f x)
   (declare (type (and function (satisfies bug199-aux)) f))
   (funcall f x))
+
+(test-util:with-test (:name (declaim &optional &rest :bogus style-warning))
+  (assert-no-signal
+   (ctu:file-compile
+    "(declaim (ftype (function (symbol &optional t &rest t)) foo))
+     (defun foo (x &optional y &rest z)
+       (declare (ignore x y z)))"
+    :load nil)
+   style-warning))
 
 ;;; check non-toplevel DEFMACRO
 (defvar *defmacro-test-status* nil)
@@ -527,10 +537,10 @@
 
 (assert (equal (bug211d) '(:x nil :y nil)))
 (assert (equal (bug211d :x 1) '(1 t :y nil)))
-(assert (raises-error? (bug211d :y 2) program-error))
+(assert-error (bug211d :y 2) program-error)
 (assert (equal (bug211d :y 2 :allow-other-keys t :allow-other-keys nil)
                '(:x nil t t)))
-(assert (raises-error? (bug211d :y 2 :allow-other-keys nil) program-error))
+(assert-error (bug211d :y 2 :allow-other-keys nil) program-error)
 
 (let ((failure-p
        (nth-value
@@ -565,11 +575,11 @@
                 (test :y 2 :allow-other-keys nil :allow-other-keys t)))
   (multiple-value-bind (result warnings-p failure-p)
       (compile nil `(lambda ()
-                     (flet ((test (&key (x :x x-p) ((:allow-other-keys y) :y y-p))
-                              (list x x-p y y-p)))
-                       ,form)))
+                      (flet ((test (&key (x :x x-p) ((:allow-other-keys y) :y y-p))
+                               (list x x-p y y-p)))
+                        ,form)))
     (assert failure-p)
-    (assert (raises-error? (funcall result) program-error))))
+    (assert-error (funcall result) program-error)))
 
 ;;; bug 217: wrong type inference
 (defun bug217-1 (x s)
@@ -676,7 +686,7 @@
 (defun bug219-b-aux2 (z)
   (bug219-b z))
 (assert (not *bug219-b-expanded-p*))
-(assert (raises-error? (bug219-b-aux2 1) undefined-function))
+(assert-error (bug219-b-aux2 1) undefined-function)
 (bug219-b-aux1 t)
 (defun bug219-b-aux2 (z)
   (bug219-b z))
@@ -787,14 +797,14 @@
     (declare (type (mod 4) i))
     (unless (< i 5)
       (print j))))
-(assert (raises-error? (bug192b 6) type-error))
+(assert-error (bug192b 6) type-error)
 
 (defun bug192c (x y)
   (locally (declare (type fixnum x y))
     (+ x (* 2 y))))
-(assert (raises-error? (bug192c 1.1 2) type-error))
+(assert-error (bug192c 1.1 2) type-error)
 
-(assert (raises-error? (progn (the real (list 1)) t) type-error))
+(assert-error (progn (the real (list 1)) t) type-error)
 
 (defun bug236 (a f)
   (declare (optimize (speed 2) (safety 0)))
@@ -816,8 +826,8 @@
            (fixnum x)
            (optimize (safety 3)))
   (list x (setq x (/ x 2)) x))
-(assert (raises-error? (test-type-of-special-1 3/2) type-error))
-(assert (raises-error? (test-type-of-special-2 3) type-error))
+(assert-error (test-type-of-special-1 3/2) type-error)
+(assert-error (test-type-of-special-2 3) type-error)
 (assert (equal (test-type-of-special-2 8) '(8 4 4)))
 
 ;;; bug which existed in 0.8alpha.0.4 for several milliseconds before
@@ -851,7 +861,7 @@
            (incf x)))
     (list (bar x) (bar x) (bar x))))
 
-(assert (raises-error? (bug249 1.0) type-error))
+(assert-error (bug249 1.0) type-error)
 
 ;;; bug reported by ohler on #lisp 2003-07-10
 (defun bug-ohler-2003-07-10 (a b)
@@ -889,7 +899,7 @@
 ;;; attribute (reported by Peter Graves)
 (loop for (fun . args) in '((= a) (/= a)
                             (< a) (<= a) (> a) (>= a))
-      do (assert (raises-error? (apply fun args) type-error)))
+      do (assert-error (apply fun args) type-error))
 
 (defclass broken-input-stream (sb-gray:fundamental-input-stream) ())
 (defmethod sb-gray:stream-read-char ((stream broken-input-stream))
@@ -933,11 +943,11 @@
   (:no-error (val) (error "no error: ~S" val)))
 
 ;;; PROGV must not bind constants, or violate declared types -- ditto for SET.
-(assert (raises-error? (set pi 3)))
-(assert (raises-error? (progv '(pi s) '(3 pi) (symbol-value x))))
+(assert-error (set pi 3))
+(assert-error (progv '(pi s) '(3 pi) (symbol-value x)))
 (declaim (cons *special-cons*))
-(assert (raises-error? (set '*special-cons* "nope") type-error))
-(assert (raises-error? (progv '(*special-cons*) '("no hope") (car *special-cons*)) type-error))
+(assert-error (set '*special-cons* "nope") type-error)
+(assert-error (progv '(*special-cons*) '("no hope") (car *special-cons*)) type-error)
 
 ;;; No bogus warnings for calls to functions with complex lambda-lists.
 (defun complex-function-signature (&optional x &rest y &key z1 z2)
@@ -1167,12 +1177,13 @@
     (handler-bind ((style-warning (lambda (c)
                                     (push c conds))))
       (eval '(defstruct bug-542807 slot)))
-    (assert (= 1 (length conds)))
-    (assert (typep (car conds) 'sb-kernel::redefinition-with-defun))))
+    (assert (and conds
+                 (every (lambda (x) (typep x 'sb-kernel:redefinition-with-defun))
+                        conds)))))
 
 (with-test (:name :defmacro-not-list-lambda-list)
-  (assert (raises-error? (eval `(defmacro ,(gensym) "foo"))
-                         type-error)))
+  (assert-error (eval `(defmacro ,(gensym) "foo"))
+                type-error))
 
 (with-test (:name :bug-308951)
   (let ((x 1))
@@ -1430,7 +1441,33 @@
        (and
         (defun (setf test-984) ())
         nil)
-     (style-warning () t))))
+     (style-warning () t)))
+  (assert
+   (handler-case
+       (and
+        (compile nil `(lambda () #'(setf test-984)))
+        t)
+     (warning () nil))))
+
+(with-test (:name :compile-setf-function)
+  (defun (setf compile-setf) ())
+  (assert (equal (compile '(setf compile-setf))
+                 '(setf compile-setf))))
+
+(declaim (inline cut-test))
+(defun cut-test (b)
+  (cond ((integerp b) b)
+        (b 469)
+        (t 2)))
+
+(with-test (:name :cut-to-width-bad-constant)
+  (assert (= (funcall (compile nil
+                               `(lambda ()
+                                  (multiple-value-bind (a b) (values t t)
+                                    (declare (ignore b))
+                                    (mask-field (byte 10 0) (cut-test a))))))
+             469)))
+
 
 ;;;; tests not in the problem domain, but of the consistency of the
 ;;;; compiler machinery itself
@@ -1486,16 +1523,18 @@
                  function)
          (return nil))
         (t t)))))
-(defun identify-suspect-vops (&optional (env (first
-                                              (last *info-environment*))))
-  (do-info (env :class class :type type :name name :value value)
-    (when (and (eq class :function) (eq type :type))
+(defun identify-suspect-vops ()
+  (sb-c::call-with-each-globaldb-name
+   (lambda (name)
+     ;; LEGAL-FUN-NAME-P test is necessary, since (INFO :FUNCTION :TYPE)
+     ;; has a defaulting expression that involves calling FDEFINITION.
+     (when (and (legal-fun-name-p name) (info :function :type name))
       ;; OK, so we have an entry in the INFO database. Now, if ...
       (let* ((info (info :function :info name))
              (templates (and info (fun-info-templates info))))
         (when templates
           ;; ... it has translators
-          (grovel-results name))))))
+          (grovel-results name)))))))
 (identify-suspect-vops)
 
 ;;;; bug 305: INLINE/NOTINLINE causing local ftype to be lost
@@ -1663,8 +1702,8 @@
     x))
 
 (test-util:with-test (:name (:compiler :constraint-propagation :cast))
-  (assert (assertoid:raises-error?
-           (test-constraint-propagation/cast 1) type-error)))
+  (assertoid:assert-error
+   (test-constraint-propagation/cast 1) type-error))
 
 ;;; bug #399
 (let ((result (make-array 50000 :fill-pointer 0 :adjustable t)))
@@ -2451,4 +2490,106 @@
   (defmethod expt-type-derivation ((x list) &optional (y 0.0))
     (declare (type float y))
     (expt 2 y)))
+
+;; Lp# 1066451 - declarations were either misplaced or dropped
+;; depending on whether the :policy argument was used in DEFTRANSFORM.
+;; That was a bit random. :policy doesn't affect whether decls
+;; are accepted now.
+(defun foo (blah)
+  (declare (special randomness-factor))
+  (if (constant-lvar-p randomness-factor)
+      (format nil "Weird transform answer is ~D"
+              (+ (lvar-value randomness-factor) blah))))
+(defknown weird-fn (integer symbol &key (:magic real)) t)
+(deftransform weird-fn ((x s &key ((:magic randomness-factor)))
+                        (fixnum t &key (:magic fixnum)))
+  ;; I can't see much use for declarations other than SPECIAL here,
+  ;; but we shouldn't supposedly allow them and then not handle them right.
+  (declare (special fred) (special randomness-factor) (lvar x s))
+  (foo fred))
+(test-util:with-test (:name :deftransform-bug-1066451)
+  (let ((f (let ((fred 3))
+             (declare (special fred))
+             (compile nil '(lambda () (weird-fn 2 'foo :magic 11))))))
+    (assert (string= (funcall f)
+                     "Weird transform answer is 14"))))
+
+(defun skip-1-passthrough (a b sb-int:&more context count)
+  (declare (ignore a b))
+  (multiple-value-call 'list
+    'start
+    (sb-c::%more-arg-values context 1 (1- (truly-the fixnum count)))
+    'end))
+(defun skip-2-passthrough (a b sb-int:&more context count)
+  (declare (ignore a b))
+  (multiple-value-call 'list
+    'start
+    (sb-c::%more-arg-values context 2 (- (truly-the fixnum count) 2))
+    'end))
+(defun skip-n-passthrough (n-skip n-copy sb-int:&more context count)
+  (assert (>= count (+ n-copy n-skip))) ; prevent crashes
+  (multiple-value-call 'list
+    'start
+    (sb-c::%more-arg-values context n-skip n-copy)
+    'end))
+
+;; %MORE-ARG-VALUES was wrong on x86 and x86-64 with nonzero 'skip'.
+;; It's entirely possible that other backends are also not working.
+(test-util:with-test (:name more-arg-fancy)
+  (assert (equal (skip-1-passthrough 0 0 'a 'b 'c 'd 'e 'f)
+                 '(start b c d e f end)))
+  (assert (equal (skip-2-passthrough 0 0 'a 'b 'c 'd 'e 'f)
+                 '(start c d e f end)))
+  (assert (equal (skip-n-passthrough 1 5 'a 'b 'c 'd 'e 'f)
+                 '(start b c d e f end)))
+  (assert (equal (skip-n-passthrough 1 5 'a 'b 'c 'd 'e 'f 'g)
+                 '(start b c d e f end)))
+  (assert (equal (skip-n-passthrough 2 5 'a 'b 'c 'd 'e 'f 'g)
+                 '(start c d e f g end)))
+  (assert (equal (skip-n-passthrough 2 5 'a 'b 'c 'd 'e 'f 'g 'h)
+                 '(start c d e f g end))))
+
+(test-util:with-test (:name :macro-policy)
+  (flet ((count-notes ()
+          (let ((count 0))
+            (handler-bind ((compiler-note
+                            (lambda (c)
+                              c
+                              (incf count)
+                              (muffle-warning))))
+              (multiple-value-bind (fasl warnings errors)
+                  (compile-file "macro-policy-test.lisp"
+                               :print nil :verbose nil)
+                (ignore-errors (delete-file fasl))
+                (assert (and (not warnings) (not errors)))
+                count)))))
+    (let* ((baseline (count-notes))
+           (test (progv '(*frob-macro-policy*) '(t) (count-notes)))
+           (baseline-again (count-notes)))
+      (assert (/= 0 baseline))
+      (assert (= 0 test))
+      ;; macro-policy is rebound inside compile-file
+      (assert (= baseline-again baseline)))))
+
+(test-util:with-test (:name :redef-macro-same-file)
+  (let* ((lisp "compiler-impure-tmp.lisp")
+         (fasl (compile-file-pathname lisp)))
+    (unwind-protect
+         (let ((redef-count 0))
+           (with-open-file (f lisp :direction :output)
+             (dolist (form '((defmacro glork (x) `(car ,x))
+                             (define-compiler-macro glorpy (x) `(+ ,x 1))
+                             (defmacro glork (x) `(first ,x))
+                             (define-compiler-macro glorpy (x) `(+ ,x 2))))
+               (print form f)))
+           (multiple-value-bind (fasl warn fail)
+               (handler-bind ((sb-int:same-file-redefinition-warning
+                               (lambda (c) c (incf redef-count))))
+                 (let ((*error-output* (make-broadcast-stream)))
+                   (compile-file lisp :print nil :verbose nil)))
+             (declare (ignore fasl))
+             (assert (and warn (not fail) (= redef-count 2)))))
+      (ignore-errors (delete-file lisp))
+      (ignore-errors (delete-file fasl)))))
+
 ;;; success

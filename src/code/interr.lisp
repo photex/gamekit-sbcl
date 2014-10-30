@@ -15,167 +15,20 @@
 ;;;; internal errors
 
 (defvar *internal-errors*
-  #.(map 'vector #'cdr sb!c:*backend-internal-errors*))
+  #.(map 'vector
+         (lambda (x) (if (typep (car x) '(or symbol cons)) (car x) 0))
+         sb!c:*backend-internal-errors*))
 
 (eval-when (:compile-toplevel :execute)
-
 (sb!xc:defmacro deferr (name args &rest body)
-  (let* ((rest-pos (position '&rest args))
-         (required (if rest-pos (subseq args 0 rest-pos) args))
-         (fn-name (symbolicate name "-HANDLER")))
-    (with-unique-names (fp context sc-offsets)
-      `(progn
-         ;; FIXME: Having a separate full DEFUN for each error doesn't
-         ;; seem to add much value, and it takes a lot of space. Perhaps
-         ;; we could do this dispatch with a big CASE statement instead?
-         (defun ,fn-name (name ,fp ,context ,sc-offsets)
-           ;; FIXME: It would probably be good to do *STACK-TOP-HINT*
-           ;; tricks to hide this internal error-handling logic from the
-           ;; poor high level user, so his debugger tells him about
-           ;; where his error was detected instead of telling him where
-           ;; he ended up inside the system error-handling logic.
-           (declare (ignorable name ,fp ,context ,sc-offsets))
-           (let (,@(let ((offset -1))
-                        (mapcar (lambda (var)
-                                  `(,var (sb!di::sub-access-debug-var-slot
-                                          ,fp
-                                          (nth ,(incf offset)
-                                           ,sc-offsets)
-                                          ,context)))
-                                required))
-                 ,@(when rest-pos
-                     `((,(nth (1+ rest-pos) args)
-                        (mapcar (lambda (sc-offset)
-                                  (sb!di::sub-access-debug-var-slot
-                                   ,fp
-                                   sc-offset
-                                   ,context))
-                         (nthcdr ,rest-pos ,sc-offsets))))))
-             ,@body))
-        (setf (svref *internal-errors* ,(error-number-or-lose name))
-              #',fn-name)))))
-
+  (let ((n (length args)))
+    (unless (<= n 3)
+      (error "Update (DEFUN INTERNAL-ERROR) for ~D error arguments" n)))
+  `(setf (svref *internal-errors* ,(error-number-or-lose name))
+         (lambda (name ,@args)
+           (declare (optimize (sb!c::verify-arg-count 0)) (ignorable name))
+           ,@body)))
 ) ; EVAL-WHEN
-
-(deferr unknown-error (&rest args)
-  (error "unknown error:~{ ~S~})" args))
-
-(deferr object-not-fun-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'function))
-
-(deferr object-not-list-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'list))
-
-(deferr object-not-bignum-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'bignum))
-
-(deferr object-not-ratio-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'ratio))
-
-(deferr object-not-single-float-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'single-float))
-
-(deferr object-not-double-float-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'double-float))
-
-#!+long-float
-(deferr object-not-long-float-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'long-float))
-
-(deferr object-not-simple-string-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'simple-string))
-
-(deferr object-not-fixnum-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'fixnum))
-
-(deferr object-not-vector-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'vector))
-
-(deferr object-not-string-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'string))
-
-(deferr object-not-base-string-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'base-string))
-
-(deferr object-not-vector-nil-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type '(vector nil)))
-
-#!+sb-unicode
-(deferr object-not-character-string-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type '(vector character)))
-
-(deferr object-not-bit-vector-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'bit-vector))
-
-(deferr object-not-array-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'array))
-
-(deferr object-not-number-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'number))
-
-(deferr object-not-rational-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'rational))
-
-(deferr object-not-float-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'float))
-
-(deferr object-not-real-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'real))
-
-(deferr object-not-integer-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'integer))
-
-(deferr object-not-cons-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'cons))
-
-(deferr object-not-symbol-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'symbol))
 
 (deferr undefined-fun-error (fdefn-or-symbol)
   (error 'undefined-function
@@ -183,10 +36,25 @@
                  (symbol fdefn-or-symbol)
                  (fdefn (fdefn-name fdefn-or-symbol)))))
 
-(deferr invalid-arg-count-error (nargs)
-  (error 'simple-program-error
-         :format-control "invalid number of arguments: ~S"
-         :format-arguments (list nargs)))
+#!+(or arm x86-64)
+(deferr undefined-alien-fun-error (address)
+  (error 'undefined-alien-function-error
+         :name
+         (and (integerp address)
+              (sap-foreign-symbol (int-sap address)))))
+
+#!-(or arm x86-64)
+(defun undefined-alien-fun-error ()
+  (error 'undefined-alien-function-error))
+
+(deferr invalid-arg-count-error (nargs &optional (fname nil fnamep))
+  (if fnamep
+      (error 'simple-program-error
+         :format-control "~S called with invalid number of arguments: ~S"
+         :format-arguments (list fname nargs))
+      (error 'simple-program-error
+             :format-control "invalid number of arguments: ~S"
+             :format-arguments (list nargs))))
 
 (deferr bogus-arg-to-values-list-error (list)
   (error 'simple-type-error
@@ -199,21 +67,10 @@
 (deferr unbound-symbol-error (symbol)
   (error 'unbound-variable :name symbol))
 
-(deferr object-not-character-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'character))
-
-(deferr object-not-sap-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'system-area-pointer))
-
 (deferr invalid-unwind-error ()
   (error 'simple-control-error
          :format-control
-         "attempt to RETURN-FROM a block or GO to a tag that no longer exists"
-         ))
+         "attempt to RETURN-FROM a block or GO to a tag that no longer exists"))
 
 (deferr unseen-throw-tag-error (tag)
   (error 'simple-control-error
@@ -259,23 +116,13 @@
          :format-control "unknown &KEY argument: ~S"
          :format-arguments (list key-name)))
 
+;; FIXME: missing (deferr wrong-number-of-indices)
+;; we don't ever raise that error through a primitive trap I guess.
+
+;; TODO: make the arguments (ARRAY INDEX &optional BOUND)
+;; and don't need the bound for vectors. Just read it.
 (deferr invalid-array-index-error (array bound index)
   (invalid-array-index-error array index bound))
-
-(deferr object-not-simple-array-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'simple-array))
-
-(deferr object-not-signed-byte-32-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type '(signed-byte 32)))
-
-(deferr object-not-unsigned-byte-32-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type '(unsigned-byte 32)))
 
 (deferr tls-exhausted-error ()
   ;; There is nothing we can do about it. A number of entries in the
@@ -286,70 +133,6 @@
   (%primitive print "Thread local storage exhausted.")
   (sb!impl::%halt))
 
-(macrolet
-    ((define-simple-array-internal-errors ()
-         `(progn
-           ,@(map 'list
-                  (lambda (saetp)
-                    `(deferr ,(symbolicate
-                               "OBJECT-NOT-"
-                               (sb!vm:saetp-primitive-type-name saetp)
-                               "-ERROR")
-                              (object)
-                      (error 'type-error
-                             :datum object
-                             :expected-type '(simple-array
-                                              ,(sb!vm:saetp-specifier saetp)
-                                              (*)))))
-                  sb!vm:*specialized-array-element-type-properties*))))
-  (define-simple-array-internal-errors))
-
-(deferr object-not-complex-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'complex))
-
-(deferr object-not-complex-rational-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type '(complex rational)))
-
-(deferr object-not-complex-single-float-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type '(complex single-float)))
-
-(deferr object-not-complex-double-float-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type '(complex double-float)))
-
-#!+long-float
-(deferr object-not-complex-long-float-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type '(complex long-float)))
-
-#!+sb-simd-pack
-(deferr object-not-simd-pack-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'simd-pack))
-
-(deferr object-not-weak-pointer-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'weak-pointer))
-
-(deferr object-not-instance-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type 'instance))
-
-(deferr object-not-complex-vector-error (object)
-  (error 'type-error
-         :datum object
-         :expected-type '(and vector (not simple-array))))
 
 ;;;; fetching errorful function name
 
@@ -418,6 +201,17 @@
         nil))))
 
 
+;;; Returns true if number of arguments matches required/optional
+;;; arguments handler expects.
+(defun internal-error-args-ok (arguments handler)
+  (multiple-value-bind (req opt)
+      (parse-lambda-list (%simple-fun-arglist handler) :silent t)
+    ;; The handler always gets name as the first (extra) argument.
+    (let ((n (1+ (length arguments)))
+          (n-req (length req))
+          (n-opt (length opt)))
+      (and (>= n n-req) (<= n (+ n-req n-opt))))))
+
 ;;;; INTERNAL-ERROR signal handler
 
 (defun internal-error (context continuable)
@@ -429,7 +223,7 @@
    (/show0 "about to bind ALIEN-CONTEXT")
    (let* ((alien-context (locally
                              (declare (optimize (inhibit-warnings 3)))
-                           (sb!alien:sap-alien context (* os-context-t))))
+                           (sap-alien context (* os-context-t))))
           #!+c-stack-is-control-stack
           (*saved-fp-and-pcs*
            (cons (cons (%make-lisp-obj (sb!vm:context-register
@@ -462,7 +256,22 @@
                                                       sb!vm::cfp-offset)))
                  (handler (and (< -1 error-number (length *internal-errors*))
                                (svref *internal-errors* error-number))))
-             (cond ((null handler)
+             (cond ((and (functionp handler)
+                         (internal-error-args-ok arguments handler))
+                    (macrolet ((arg (n)
+                                 `(sb!di::sub-access-debug-var-slot
+                                   fp (nth ,n arguments) alien-context)))
+                      (ecase (length arguments)
+                        (0 (funcall handler name))
+                        (1 (funcall handler name (arg 0)))
+                        (2 (funcall handler name (arg 0) (arg 1)))
+                        (3 (funcall handler name (arg 0) (arg 1) (arg 2))))))
+                   ((typep handler '(or symbol cons))
+                    (error 'type-error
+                           :datum (sb!di::sub-access-debug-var-slot
+                                   fp (first arguments) alien-context)
+                           :expected-type handler))
+                   ((eql handler 0) ; if (DEFERR x) was inadvertently omitted
                     (error 'simple-error
                            :format-control
                            "unknown internal error, ~D, args=~S"
@@ -472,7 +281,7 @@
                                            (sb!di::sub-access-debug-var-slot
                                             fp sc-offset alien-context))
                                          arguments))))
-                   ((not (functionp handler))
+                   (t ; wtf?
                     (error 'simple-error
                            :format-control "internal error ~D: ~A; args=~S"
                            :format-arguments
@@ -481,9 +290,7 @@
                                  (mapcar (lambda (sc-offset)
                                            (sb!di::sub-access-debug-var-slot
                                             fp sc-offset alien-context))
-                                         arguments))))
-                   (t
-                    (funcall handler name fp alien-context arguments))))))))))
+                                         arguments))))))))))))
 
 (defun control-stack-exhausted-error ()
   (let ((sb!debug:*stack-top-hint* nil))
@@ -523,9 +330,6 @@
 
 (defun undefined-alien-variable-error ()
   (error 'undefined-alien-variable-error))
-
-(defun undefined-alien-function-error ()
-  (error 'undefined-alien-function-error))
 
 #!-win32
 (define-alien-variable current-memory-fault-address unsigned)

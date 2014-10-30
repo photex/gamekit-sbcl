@@ -47,13 +47,6 @@
                   ;; also have a source-paths already set up -- so drop
                   ;; the ones from WITH-COMPILATION-VALUES.
                   (*source-paths* (or source-paths *source-paths*))
-                  ;; FIXME: Do we need the *INFO-ENVIRONMENT* rebinding
-                  ;; here? It's a literal translation of the old CMU CL
-                  ;; rebinding to (OR *BACKEND-INFO-ENVIRONMENT*
-                  ;; *INFO-ENVIRONMENT*), and it's not obvious whether the
-                  ;; rebinding to itself is needed now that SBCL doesn't
-                  ;; need *BACKEND-INFO-ENVIRONMENT*.
-                  (*info-environment* *info-environment*)
                   (form (get-lambda-to-compile definition))
                   (*source-info* (or source-info
                                   (make-lisp-source-info
@@ -151,7 +144,8 @@
           (t
            (values compiled-definition warnings-p failure-p)))))
 
-(defun compile (name &optional (definition (or (macro-function name)
+(defun compile (name &optional (definition (or (and (symbolp name)
+                                                    (macro-function name))
                                                (fdefinition name))))
   #!+sb-doc
   "Produce a compiled function from DEFINITION. If DEFINITION is a

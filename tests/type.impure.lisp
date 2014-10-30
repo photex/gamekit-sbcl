@@ -37,15 +37,15 @@
                ratio
                )))
   (dolist (i types)
-    (format t "type I=~S~%" i)
+    ;(format t "type I=~S~%" i)
     (dolist (j types)
-      (format t "  type J=~S~%" j)
+      ;(format t "  type J=~S~%" j)
       (assert (subtypep i `(or ,i ,j)))
       (assert (subtypep i `(or ,j ,i)))
       (assert (subtypep i `(or ,i ,i ,j)))
       (assert (subtypep i `(or ,j ,i)))
       (dolist (k types)
-        (format t "    type K=~S~%" k)
+        ;(format t "    type K=~S~%" k)
         (assert (subtypep `(or ,i ,j) `(or ,i ,j ,k)))
         (assert (subtypep `(or ,i ,j) `(or ,k ,j ,i)))))))
 
@@ -80,9 +80,9 @@
 
 ;;; sbcl-0.6.10 did (UPGRADED-ARRAY-ELEMENT-TYPE 'SOME-UNDEF-TYPE)=>T
 ;;; and (UPGRADED-COMPLEX-PART-TYPE 'SOME-UNDEF-TYPE)=>T.
-(assert (raises-error? (upgraded-array-element-type 'some-undef-type)))
+(assert-error (upgraded-array-element-type 'some-undef-type))
 (assert (eql (upgraded-array-element-type t) t))
-(assert (raises-error? (upgraded-complex-part-type 'some-undef-type)))
+(assert-error (upgraded-complex-part-type 'some-undef-type))
 (assert (subtypep (upgraded-complex-part-type 'fixnum) 'real))
 
 ;;; Do reasonable things with undefined types, and with compound types
@@ -91,7 +91,7 @@
 ;;; part I: TYPEP
 (assert (typep #(11) '(simple-array t 1)))
 (assert (typep #(11) '(simple-array (or integer symbol) 1)))
-(assert (raises-error? (typep #(11) '(simple-array undef-type 1))))
+(assert-error (typep #(11) '(simple-array undef-type 1)))
 (assert (not (typep 11 '(simple-array undef-type 1))))
 ;;; part II: SUBTYPEP
 
@@ -103,23 +103,23 @@
 (assert-nil-nil (subtypep '(vector t) '(vector utype-2)))
 
 ;;; ANSI specifically disallows bare AND and OR symbols as type specs.
-(assert (raises-error? (typep 11 'and)))
-(assert (raises-error? (typep 11 'or)))
-(assert (raises-error? (typep 11 'member)))
-(assert (raises-error? (typep 11 'values)))
-(assert (raises-error? (typep 11 'eql)))
-(assert (raises-error? (typep 11 'satisfies)))
-(assert (raises-error? (typep 11 'not)))
+(assert-error (typep 11 'and))
+(assert-error (typep 11 'or))
+(assert-error (typep 11 'member))
+(assert-error (typep 11 'values))
+(assert-error (typep 11 'eql))
+(assert-error (typep 11 'satisfies))
+(assert-error (typep 11 'not))
 ;;; and while it doesn't specifically disallow illegal compound
 ;;; specifiers from the CL package, we don't have any.
-(assert (raises-error? (subtypep 'fixnum '(fixnum 1))))
-(assert (raises-error? (subtypep 'class '(list))))
-(assert (raises-error? (subtypep 'foo '(ratio 1/2 3/2))))
-(assert (raises-error? (subtypep 'character '(character 10))))
+(assert-error (subtypep 'fixnum '(fixnum 1)))
+(assert-error (subtypep 'class '(list)))
+(assert-error (subtypep 'foo '(ratio 1/2 3/2)))
+(assert-error (subtypep 'character '(character 10)))
 #+nil ; doesn't yet work on PCL-derived internal types
-(assert (raises-error? (subtypep 'lisp '(class))))
+(assert-error (subtypep 'lisp '(class)))
 #+nil
-(assert (raises-error? (subtypep 'bar '(method number number))))
+(assert-error (subtypep 'bar '(method number number)))
 
 ;;; Of course empty lists of subtypes are still OK.
 (assert (typep 11 '(and)))
@@ -244,6 +244,18 @@
 (assert-t-t (subtypep '(float 0.0) '(float -0.0)))
 (assert-t-t (subtypep '(float (0.0)) '(float (-0.0))))
 (assert-t-t (subtypep '(float (-0.0)) '(float (0.0))))
+
+(with-test (:name :member-type-and-numeric)
+  ;; (MEMBER 0s0 -s0) used to appear to parse correctly,
+  ;; but it didn't because MAKE-MEMBER-TYPE returned a union type
+  ;; (OR (MEMBER 0.0) (SINGLE-FLOAT 0.0 0.0)) which was further reduced
+  ;; to just the numeric type, being a supertype of the singleton.
+  ;; The parsing problem became evident when any other member was added in,
+  ;; because in that case the member type is not a subtype of the numeric.
+  (let* ((x (sb-kernel:specifier-type '(member 0s0 foo -0s0)))
+         (m (find-if #'sb-kernel:member-type-p (sb-kernel:union-type-types x))))
+    (assert (equal (sb-kernel:member-type-members m) '(foo)))))
+
 
 ;;;; Douglas Thomas Crosher rewrote the CMU CL type test system to
 ;;;; allow inline type tests for CONDITIONs and STANDARD-OBJECTs, and
@@ -759,5 +771,194 @@
 
     (test 'subtypep-fwd-testb1 'subtypep-fwd-testb2 nil nil)
     (test 'subtypep-fwd-testb2 'subtypep-fwd-testb1 t t)))
+
+;;; Array type unions have some tricky semantics.
+
+;; borrowed from 'info.impure.lisp' - FIXME: put in test-util
+;; and make it accept with either lists or vectors.
+(defun shuffle (list)
+  (let ((vector (coerce list 'vector)))
+    (loop for lim from (1- (length vector)) downto 0
+          for chosen = (random (1+ lim))
+          do (rotatef (aref vector chosen) (aref vector lim)))
+    (coerce vector 'list)))
+
+(macrolet
+    ((disunity-test (name type-specifier-1 type-specifier-2)
+       `(with-test (:name ,name)
+          (let ((type1 (sb-kernel:specifier-type ',type-specifier-1))
+                (type2 (sb-kernel:specifier-type ',type-specifier-2)))
+            (assert (null (sb-kernel::%type-union2 type1 type2)))
+            (assert (null (sb-kernel::%type-union2 type2 type1))))))
+     (unity-test (name type-specifier-1 type-specifier-2 result-type-specifier)
+       `(with-test (:name ,name)
+          (let* ((type1 (sb-kernel:specifier-type ',type-specifier-1))
+                 (type2 (sb-kernel:specifier-type ',type-specifier-2))
+                 (rtype (sb-kernel:specifier-type ',result-type-specifier))
+                 (res1 (sb-kernel::%type-union2 type1 type2))
+                 (res2 (sb-kernel::%type-union2 type2 type1)))
+            ;; The (ARRAY :SIMPLE-=) type method doesn't always (or
+            ;; even usually) check the element type, preferring
+            ;; instead to check the upgraded element type.  Therefore,
+            ;; check the element types ourselves.
+            (assert (and (sb-kernel:type= res1 rtype)
+                         (sb-kernel:type=
+                          (sb-kernel:array-type-element-type res1)
+                          (sb-kernel:array-type-element-type rtype))))
+            (assert (and (sb-kernel:type= res2 rtype)
+                         (sb-kernel:type=
+                          (sb-kernel:array-type-element-type res2)
+                          (sb-kernel:array-type-element-type rtype))))))))
+
+  (unity-test (:array-type-union :basic)
+              array
+              array
+              array)
+
+  (unity-test (:array-type-union :dimensional-compatability :wild)
+              (array * *)
+              (array * (* * *))
+              (array * *))
+
+  (disunity-test (:array-type-union :dimensional-compatability :incompatible 1)
+                 (array * (* *))
+                 (array * (* * *)))
+
+  (disunity-test (:array-type-union :dimensional-compatability :incompatible 2)
+                 (array * (* 1 *))
+                 (array * (* 2 *)))
+
+  (disunity-test (:array-type-union :dimensional-unity :only-one-dimension-per-union)
+              (array * (2 *))
+              (array * (* 3)))
+
+  (unity-test (:array-type-union :complexp-unity :moves-towards-maybe)
+              simple-array
+              (and array (not simple-array))
+              array)
+
+  (disunity-test (:array-type-union :complexp-and-dimensions-dont-unite 1)
+                 (simple-array * (* *))
+                 (and (array * (* 3)) (not simple-array)))
+
+  (disunity-test (:array-type-union :complexp-and-dimensions-dont-unite 2)
+              (simple-array * (* *))
+              (array * (* 3)))
+
+  (unity-test (:array-type-union :element-subtypes :unite-within-saetp)
+              (array (integer 15 27))
+              (array (integer 15 26))
+              (array (integer 15 27)))
+
+  (disunity-test (:array-type-union :element-subtypes :dont-unite-across-saetp)
+                 (array (unsigned-byte 7))
+                 (array (unsigned-byte 3)))
+
+  (disunity-test (:array-type-union :disjoint-element-types :dont-unite)
+                 (array (integer 15 27))
+                 (array (integer 17 30)))
+
+  (unity-test (:array-type-union :wild-element-type :unites)
+              array
+              (array (unsigned-byte 8))
+              array)
+
+  (disunity-test (:array-type-union :element-type-and-dimensions-dont-unite)
+                 (array (unsigned-byte 8))
+                 (array * (* *)))
+
+  (disunity-test (:array-type-union :element-type-and-complexp-dont-unite)
+                 (simple-array (unsigned-byte 8))
+                 (and array (not simple-array)))
+
+  ;; These tests aren't really impure once the SHUFFLE function is provided.
+  ;; Logically they belong with the above, so here they are.
+  (with-test (:name :union-of-all-arrays-is-array-of-wild)
+    (flet ((huge-union (fn)
+             (mapcar fn sb-kernel::*specialized-array-element-types*)))
+
+      (let ((answers '(VECTOR
+                       (SIMPLE-ARRAY * (*))
+                       (AND VECTOR (NOT SIMPLE-ARRAY))
+                       (VECTOR * 400)
+                       (SIMPLE-ARRAY * (400))
+                       (AND (VECTOR * 400) (NOT SIMPLE-ARRAY)))))
+        (dolist (dim '(() (400)))
+          (dolist (simpleness '(() (simple-array) ((not simple-array))))
+            (assert
+             (equal
+              (sb-kernel:type-specifier
+               (sb-kernel:specifier-type
+                `(or ,@(huge-union
+                        (lambda (x) `(and ,@simpleness (vector ,x ,@dim)))))))
+              (pop answers))))))
+
+      ;; The algorithm is indifferent to non-array types.
+      (assert
+       (equal (sb-kernel:type-specifier
+               (sb-kernel:specifier-type
+                `(or list ,@(huge-union (lambda (x) `(array ,x (1 1 1)))))))
+              '(or cons null (array * (1 1 1)))))
+
+      ;; And unions of unions of distinct array types should reduce.
+      (assert
+       (equal
+        (sb-kernel:type-specifier
+         (sb-kernel:specifier-type
+          `(or (simple-array bletch (3 2 8))
+               ,@(huge-union
+                  (lambda (x) `(and (not simple-array) (array ,x (2 2)))))
+               function
+               ,@(huge-union (lambda (x) `(simple-array ,x (10)))))))
+        '(or (simple-array bletch (3 2 8))
+             (and (array * (2 2)) (not simple-array))
+             function
+             (simple-array * (10)))))
+
+      ;; After uniting all simple and non-simple arrays of every specializer
+      ;; the result is just ARRAY.
+      (flet ((u (rank)
+               (shuffle ; should be insensitive to ordering
+                (nconc (huge-union
+                        (lambda (x) `(and (not simple-array) (array ,x ,rank))))
+                       (huge-union
+                        (lambda (x) `(and (simple-array) (array ,x ,rank))))))))
+        (assert
+         (equal (sb-kernel:type-specifier
+                 (sb-kernel:specifier-type `(or bit-vector ,@(u 2))))
+                '(or bit-vector (array * (* *)))))
+        (assert
+         (equal (sb-kernel:type-specifier
+                 (sb-kernel:specifier-type `(or bit-vector ,@(u 1))))
+                'vector))))))
+
+(with-test (:name :source-transform-union-of-arrays-typep)
+  ;; Ensure we don't pessimize rank 1 specialized array.
+  ;; (SIMPLE unboxed vector is done differently)
+  (let* ((hair (sb-kernel:specifier-type '(sb-kernel:unboxed-array 1)))
+         (xform (sb-c::source-transform-union-typep 'myobj hair))
+         (g (caar (cadr xform)))) ; (LET ((#:g MYOBJ)) ...)
+    (assert (equal xform
+                   `(let ((,g myobj))
+                      (or (typep ,g '(and vector (not (array t)))))))))
+
+  ;; Exclude one subtype at a time and make sure they all work.
+  (dotimes (i (length sb-vm:*specialized-array-element-type-properties*))
+    (let* ((excluded-type
+            (sb-vm:saetp-specifier
+             (aref sb-vm:*specialized-array-element-type-properties* i)))
+           (hair
+            (loop for x across sb-vm:*specialized-array-element-type-properties*
+                  for j from 0
+                  unless (eql i j)
+                  collect `(array ,(sb-vm:saetp-specifier x))))
+           (xform
+            (sb-c::source-transform-union-typep 'myobj
+             (sb-kernel:specifier-type `(or ,@(shuffle hair) fixnum))))
+           (g (caar (cadr xform)))) ; (LET ((#:g MYOBJ)) ...)
+      (assert (equal xform
+                     `(let ((,g myobj))
+                        (or (typep ,g '(and array (not (array ,excluded-type))))
+                            (typep ,g 'fixnum))))))))
 
 ;;; success

@@ -615,30 +615,42 @@
   (declare (type optional-dispatch od)
            (type fun-type type)
            (string where))
-  (let* ((min (optional-dispatch-min-args od))
-         (req (fun-type-required type))
-         (opt (fun-type-optional type)))
-    (flet ((frob (x y what)
-             (unless (= x y)
+  (let ((od-min (optional-dispatch-min-args od))
+        (od-max (optional-dispatch-max-args od))
+        (od-more (optional-dispatch-more-entry od))
+        (od-keyp (optional-dispatch-keyp od))
+        (od-allowp (optional-dispatch-allowp od))
+        (type-required (fun-type-required type))
+        (type-optional (fun-type-optional type))
+        (type-rest (fun-type-rest type))
+        (type-keyp (fun-type-keyp type))
+        (type-allowp (fun-type-allowp type)))
+    (flet ((check-num (num-definition num-type arg-kind)
+             (unless (= num-definition num-type)
                (note-lossage
                 "The definition has ~R ~A arg~P, but ~A has ~R."
-                x what x where y))))
-      (frob min (length req) "fixed")
-      (frob (- (optional-dispatch-max-args od) min) (length opt) "optional"))
-    (flet ((frob (x y what)
-             (unless (eq x y)
+                num-definition arg-kind num-definition where num-type)))
+           (check-section (in-od-p in-type-p section)
+             (unless (eq in-od-p in-type-p)
                (note-lossage
                 "The definition ~:[doesn't have~;has~] ~A, but ~
                  ~A ~:[doesn't~;does~]."
-                x what where y))))
-      (frob (optional-dispatch-keyp od) (fun-type-keyp type)
-            "&KEY arguments")
-      (unless (optional-dispatch-keyp od)
-        (frob (not (null (optional-dispatch-more-entry od)))
-              (not (null (fun-type-rest type)))
-              "&REST argument"))
-      (frob (optional-dispatch-allowp od) (fun-type-allowp type)
-            "&ALLOW-OTHER-KEYS"))
+                in-od-p section where in-type-p))))
+      (check-num od-min (length type-required) 'required)
+      ;; When TYPE does not have &OPTIONAL parameters and the type of
+      ;; the &REST parameter is T, it may have been simplified from
+      ;;
+      ;;   (function (... &optional t &rest t ...) ...)
+      ;;
+      ;; We cannot check the exact number of optional parameters then.
+      (unless (and (not type-optional)
+                   type-rest (type= type-rest *universal-type*))
+        (check-num (- od-max od-min) (length type-optional) '&optional))
+      (check-section od-keyp type-keyp "&KEY arguments")
+      (unless od-keyp
+        (check-section (not (null od-more)) (not (null type-rest))
+                       "&REST argument"))
+      (check-section od-allowp type-allowp '&allow-other-keys))
 
     (when *lossage-detected*
       (return-from find-optional-dispatch-types (values nil nil)))
@@ -667,9 +679,13 @@
                       "Defining a ~S keyword not present in ~A."
                       key where)
                      (res *universal-type*)))))
-                (:required (res (pop req)))
+                (:required (res (pop type-required)))
                 (:optional
-                 (res (type-union (pop opt) (or def-type *universal-type*))))
+                 ;; We can exhaust TYPE-OPTIONAL when the type was
+                 ;; simplified as described above.
+                 (res (type-union (or (pop type-optional)
+                                      *universal-type*)
+                                  (or def-type *universal-type*))))
                 (:rest
                  (when (fun-type-rest type)
                    (res (specifier-type 'list))))
@@ -684,7 +700,7 @@
                 (res *universal-type*)
                 (vars (arg-info-supplied-p info)))))
            (t
-            (res (pop req))
+            (res (pop type-required))
             (vars arg))))
 
         (dolist (key keys)
@@ -953,16 +969,14 @@
 
 (defoptimizer (%compile-time-type-error ir2-convert)
     ((objects atype dtype context) node block)
+  (declare (ignore objects))
   (let ((*compiler-error-context* node))
     (setf (node-source-path node)
           (cdr (node-source-path node)))
-    (destructuring-bind (values atype dtype context)
-        (basic-combination-args node)
-      (declare (ignore values))
-      (let ((atype (lvar-value atype))
-            (dtype (lvar-value dtype))
-            (detail (cdr (lvar-value context))))
-        (unless (eq atype nil)
+    (let ((atype (lvar-value atype))
+          (dtype (lvar-value dtype))
+          (detail (cdr (lvar-value context))))
+      (unless (eq atype nil)
           (if (singleton-p detail)
               (let ((detail (first detail)))
                 (if (constantp detail)
@@ -982,5 +996,5 @@
                     "~@<Derived type of ~2I~_~{~S~^~#[~; and ~:;, ~]~} ~
                      ~I~_in ~2I~_~S ~I~_is ~2I~_~S, ~I~_conflicting with ~
                      their asserted type ~2I~_~S.~@:>"
-                    :format-arguments (list (rest detail) (first detail) dtype atype))))))
+                    :format-arguments (list (rest detail) (first detail) dtype atype)))))
     (ir2-convert-full-call node block)))

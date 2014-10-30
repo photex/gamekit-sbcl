@@ -51,6 +51,7 @@
                    (foo2 (make-condition 'error)))
                (handler-bind
                    ((error (lambda (c)
+                             (declare (ignore c))
                              (let ((restarts (remove 'res (compute-restarts foo1)
                                                      :key #'restart-name
                                                      :test-not #'eql)))
@@ -96,13 +97,50 @@
 (assert
  (eq (block nil
        (handler-bind
-           ((type-error (lambda (c) (return :failed)))
+           ((type-error (lambda (c)
+                          (declare (ignore c))
+                          (return :failed)))
             (simple-error (lambda (c)
+                            (declare (ignore c))
                             (return (if (find-restart 'continue)
                                         :passed
                                         :failed)))))
          (cerror (formatter "Continue from ~A") "bug ~A" :bug)))
      :passed))
+
+(with-test (:name (handler-bind :smoke))
+  (let ((called?))
+    (flet ((handler (condition)
+             (declare (ignore condition))
+             (setf called? t)))
+      (macrolet ((test (handler)
+                   `(progn
+                      (setf called? nil)
+                      (handler-bind ((condition ,handler))
+                        (signal 'condition))
+                      (assert called?))))
+        ;; Test optimized special cases.
+        (test (lambda (condition) (handler condition)))
+        (test #'(lambda (condition) (handler condition)))
+        ;; Test default behavior.
+        ;; (test 'handler) would require function definition => not pure
+        (test #'handler)))))
+
+(with-test (:name (handler-bind :malformed-bindings))
+  (flet ((test (binding)
+           (assert (eq :ok
+                       (handler-case
+                           (macroexpand `(handler-bind (,binding)))
+                         (simple-error (e)
+                           (assert (equal (list binding)
+                                          (simple-condition-format-arguments e)))
+                           :ok))))))
+
+    (test 1)                     ; not even a list
+    (test '())                   ; missing condition type and handler
+    (test '(error))              ; missing handler
+    (test '(error #'print :foo)) ; too many elements
+    ))
 
 ;;; clauses in HANDLER-CASE are allowed to have declarations (and
 ;;; indeed, only declarations)
@@ -232,4 +270,67 @@
 
 (with-test (:name (:print-undefined-function-condition))
   (handler-case (funcall '#:foo)
-    (undefined-function (c) (princ c))))
+    (undefined-function (c) (princ-to-string c))))
+
+;; Printing a READER-ERROR while the underlying stream is still open
+;; should print the stream position information.
+(with-test (:name (reader-error :stream-error-position-info :open-stream :bug-1264902))
+  (assert
+   (search
+    "Line: 1, Column: 22, File-Position: 22"
+    (with-input-from-string (stream "no-such-package::symbol")
+      (handler-case
+          (read stream)
+        (reader-error (condition) (princ-to-string condition)))))))
+
+;; Printing a READER-ERROR when the underlying stream has been closed
+;; should still work, but the stream information will not be printed.
+(with-test (:name (reader-error :stream-error-position-info :closed-stream :bug-1264902))
+  (assert
+   (search
+    "Package NO-SUCH-PACKAGE does not exist"
+    (handler-case
+        (with-input-from-string (stream "no-such-package::symbol")
+          (read stream))
+      (reader-error (condition) (princ-to-string condition))))))
+
+(with-test (:name (make-condition :non-condition-class))
+  (handler-case
+      (make-condition 'standard-class)
+    (type-error (condition)
+      (assert (search "not a condition class"
+                      (princ-to-string condition))))))
+
+;; When called with a symbol not designating a condition class,
+;; MAKE-CONDITION used to signal an error which printed as "NIL does
+;; not designate a condition class.".
+(with-test (:name (make-condition :correct-error-for-undefined-condition
+                   :bug-1199223))
+  (handler-case
+      (make-condition 'no-such-condition)
+    (type-error (condition)
+      (assert (search (string 'no-such-condition)
+                      (princ-to-string condition))))))
+
+;; Using an undefined condition type in a HANDLER-BIND clause should
+;; signal an ERROR at runtime. Bug 1378939 was about landing in LDB
+;; because of infinite recursion in SIGNAL instead.
+;;
+;; We suppress the compile-time WARNING to avoid noise when running
+;; tests.
+(locally (declare (muffle-conditions warning))
+  (with-test (:name (handler-bind :undefined-condition-type
+                     :bug-1378939))
+    (assert-error
+     (handler-bind ((no-such-condition-class #'print))
+       (error "does not matter")))))
+
+;; Using an undefined condition type in a HANDLER-BIND clause should
+;; signal a [STYLE-]WARNING at compile time.
+(with-test (:name (handler-bind :undefined-condition-type
+                   :compile-time-warning))
+  (handler-bind ((warning #'muffle-warning))
+    (assert-signal
+     (compile nil '(lambda () (handler-bind
+                                  ((no-such-condition-class #'print)))))
+     warning)))

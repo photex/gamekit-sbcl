@@ -24,7 +24,7 @@
                        (:copier nil)
                        #!+cmu (:pure nil))
   ;; the Common Lisp type-specifier of the type we represent
-  (specifier nil :type t))
+  (specifier nil :type t :read-only t))
 
 (!define-type-class hairy)
 
@@ -62,7 +62,7 @@
                                     (might-contain-other-types-p t))
                           (:copier nil)
                           #!+cmu (:pure nil))
-  (type (missing-arg) :type ctype))
+  (type (missing-arg) :type ctype :read-only t))
 
 (!define-type-class negation)
 
@@ -72,16 +72,16 @@
                       (:constructor nil)
                       (:copier nil))
   ;; Lists of the type for each required and optional argument.
-  (required nil :type list)
-  (optional nil :type list)
+  (required nil :type list :read-only t)
+  (optional nil :type list :read-only t)
   ;; The type for the rest arg. NIL if there is no &REST arg.
-  (rest nil :type (or ctype null))
+  (rest nil :type (or ctype null) :read-only t)
   ;; true if &KEY arguments are specified
-  (keyp nil :type boolean)
+  (keyp nil :type boolean :read-only t)
   ;; list of KEY-INFO structures describing the &KEY arguments
-  (keywords nil :type list)
+  (keywords nil :type list :read-only t)
   ;; true if other &KEY arguments are allowed
-  (allowp nil :type boolean))
+  (allowp nil :type boolean :read-only t))
 
 (defun canonicalize-args-type-args (required optional rest &optional keyp)
   (when (eq rest *empty-type*)
@@ -137,22 +137,28 @@
             (:predicate %values-type-p)
             (:copier nil)))
 
-(declaim (inline value-type-p))
+(declaim (inline values-type-p))
 (defun values-type-p (x)
   (or (eq x *wild-type*)
       (%values-type-p x)))
 
 (defun-cached (make-values-type-cached
                :hash-bits 8
-               :hash-function (lambda (req opt rest allowp)
-                                (logand (logxor
-                                         (type-list-cache-hash req)
-                                         (type-list-cache-hash opt)
-                                         (if rest
-                                             (type-hash-value rest)
-                                             42)
-                                         (sxhash allowp))
-                                        #xFF)))
+               :hash-function
+               (lambda (req opt rest allowp)
+                 (logxor (type-list-cache-hash req)
+                         (type-list-cache-hash opt)
+                          (if rest
+                              (type-hash-value rest)
+                              42)
+                          ;; Results (logand #xFF (sxhash t/nil))
+                          ;; hardcoded to avoid relying on the xc host.
+                          ;; [but (logand (sxhash nil) #xff) => 2
+                          ;;  for me, so the code and comment disagree,
+                          ;;  but not in a way that matters.]
+                          (if allowp
+                              194
+                              11))))
     ((required equal-but-no-car-recursion)
      (optional equal-but-no-car-recursion)
      (rest eq)
@@ -188,10 +194,10 @@
                                                     nil
                                                     rest)))))
   ;; true if the arguments are unrestrictive, i.e. *
-  (wild-args nil :type boolean)
+  (wild-args nil :type boolean :read-only t)
   ;; type describing the return values. This is a values type
   ;; when multiple values were specified for the return.
-  (returns (missing-arg) :type ctype))
+  (returns (missing-arg) :type ctype :read-only t))
 
 ;;; The CONSTANT-TYPE structure represents a use of the CONSTANT-ARG
 ;;; "type specifier", which is only meaningful in function argument
@@ -203,7 +209,7 @@
             (:copier nil))
   ;; The type which the argument must be a constant instance of for this type
   ;; specifier to win.
-  (type (missing-arg) :type ctype))
+  (type (missing-arg) :type ctype :read-only t))
 
 ;;; The NAMED-TYPE is used to represent *, T and NIL, the standard
 ;;; special cases, as well as other special cases needed to
@@ -217,7 +223,7 @@
 (defstruct (named-type (:include ctype
                                  (class-info (type-class-or-lose 'named)))
                        (:copier nil))
-  (name nil :type symbol))
+  (name nil :type symbol :read-only t))
 
 ;;; a list of all the float "formats" (i.e. internal representations;
 ;;; nothing to do with #'FORMAT), in order of decreasing precision
@@ -356,17 +362,19 @@
 ;;; things such as SIMPLE-BASE-STRING.
 (defstruct (array-type (:include ctype
                                  (class-info (type-class-or-lose 'array)))
-                       (:constructor %make-array-type)
+                       (:constructor %make-array-type
+                        (dimensions &key complexp element-type
+                                    specialized-element-type))
                        (:copier nil))
   ;; the dimensions of the array, or * if unspecified. If a dimension
   ;; is unspecified, it is *.
-  (dimensions '* :type (or list (member *)))
+  (dimensions '* :type (or list (member *)) :read-only t)
   ;; Is this not a simple array type? (:MAYBE means that we don't know.)
-  (complexp :maybe :type (member t nil :maybe))
+  (complexp :maybe :type (member t nil :maybe) :read-only t)
   ;; the element type as originally specified
-  (element-type (missing-arg) :type ctype)
+  (element-type (missing-arg) :type ctype :read-only t)
   ;; the element type as it is specialized in this implementation
-  (specialized-element-type *wild-type* :type ctype))
+  (specialized-element-type *wild-type* :type ctype :read-only t))
 (define-cached-synonym make-array-type)
 
 ;;; A MEMBER-TYPE represent a use of the MEMBER type specifier. We
@@ -378,8 +386,8 @@
                         (:copier nil)
                         (:constructor %make-member-type (xset fp-zeroes))
                         #-sb-xc-host (:pure nil))
-  (xset (missing-arg) :type xset)
-  (fp-zeroes (missing-arg) :type list))
+  (xset (missing-arg) :type xset :read-only t)
+  (fp-zeroes (missing-arg) :type list :read-only t))
 (defun make-member-type (&key xset fp-zeroes members)
   (unless xset
     (aver (not fp-zeroes))
@@ -392,21 +400,23 @@
   ;; canonicalize to (DOUBLE-FLOAT 0.0d0 0.0d0), because numeric
   ;; ranges are compared by arithmetic operators (while MEMBERship is
   ;; compared by EQL).  -- CSR, 2003-04-23
-  (let ((unpaired nil)
+  (let ((presence 0)
+        (unpaired nil)
         (union-types nil))
-    (do ((tail (cdr fp-zeroes) (cdr tail))
-         (zero (car fp-zeroes) (car tail)))
-        ((not zero))
-      (macrolet ((frob (c)
-                   `(let ((neg (neg-fp-zero zero)))
-                      (if (member neg tail)
-                          (push (ctype-of ,c) union-types)
-                          (push zero unpaired)))))
-        (etypecase zero
-          (single-float (frob 0.0f0))
-          (double-float (frob 0.0d0))
-          #!+long-float
-          (long-float (frob 0.0l0)))))
+    (dotimes (pass 2)
+      (dolist (z fp-zeroes)
+        (let ((sign (if (minusp (nth-value 2 (integer-decode-float z))) 1 0))
+              (pair-idx
+                (etypecase z
+                  (single-float 0)
+                  (double-float 2
+                  #!+long-float (long-float 4)))))
+          (if (= pass 0)
+              (setf (ldb (byte 1 (+ pair-idx sign)) presence) 1)
+              (if (eq (ldb (byte 2 pair-idx) presence) #b11)
+                  (when (= sign 0)
+                    (push (ctype-of z) union-types))
+                  (push z unpaired))))))
     ;; The actual member-type contains the XSET (with no FP zeroes),
     ;; and a list of unpaired zeroes.
     (let ((member-type (unless (and (xset-empty-p xset) (not unpaired))
@@ -415,8 +425,7 @@
              (make-union-type t (if member-type
                                     (cons member-type union-types)
                                     union-types)))
-            (member-type
-             member-type)
+            (member-type)
             (t
              *empty-type*)))))
 
@@ -504,8 +513,6 @@
                                         cdr-type))
                       (:copier nil))
   ;; the CAR and CDR element types (to support ANSI (CONS FOO BAR) types)
-  ;;
-  ;; FIXME: Most or all other type structure slots could also be :READ-ONLY.
   (car-type (missing-arg) :type ctype :read-only t)
   (cdr-type (missing-arg) :type ctype :read-only t))
 (defun make-cons-type (car-type cdr-type)
@@ -564,11 +571,12 @@
 ;;;
 ;;; Note: VALUES-SPECIFIER-TYPE-CACHE-CLEAR must be called whenever a
 ;;; type is defined (or redefined).
+;;; This cache is sized extremely generously, which has payoff
+;;; elsewhere: it improves the TYPE= and CSUBTYPEP functions,
+;;; since EQ types are an immediate win.
 (defun-cached (values-specifier-type
-               :hash-function (lambda (x)
-                                (logand (sxhash x) #x3FF))
-               :hash-bits 10
-               :init-wrapper !cold-init-forms)
+               :hash-function #'sxhash
+               :hash-bits 10)
               ((orig equal-but-no-car-recursion))
   (let ((u (uncross orig)))
     (or (info :type :builtin u)
@@ -590,10 +598,9 @@
             (when (and (atom spec)
                        (member spec '(and or not member eql satisfies values)))
               (error "The symbol ~S is not valid as a type specifier." spec))
-            (let* ((lspec (if (atom spec) (list spec) spec))
-                   (fun (info :type :translator (car lspec))))
+            (let ((fun (info :type :translator (if (consp spec) (car spec) spec))))
               (cond (fun
-                     (funcall fun lspec))
+                     (funcall fun (if (atom spec) (list spec) spec)))
                     ((or (and (consp spec) (symbolp (car spec))
                               (not (info :type :builtin (car spec))))
                          (and (symbolp spec) (not (info :type :builtin spec))))
@@ -647,7 +654,7 @@ expansion happened."
                ;; b) so (EQUAL (TYPEXPAND 'STRING) (TYPEXPAND-ALL 'STRING))
                (values nil nil))
               ((symbolp spec)
-               (values (info :type :expander spec) (list spec)))
+               (values (info :type :expander spec) spec))
               ((and (consp spec) (symbolp (car spec)) (info :type :builtin (car spec)))
                ;; see above
                (values nil nil))
@@ -655,7 +662,10 @@ expansion happened."
                (values (info :type :expander (car spec)) spec))
               (t nil)))
     (if expander
-        (values (funcall expander lspec) t)
+        (values (funcall expander (if (symbolp lspec)
+                                      (list lspec)
+                                      lspec))
+                t)
         (values type-specifier nil))))
 
 (defun typexpand (type-specifier &optional env)

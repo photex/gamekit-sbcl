@@ -50,8 +50,8 @@
     ;; instead of host code.
     ;; FIXME: Isn't this now taken care of automatically by
     ;; toplevel forms in the xcompiler backq.lisp file?
-    (set-macro-character #\` #'sb!impl::backquote-macro)
-    (set-macro-character #\, #'sb!impl::comma-macro)
+    (set-macro-character #\` #'sb!impl::backquote-charmacro)
+    (set-macro-character #\, #'sb!impl::comma-charmacro)
 
     (set-dispatch-macro-character #\# #\+ #'she-reader)
     (set-dispatch-macro-character #\# #\- #'she-reader)
@@ -71,12 +71,99 @@
 (setf *in-target-compilation-mode-fn* #'in-target-cross-compilation-mode)
 
 ;;; Run the cross-compiler to produce cold fasl files.
-(load "src/cold/compile-cold-sbcl.lisp")
+;; This suppresses ~6000 lines of "undefined function" warnings from the
+;; cross-compiler stemming from the calls to INSTANCE-TYPEP that occur before
+;; src/code/class gets compiled. It magically converts efficiently,
+;; but IR1 is a little bit naive about how it happens.
+(dolist (f '(sb!kernel:layout-depthoid
+             sb!kernel:layout-inherits))
+  (setf (sb!int:info :function :kind f) :function
+        (sb!int:info :function :where-from f) :declared))
+;; ... and since the cross-compiler hasn't seen a DEFMACRO for QUASIQUOTE,
+;; make it think it has, otherwise it fails more-or-less immediately.
+(setf (sb!int:info :function :kind 'sb!int:quasiquote) :macro
+      (sb!int:info :function :macro-function 'sb!int:quasiquote)
+      (cl:macro-function 'sb!int:quasiquote))
+(setq sb!c::*track-full-called-fnames-p* nil) ; Change this as desired
+(progn ; Should be: sb-xc:with-compilation-unit () ... but
+  ;; leaving aside the question of building in any host - which shouldn't
+  ;; matter - building SBCL in SBCL can hang in a way I haven't tracked down.
+  (load "src/cold/compile-cold-sbcl.lisp"))
 
+(when sb!c::*track-full-called-fnames-p*
+  (let (possibly-suspicious likely-suspicious)
+    (sb!c::call-with-each-globaldb-name
+     (lambda (name)
+       (let* ((cell (sb!int:info :function :static-full-call-count name))
+              (inlinep (eq (sb!int:info :function :inlinep name) :inline))
+              (info (sb!int:info :function :info name)))
+         (if (and cell
+                  (or inlinep
+                      (and info (sb!c::fun-info-templates info))
+                      (sb!int:info :function :compiler-macro-function name)
+                      (sb!int:info :function :source-transform name)))
+             (if inlinep
+                 ;; A full call to an inline function almost always indicates
+                 ;; an out-of-order definition. If not an inline function,
+                 ;; the call could be due to an inapplicable transformation.
+                 (push (cons name cell) likely-suspicious)
+                 (push (cons name cell) possibly-suspicious))))))
+    (flet ((show (label list)
+             (format t "~%~A suspicious calls:~:{~%~*~4d ~0@*~S~*~@{~%     ~S~}~}~%"
+                     label (sort list #'> :key #'cadr))))
+      ;; Called inlines not in the presence of a declaration to the contrary
+      ;; indicate that perhaps the function definition appeared too late.
+      (show "Likely" likely-suspicious)
+      ;; Failed transforms are considered not quite as suspicious
+      ;; because it could either be too late, or that the transform failed.
+      (show "Possibly" possibly-suspicious))))
+
+;; After cross-compiling, show me a list of types that checkgen
+;; would have liked to use primitive traps for but couldn't.
+#+nil
+(let ((l (sb-impl::%hash-table-alist sb!c::*checkgen-used-types*)))
+  (format t "~&Types needed by checkgen: ('+' = has internal error number)~%")
+  (setq l (sort l #'> :key #'cadr))
+  (loop for (type-spec . (count . interr-p)) in l
+        do (format t "~:[ ~;+~] ~5D ~S~%" interr-p count type-spec))
+  (format t "~&Error numbers not used by checkgen:~%")
+  (loop for (spec . symbol) across sb!c::*backend-internal-errors*
+        when (and (not (stringp spec))
+                  (not (gethash spec sb!c::*checkgen-used-types*)))
+        do (format t "       ~S~%" spec)))
+
+;; Print some information about how well the function caches performed
+(when sb!impl::*profile-hash-cache*
+  (sb!impl::show-hash-cache-statistics))
+#|
+Sample output
+-------------
+     Seek       Hit      (%)    Evict      (%) Size    full
+ 23698219  18382256 ( 77.6%)  5313915 ( 22.4%) 2048  100.0% TYPE=-CACHE
+ 23528751  23416735 ( 99.5%)    46242 (  0.2%) 1024   20.1% VALUES-SPECIFIER-TYPE-CACHE
+ 16755212  13072420 ( 78.0%)  3681768 ( 22.0%) 1024  100.0% CSUBTYPEP-CACHE
+  9913114   8374965 ( 84.5%)  1537893 ( 15.5%)  256  100.0% MAKE-VALUES-TYPE-CACHED-CACHE
+  7718160   4702069 ( 60.9%)  3675019 ( 47.6%)  512  100.0% TYPE-INTERSECTION2-CACHE
+  5184706   1626512 ( 31.4%)  3557973 ( 68.6%)  256   86.3% %TYPE-INTERSECTION-CACHE
+  5156044   3986450 ( 77.3%)  1169338 ( 22.7%)  256  100.0% VALUES-SUBTYPEP-CACHE
+  4550163   2969409 ( 65.3%)  1580498 ( 34.7%)  256  100.0% VALUES-TYPE-INTERSECTION-CACHE
+  3544211   2607658 ( 73.6%)   936300 ( 26.4%)  256   98.8% %TYPE-UNION-CACHE
+  2545070   2110741 ( 82.9%)   433817 ( 17.0%)  512  100.0% PRIMITIVE-TYPE-AUX-CACHE
+  2164841   1112785 ( 51.4%)  1706097 ( 78.8%)  256  100.0% TYPE-UNION2-CACHE
+  1568022   1467575 ( 93.6%)   100191 (  6.4%)  256  100.0% TYPE-SINGLETON-P-CACHE
+   779941    703208 ( 90.2%)    76477 (  9.8%)  256  100.0% %COERCE-TO-VALUES-CACHE
+   618605    448427 ( 72.5%)   169922 ( 27.5%)  256  100.0% VALUES-TYPE-UNION-CACHE
+   145805     29403 ( 20.2%)   116206 ( 79.7%)  256   76.6% %%MAKE-UNION-TYPE-CACHED-CACHE
+   118634     76203 ( 64.2%)    42188 ( 35.6%)  256   94.9% %%MAKE-ARRAY-TYPE-CACHED-CACHE
+    12319     12167 ( 98.8%)       47 (  0.4%)  128   82.0% WEAKEN-TYPE-CACHE
+    10416      9492 ( 91.1%)      668 (  6.4%)  256  100.0% TYPE-NEGATION-CACHE
+|#
 
 ;;; miscellaneous tidying up and saving results
 (let ((filename "output/object-filenames-for-genesis.lisp-expr"))
   (ensure-directories-exist filename :verbose t)
+  ;; save the initial-symbol-values before writing the object filenames.
+  (save-initial-symbol-values)
   (with-open-file (s filename :direction :output :if-exists :supersede)
     (write *target-object-file-names* :stream s :readably t)))
 

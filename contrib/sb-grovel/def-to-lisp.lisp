@@ -120,8 +120,10 @@ code:
            (when (eql type :errno)
              (printf "(cl:setf (get '~A 'errno) t)" lispname))
            (as-c "#else")
-           (printf "(sb-int:style-warn \"Couldn't grovel for ~A (unknown to the C compiler).\")" cname)
+           (printf "(sb-int:style-warn \"Couldn't grovel for ~~A (unknown to the C compiler).\" \"~A\")" cname)
            (as-c "#endif"))
+          ((:integer-no-check)
+           (printf "(cl:defconstant ~A %d \"~A\")" lispname doc cname))
           (:enum
            (c-for-enum lispname cname export))
           (:type
@@ -153,28 +155,31 @@ code:
              (definitions (read i)))
         (print-c-source  f headers definitions package)))))
 
-(defclass grovel-constants-file (asdf:cl-source-file)
+(defclass grovel-constants-file (cl-source-file)
   ((package :accessor constants-package :initarg :package)
    (do-not-grovel :accessor do-not-grovel
                   :initform nil
                   :initarg :do-not-grovel)))
+(defclass asdf::sb-grovel-constants-file (grovel-constants-file) ())
 
-(define-condition c-compile-failed (compile-failed) ()
-  (:report (lambda (c s)
-             (format s "~@<C compiler failed when performing ~A on ~A.~@:>"
-                     (error-operation c) (error-component c)))))
-(define-condition a-dot-out-failed (compile-failed) ()
-  (:report (lambda (c s)
-             (format s "~@<a.out failed when performing ~A on ~A.~@:>"
-                     (error-operation c) (error-component c)))))
+(define-condition c-compile-failed (compile-file-error)
+  ((description :initform "C compiler failed")))
+(define-condition a-dot-out-failed (compile-file-error)
+  ((description :initform "a.out failed")))
 
-(defmethod asdf:perform ((op asdf:compile-op)
-                         (component grovel-constants-file))
+(defmethod perform ((op compile-op)
+                    (component grovel-constants-file))
   ;; we want to generate all our temporary files in the fasl directory
   ;; because that's where we have write permission.  Can't use /tmp;
   ;; it's insecure (these files will later be owned by root)
-  (let* ((output-file (car (output-files op component)))
+  (let* ((output-files (output-files op component))
+         (output-file (first output-files))
+         (warnings-file (second output-files))
          (filename (component-pathname component))
+         (context-format "~/asdf-action::format-action/")
+         (context-arguments `((,op . ,component)))
+         (condition-arguments `(:context-format ,context-format
+                                :context-arguments ,context-arguments))
          (real-output-file
           (if (typep output-file 'logical-pathname)
               (translate-logical-pathname output-file)
@@ -207,7 +212,7 @@ code:
                       '("-D_LARGEFILE_SOURCE"
                         "-D_LARGEFILE64_SOURCE"
                         "-D_FILE_OFFSET_BITS=64")
-                      #+(and (or x86 ppc) linux) '("-m32")
+                      #+(and (or x86 ppc) (or linux freebsd)) '("-m32")
                       #+(and x86-64 darwin inode64)
                       '("-arch" "x86_64"
                         "-mmacosx-version-min=10.5"
@@ -226,11 +231,7 @@ code:
                      :input nil
                      :output *trace-output*))))
         (unless (= code 0)
-          (case (operation-on-failure op)
-            (:warn (warn "~@<C compiler failure when performing ~A on ~A.~@:>"
-                         op component))
-            (:error
-             (error 'c-compile-failed :operation op :component component)))))
+          (apply 'error 'c-compile-failed condition-arguments)))
       (let ((code (sb-ext:process-exit-code
                    (sb-ext:run-program (namestring tmp-a-dot-out)
                                        (list (namestring tmp-constants))
@@ -238,29 +239,7 @@ code:
                                        :input nil
                                        :output *trace-output*))))
         (unless (= code 0)
-          (case (operation-on-failure op)
-            (:warn (warn "~@<a.out failure when performing ~A on ~A.~@:>"
-                         op component))
-            (:error
-             (error 'a-dot-out-failed :operation op :component component))))))
+          (apply 'error 'a-dot-out-failed condition-arguments)))
     (multiple-value-bind (output warnings-p failure-p)
-        (compile-file tmp-constants :output-file output-file)
-      (when warnings-p
-        (case (operation-on-warnings op)
-          (:warn (warn
-                  (formatter "~@<COMPILE-FILE warned while ~
-                              performing ~A on ~A.~@:>")
-                  op component))
-          (:error (error 'compile-warned :component component :operation op))
-          (:ignore nil)))
-      (when failure-p
-        (case (operation-on-failure op)
-          (:warn (warn
-                  (formatter "~@<COMPILE-FILE failed while ~
-                              performing ~A on ~A.~@:>")
-                  op component))
-          (:error (error 'compile-failed :component component :operation op))
-          (:ignore nil)))
-      (unless output
-        (error 'compile-error :component component :operation op)))))
-
+        (compile-file* tmp-constants :output-file output-file :warnings-file warnings-file)
+      (check-lisp-compile-results output warnings-p failure-p context-format context-arguments)))))

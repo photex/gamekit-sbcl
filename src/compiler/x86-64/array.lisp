@@ -48,22 +48,42 @@
 ;;;; additional accessors and setters for the array header
 (define-full-reffer %array-dimension *
   array-dimensions-offset other-pointer-lowtag
-  (any-reg) positive-fixnum sb!kernel:%array-dimension)
+  (any-reg) positive-fixnum %array-dimension)
 
 (define-full-setter %set-array-dimension *
   array-dimensions-offset other-pointer-lowtag
-  (any-reg) positive-fixnum sb!kernel:%set-array-dimension)
+  (any-reg) positive-fixnum %set-array-dimension)
 
 (define-vop (array-rank-vop)
-  (:translate sb!kernel:%array-rank)
+  (:translate %array-rank)
   (:policy :fast-safe)
   (:args (x :scs (descriptor-reg)))
   (:results (res :scs (unsigned-reg)))
   (:result-types positive-fixnum)
-  (:generator 6
-    (loadw res x 0 other-pointer-lowtag)
-    (inst shr res n-widetag-bits)
-    (inst sub res (1- array-dimensions-offset))))
+  (:generator 3
+    ;; An unaligned dword read not spanning a 16-byte boundary is as fast as
+    ;; and shorter by 5 bytes than a qword read and right-shift by 8.
+    (inst mov (reg-in-size res :dword)
+          (make-ea :dword :base x :disp (1+ (- other-pointer-lowtag))))
+    (inst sub (reg-in-size res :dword) (1- array-dimensions-offset))))
+
+(define-vop (array-rank-vop=>fixnum)
+  (:translate %array-rank)
+  (:policy :fast-safe)
+  (:args (x :scs (descriptor-reg)))
+  (:results (res :scs (any-reg)))
+  (:result-types positive-fixnum)
+  (:generator 2
+    (inst mov (reg-in-size res :dword)
+          (make-ea :dword :base x :disp (1+ (- other-pointer-lowtag))))
+    (inst lea (reg-in-size res :dword)
+          (let ((scale (ash 1 n-fixnum-tag-bits)))
+            ;; Compute [res*N-disp]. for N=2 use [res+res-disp]
+            (make-ea :dword
+                     :scale (if (= scale 2) 1 scale)
+                     :index res
+                     :base (if (= scale 2) res nil)
+                     :disp (- (* scale (1- array-dimensions-offset))))))))
 
 ;;;; bounds checking routine
 
@@ -749,11 +769,6 @@
   (unsigned-reg) unsigned-num %vector-raw-bits)
 (define-full-setter set-vector-raw-bits * vector-data-offset other-pointer-lowtag
   (unsigned-reg) unsigned-num %set-vector-raw-bits)
-
-;;;; miscellaneous array VOPs
-
-(define-vop (get-vector-subtype get-header-data))
-(define-vop (set-vector-subtype set-header-data))
 
 ;;;; ATOMIC-INCF for arrays
 

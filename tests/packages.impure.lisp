@@ -62,7 +62,7 @@
 
 (defpackage "TEST-ORIGINAL" (:nicknames "A-NICKNAME"))
 
-(assert (raises-error? (defpackage "A-NICKNAME")))
+(assert-error (defpackage "A-NICKNAME"))
 
 (assert (eql (find-package "A-NICKNAME")
              (find-package "TEST-ORIGINAL")))
@@ -288,6 +288,13 @@ if a restart was invoked."
                 ((and simple-condition program-error) (c)
                   (assert (equal (list :foo) (simple-condition-format-arguments c)))
                   :good)))))
+
+;; X3J13 writeup HASH-TABLE-PACKAGE-GENERATORS says
+;;  "An argument of NIL is treated as an empty list of packages."
+;; This used to fail with "NIL does not name a package"
+(with-test (:name :with-package-iterator-nil-list)
+  (with-package-iterator (iter '() :internal)
+    (print (nth-value 1 (iter)))))
 
 ;;; MAKE-PACKAGE error in another thread blocking FIND-PACKAGE & FIND-SYMBOL
 (with-test (:name :bug-511072 :skipped-on '(not :sb-thread))
@@ -651,3 +658,152 @@ if a restart was invoked."
              (delete-package (gensym)))))
     (assert ok)
     (assert (not result))))
+
+;; WITH-PACKAGE-ITERATOR isn't well-exercised by tests (though LOOP uses it)
+;; so here's a basic correctness test with some complications involving
+;; shadowing symbols.
+(make-package "P1" :use '("SB-FORMAT"))
+(make-package "P2")
+(export 'p1::foo 'p1)
+(shadow "FORMAT-ERROR" 'p1)
+(make-package "A" :use '("SB-FORMAT" "P1" "P2"))
+(shadow '("PROG2" "FOO") 'a)
+(intern "BLAH" "P2")
+(export 'p2::(foo bar baz) 'p2)
+(export 'a::goodfun 'a)
+
+(with-test (:name :with-package-iterator)
+  (let ((tests '((:internal) (:external) (:inherited)
+                 (:internal :inherited)
+                 (:internal :external)
+                 (:external :inherited)
+                 (:internal :external :inherited)))
+        (maximum-answer
+         '(;; symbols visible in A
+           (a::prog2 :internal "A")
+           (a::foo :internal "A")
+           (a:goodfun :external "A")
+           (p2:bar :inherited "A")
+           (p2:baz :inherited "A")
+           (sb-format:%compiler-walk-format-string :inherited "A")
+           (sb-format:format-error :inherited "A")
+           ;; ... P1
+           (p1:foo :external "P1")
+           (p1::format-error :internal "P1")
+           (sb-format:%compiler-walk-format-string :inherited "P1")
+           ;; ... P2
+           (p2::blah :internal "P2")
+           (p2:foo :external "P2")
+           (p2:bar :external "P2")
+           (p2:baz :external "P2"))))
+    ;; Compile a new function to test each combination of
+    ;; accessibility-kind since the macro doesn't eval them.
+    (dolist (access tests)
+      ; (print `(testing ,access))
+      (let ((f (compile
+                nil
+                `(lambda ()
+                   (with-package-iterator (iter '(p1 a p2) ,@access)
+                     (let (res)
+                       (loop
+                        (multiple-value-bind (foundp sym access pkg) (iter)
+                          (if foundp
+                              (push (list sym access (package-name pkg)) res)
+                              (return))))
+                       res))))))
+        (let ((answer (funcall f))
+              (expect (remove-if-not (lambda (x) (member (second x) access))
+                                     maximum-answer)))
+          ;; exactly as many results as expected
+          (assert (equal (length answer) (length expect)))
+          ;; each result is right
+          (assert (equal (length (intersection answer expect :test #'equal))
+                         (length expect))))))))
+
+;; Assert that changes in size of a package-hashtable's symbol vector
+;; do not cause WITH-PACKAGE-ITERATOR to crash. The vector shouldn't grow,
+;; because it is not permitted to INTERN new symbols, but it can shrink
+;; because it is expressly permitted to UNINTERN the current symbol.
+;; (In fact we allow INTERN, but that's beside the point)
+(with-test (:name :with-package-iterator-and-mutation)
+  (flet ((table-size (pkg)
+           (length (sb-impl::package-hashtable-table
+                    (sb-impl::package-internal-symbols pkg)))))
+    (let* ((p (make-package (string (gensym))))
+           (initial-table-size (table-size p))
+           (strings
+            '("a" "b" "c" "d" "e" "f" "g" "h" "i" "j" "k" "l" "m")))
+      (dolist (x strings)
+        (intern x p))
+      (let ((grown-table-size (table-size p)))
+        (assert (> grown-table-size initial-table-size))
+        (let ((n 0))
+          (with-package-iterator (iter p :internal)
+            (loop (multiple-value-bind (foundp sym) (iter)
+                    (cond (foundp
+                           (incf n)
+                           (unintern sym p))
+                          (t
+                           (return)))))
+            (assert (= n (length strings)))
+            ;; while we're at it, assert that calling the iterator
+            ;; a couple more times returns nothing.
+            (dotimes (i 2)
+              (assert (not (iter))))))
+        (let ((shrunk-table-size (table-size p)))
+          (assert (< shrunk-table-size grown-table-size)))))))
+
+;; example from CLHS
+(with-test (:name :do-symbols-block-scope)
+  (assert (eq t
+              (block nil
+                (do-symbols (s (or (find-package "FROB") (return nil)))
+                  (print s))
+                t))))
+
+(with-test (:name :export-inaccessible-lookalike)
+  (make-package "E1")
+  (make-package "E2")
+  (export (intern "A" "E2") 'e2)
+  (multiple-value-bind (answer condition)
+      (ignore-errors  (export (intern "A" "E1") 'e2))
+    (assert (and (not answer)
+                 (and (typep condition 'sb-kernel:simple-package-error)
+                      (search "not accessible"
+                              (simple-condition-format-control condition)))))))
+
+;; Concurrent FIND-SYMBOL was adversely affected by package rehash.
+;; It's slightly difficult to show that this is fixed, because this
+;; test only sometimes failed prior to the fix. Now it never fails though.
+(with-test (:name :concurrent-find-symbol :skipped-on '(not :sb-thread))
+ (let ((pkg (make-package (gensym)))
+       (threads)
+       (names)
+       (run nil))
+   (dotimes (i 50)
+     (let ((s (string (gensym "FRED"))))
+       (push s names)
+       (intern s pkg)))
+   (dotimes (i 5)
+     (push (sb-thread:make-thread
+            (lambda ()
+              (wait-for run)
+              (let ((n-missing 0))
+                (dotimes (i 10 n-missing)
+                  (dolist (name names)
+                    (unless (find-symbol name pkg)
+                      (incf n-missing)))))))
+           threads))
+   (setq run t)
+   ;; Interning new symbols can't cause the pre-determined
+   ;; 50 names to transiently disappear.
+   (let ((s (make-string 3))
+         (alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"))
+     (dotimes (i (expt 32 3))
+       (setf (char s 0) (char alphabet (ldb (byte 5 10) i))
+             (char s 1) (char alphabet (ldb (byte 5  5) i))
+             (char s 2) (char alphabet (ldb (byte 5  0) i)))
+       (intern s pkg)))
+   (let ((tot-missing 0))
+     (dolist (thread threads (assert (zerop tot-missing)))
+       (incf tot-missing (sb-thread:join-thread thread))))))

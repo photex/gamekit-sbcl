@@ -129,11 +129,14 @@
                           (find-class ',class) ,class)))
                classes)))
 
+(defun !wrapper-p (x) (and (sb-kernel::layout-p x) (layout-for-std-class-p x)))
+
 (defun !bootstrap-meta-braid ()
   (let* ((*create-classes-from-internal-structure-definitions-p* nil)
          standard-class-wrapper standard-class
          funcallable-standard-class-wrapper funcallable-standard-class
          slot-class-wrapper slot-class
+         system-class-wrapper system-class
          built-in-class-wrapper built-in-class
          structure-class-wrapper structure-class
          condition-class-wrapper condition-class
@@ -145,7 +148,7 @@
          standard-generic-function-wrapper standard-generic-function)
     (!initial-classes-and-wrappers
      standard-class funcallable-standard-class
-     slot-class built-in-class structure-class condition-class
+     slot-class system-class built-in-class structure-class condition-class
      standard-direct-slot-definition standard-effective-slot-definition
      class-eq-specializer standard-generic-function)
     ;; First, make a class metaobject for each of the early classes. For
@@ -160,6 +163,7 @@
                         (funcallable-standard-class
                          funcallable-standard-class-wrapper)
                         (built-in-class built-in-class-wrapper)
+                        (system-class system-class-wrapper)
                         (structure-class structure-class-wrapper)
                         (condition-class condition-class-wrapper)))
              (class (or (find-class name nil)
@@ -188,6 +192,7 @@
                                   ((eq class
                                        standard-effective-slot-definition)
                                    standard-effective-slot-definition-wrapper)
+                                  ((eq class system-class) system-class-wrapper)
                                   ((eq class built-in-class)
                                    built-in-class-wrapper)
                                   ((eq class structure-class)
@@ -208,8 +213,8 @@
                   (error "Slot allocation ~S is not supported in bootstrap."
                          (getf slot :allocation))))
 
-              (when (wrapper-p wrapper)
-                (setf (wrapper-slots wrapper) slots))
+              (when (!wrapper-p wrapper)
+                (setf (layout-slot-list wrapper) slots))
 
               (setq proto (if (eq meta 'funcallable-standard-class)
                               (allocate-standard-funcallable-instance wrapper)
@@ -225,8 +230,8 @@
                      standard-effective-slot-definition-wrapper t))
 
               (setf (layout-slot-table wrapper) (make-slot-table class slots t))
-              (when (wrapper-p wrapper)
-                (setf (wrapper-slots wrapper) slots))
+              (when (!wrapper-p wrapper)
+                (setf (layout-slot-list wrapper) slots))
 
               (case meta
                 ((standard-class funcallable-standard-class)
@@ -236,6 +241,11 @@
                   direct-supers direct-subclasses cpl wrapper proto
                   direct-slots slots direct-default-initargs default-initargs))
                 (built-in-class         ; *the-class-t*
+                 (!bootstrap-initialize-class
+                  meta
+                  class name class-eq-specializer-wrapper source
+                  direct-supers direct-subclasses cpl wrapper proto))
+                (system-class
                  (!bootstrap-initialize-class
                   meta
                   class name class-eq-specializer-wrapper source
@@ -328,8 +338,8 @@
             (make-slot-table class slots
                              (member metaclass-name
                                      '(standard-class funcallable-standard-class))))
-      (when (wrapper-p wrapper)
-        (setf (wrapper-slots wrapper) slots)))
+      (when (!wrapper-p wrapper)
+        (setf (layout-slot-list wrapper) slots)))
 
     ;; For all direct superclasses SUPER of CLASS, make sure CLASS is
     ;; a direct subclass of SUPER.  Note that METACLASS-NAME doesn't
@@ -386,8 +396,9 @@
       (set-val 'initform     (get-val :initform))
       (set-val 'initfunction (get-val :initfunction))
       (set-val 'initargs     (get-val :initargs))
-      (set-val 'readers      (get-val :readers))
-      (set-val 'writers      (get-val :writers))
+      (unless effective-p
+        (set-val 'readers      (get-val :readers))
+        (set-val 'writers      (get-val :writers)))
       (set-val 'allocation   :instance)
       (set-val '%type        (or (get-val :type) t))
       (set-val '%documentation (or (get-val :documentation) ""))
@@ -417,7 +428,7 @@
     (dolist (definition *early-class-definitions*)
       (let ((name (ecd-class-name definition))
             (meta (ecd-metaclass definition)))
-        (unless (eq meta 'built-in-class)
+        (unless (or (eq meta 'built-in-class) (eq meta 'system-class))
           (let ((direct-slots  (ecd-canonical-slots definition)))
             (dolist (slotd direct-slots)
               (let ((slot-name (getf slotd :name))
@@ -509,10 +520,13 @@
   ;; First make sure that all the supers listed in
   ;; *BUILT-IN-CLASS-LATTICE* are themselves defined by
   ;; *BUILT-IN-CLASS-LATTICE*. This is just to check for typos and
-  ;; other sorts of brainos.
+  ;; other sorts of brainos.  (The exceptions, T and SEQUENCE, are
+  ;; those classes which are SYSTEM-CLASSes which nevertheless have
+  ;; BUILT-IN-CLASS subclasses.)
   (dolist (e *built-in-classes*)
     (dolist (super (cadr e))
       (unless (or (eq super t)
+                  (eq super 'sequence)
                   (assq super *built-in-classes*))
         (error "in *BUILT-IN-CLASSES*: ~S has ~S as a super,~%~
                 but ~S is not itself a class in *BUILT-IN-CLASSES*."
@@ -543,12 +557,8 @@
                                        (cons name cpl)
                                        wrapper prototype))))))
 
-#-sb-fluid (declaim (inline wrapper-of))
-(defun wrapper-of (x)
-  (layout-of x))
-
 (defun class-of (x)
-  (wrapper-class* (wrapper-of x)))
+  (wrapper-class* (layout-of x)))
 
 (defun eval-form (form)
   (lambda () (eval form)))
@@ -580,11 +590,9 @@
            :readers ,(condition-slot-readers slot)
            :writers ,(condition-slot-writers slot)
            ,@(when (condition-slot-initform-p slot)
-               (let ((form-or-fun (condition-slot-initform slot)))
-                 (if (functionp form-or-fun)
-                     `(:initfunction ,form-or-fun)
-                     `(:initform ,form-or-fun
-                       :initfunction ,(lambda () form-or-fun)))))
+               (let ((initform (condition-slot-initform slot))
+                     (initfun (condition-slot-initfunction slot)))
+                 `(:initform ',initform :initfunction ,initfun)))
            :allocation ,(condition-slot-allocation slot)
            :documentation ,(condition-slot-documentation slot))))
     (cond ((structure-type-p name)
@@ -643,8 +651,7 @@
 ;;; installs the class in the Lisp type system.
 (defun %update-lisp-class-layout (class layout)
   ;; Protected by *world-lock* in callers.
-  (let ((classoid (layout-classoid layout))
-        (olayout (class-wrapper class)))
+  (let ((classoid (layout-classoid layout)))
     (unless (eq (classoid-layout classoid) layout)
       (setf (layout-inherits layout)
             (order-layout-inherits
@@ -688,7 +695,13 @@
 (!bootstrap-class-predicates nil)
 (!bootstrap-built-in-classes)
 
-(dohash ((name x) sb-kernel::*classoid-cells*)
+(loop for (name . x)
+      in (let (classoid-cells)
+           (do-all-symbols (s classoid-cells)
+             (let ((cell (sb-int:info :type :classoid-cell s)))
+               (when cell
+                 (push (cons s cell) classoid-cells)))))
+      do
   (when (classoid-cell-pcl-class x)
     (let* ((class (find-class-from-cell name x))
            (layout (class-wrapper class))

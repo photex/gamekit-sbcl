@@ -357,7 +357,7 @@
                  (sl-option (first (sb-mop:class-direct-slots
                                     (find-class 'test-multiple-slot-option-bug))))))))
 
-;;; bug reported by Bruno Haibel on sbcl-devel 2004-11-19: AMOP requires
+;;; bug reported by Bruno Haible on sbcl-devel 2004-11-19: AMOP requires
 ;;; that CLASS-PROTOYPE signals an error if the class is not yet finalized
 (defclass prototype-not-finalized-sub (prototype-not-finalized-super) ())
 (multiple-value-bind (val err)
@@ -366,12 +366,15 @@
   (assert (typep err 'error)))
 
 ;;; AMOP says so
-(find-method (fdefinition 'sb-mop:allocate-instance) () '(built-in-class))
-(dolist (class-name '(fixnum bignum symbol))
-  (let ((class (find-class class-name)))
-    (multiple-value-bind (value error) (ignore-errors (allocate-instance class))
-      (assert (null value))
-      (assert (typep error 'error)))))
+(with-test (:name (allocate-instance built-in-class error))
+  (dolist (class-name '(fixnum bignum symbol t))
+    (let ((class (find-class class-name)))
+      ;; actually T can't be a built-in-class
+      (when (typep class 'built-in-class)
+        (multiple-value-bind (value error)
+            (ignore-errors (allocate-instance class))
+          (assert (null value))
+          (assert (typep error 'error)))))))
 
 ;;; bug reported by David Morse: direct-subclass update protocol was broken
 (defclass vegetable () ())
@@ -470,18 +473,18 @@
 (assert (not (subtypep 'standard-class-for-fsc 'function)))
 
 ;;; also check that our sanity check for functionness is good
-(assert (raises-error?
-         (progn
-           (defclass bad-standard-class (funcallable-standard-object)
-             ()
-             (:metaclass standard-class))
-           (make-instance 'bad-standard-class))))
-(assert (raises-error?
-         (progn
-           (defclass bad-funcallable-standard-class (standard-object)
-             ()
-             (:metaclass funcallable-standard-class))
-           (make-instance 'bad-funcallable-standard-class))))
+(assert-error
+ (progn
+   (defclass bad-standard-class (funcallable-standard-object)
+     ()
+     (:metaclass standard-class))
+   (make-instance 'bad-standard-class)))
+(assert-error
+ (progn
+   (defclass bad-funcallable-standard-class (standard-object)
+     ()
+     (:metaclass funcallable-standard-class))
+   (make-instance 'bad-funcallable-standard-class)))
 
 ;;; we should be able to make classes with silly names
 (make-instance 'standard-class :name 3)
@@ -527,7 +530,7 @@
 (defclass has-slots-but-isnt-finalized () (a b c))
 (let ((class (find-class 'has-slots-but-isnt-finalized)))
   (assert (not (sb-mop:class-finalized-p class)))
-  (assert (raises-error? (sb-mop:class-slots class) sb-kernel::reference-condition)))
+  (assert-error (sb-mop:class-slots class) sb-kernel::reference-condition))
 
 ;;; Check that MAKE-METHOD-LAMBDA which wraps the original body doesn't
 ;;; break RETURN-FROM.
@@ -680,9 +683,14 @@
 
 (defgeneric definitely-a-funcallable-instance (x))
 (with-test (:name (set-funcallable-instance-function :typechecking))
-  (assert (raises-error? (set-funcallable-instance-function
-                          (lambda (y) nil)
-                          #'definitely-a-funcallable-instance)
-                         type-error)))
+  (assert-error (set-funcallable-instance-function
+                  (lambda (y) nil)
+                  #'definitely-a-funcallable-instance)
+                 type-error))
+
+(with-test (:name (defstruct :nil-slot-name :bug-633911))
+  (defstruct nil-slot-name nil)
+  (let ((fun (compile nil '(lambda (x) (slot-value x 'nil)))))
+    (assert (= 3 (funcall fun (make-nil-slot-name :nil 3))))))
 
 ;;;; success

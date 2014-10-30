@@ -19,7 +19,7 @@
 
 (defun restrict-compiler-policy (&optional quality (min 0))
   #!+sb-doc
-  "Assing a minimum value to an optimization quality. QUALITY is the name of
+  "Assign a minimum value to an optimization quality. QUALITY is the name of
 the optimization quality to restrict, and MIN (defaulting to zero) is the
 minimum allowed value.
 
@@ -92,6 +92,7 @@ EXPERIMENTAL INTERFACE: Subject to change."
 ;;; Inside the scope of declarations, new entries are added at the
 ;;; head of the alist.
 (declaim (type policy *policy*))
+;; FIXME: redundant with definition in 'early-c'
 (defvar *policy*)          ; initialized in cold init
 
 (defun sort-policy (policy)
@@ -190,3 +191,34 @@ EXPERIMENTAL INTERFACE: Subject to change."
      #-sb-xc-host
      ,@(when documentation `((setf (fdocumentation ',name 'optimize) ,documentation)))
      ',name))
+
+;; Set an alternate policy that is used to compile all code within DEFMACRO,
+;; MACROLET, DEFINE-COMPILER-MARO - whether they occur at toplevel or not -
+;; as well as execute all toplevel code in eval-when situation :COMPILE-TOPLEVEL,
+;; including such code as emitted into a '.cfasl' file.
+;; e.g. (SET-MACRO-POLICY '((SPEED 0) (SAFETY 3))) ensures full error checking
+;; regardless of prevailing local policy in situations such as
+;;   (macrolet ((frob (a b) (declare (type (member :up :down) a)) ...)
+;;
+;; Todo: it would be nice to allow NOTINLINE, which can be broadly achieved by
+;; setting (SPEED 0), but nonetheless more targeted settings should be possible.
+;; Same for {UN}MUFFLE-CONDITIONS or anything else that can be proclaimed.
+;;
+(defun set-macro-policy (list)
+  (setq *macro-policy* (process-optimize-decl `(optimize ,@list) nil)))
+
+;; Turn the macro policy into either the decl-specs of a declaration expression
+;; if WRAP-P is nil, or the whole declaration expression if WRAP-P is T.
+;; Note that despite it being a style-warning to insert a duplicate OPTIMIZE
+;; quality, we need no precaution against that even though users may write
+;;  (DEFMACRO FOO (X) (DECLARE (OPTIMIZE (SAFETY 1))) ...)
+;; The expansion of that, and DEFINE-COMPILER-MACRO and MACROLET as well,
+;; inserts the macro policy immediately within the containing lambda,
+;; but the user's declarations are inside of a nested LET inside the lambda.
+(defun macro-policy-decls (wrap-p)
+  (if *macro-policy*
+      (let ((expr `(optimize ,@(mapcar (lambda (x) (list (car x) (cdr x)))
+                                       *macro-policy*))))
+        (if wrap-p
+            `((declare ,expr))
+            expr))))

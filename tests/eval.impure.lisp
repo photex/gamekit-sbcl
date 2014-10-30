@@ -162,11 +162,11 @@
 
 ;;; Bug 264: SYMBOL-MACROLET did not check for a bound SPECIAL
 ;;; declaration
-(assert (raises-error? (progv '(foo) '(1)
-                         (eval '(symbol-macrolet ((foo 3))
-                                 (declare (special foo))
-                                 foo)))
-                       error))
+(assert-error (progv '(foo) '(1)
+                (eval '(symbol-macrolet ((foo 3))
+                        (declare (special foo))
+                        foo)))
+              error)
 
 ;;; MAKE-PACKAGE (and other &key functions) should signal an error
 ;;; when given a NIL key.  This is kind of a compiler test really, but
@@ -224,7 +224,7 @@
 ;;; an error rather than silently return NIL.
 (defvar *scratch*)
 (with-test (:name :toplevel-declare)
-  (assert (raises-error? (eval '(declare (type pathname *scratch*))))))
+  (assert-error (eval '(declare (type pathname *scratch*)))))
 
 (with-test (:name (eval :no-compiler-notes))
   (handler-bind ((sb-ext:compiler-note #'error))
@@ -294,4 +294,17 @@
                  (function-lambda-expression
                   (eval `(lambda (x y z) (+ x 1 y z)))))))
 
+(with-test (:name (:bug-573747 eval :compile))
+  (let ((*out* (make-string-output-stream))
+        (sb-ext:*evaluator-mode* :compile))
+    (declare (special *out*))
+    (assert-error (eval '(declare (print "foo" *out*))))
+    (assert (string= (get-output-stream-string *out*) ""))))
+
+(with-test (:name (:bug-573747 eval :interpret))
+  (let ((*out* (make-string-output-stream))
+        (sb-ext:*evaluator-mode* :interpret))
+    (declare (special *out*))
+    (assert-error (eval '(declare (print "foo" *out*))))
+    (assert (string= (get-output-stream-string *out*) ""))))
 ;;; success

@@ -19,18 +19,18 @@
 (defun current-dynamic-space-start () sb!vm:dynamic-space-start)
 #!-gencgc
 (defun current-dynamic-space-start ()
-  (sb!alien:extern-alien "current_dynamic_space" sb!alien:unsigned-long))
+  (extern-alien "current_dynamic_space" unsigned-long))
 
 #!-sb-fluid
 (declaim (inline dynamic-usage))
 #!+gencgc
 (defun dynamic-usage ()
-  (sb!alien:extern-alien "bytes_allocated" os-vm-size-t))
+  (extern-alien "bytes_allocated" os-vm-size-t))
 #!-gencgc
 (defun dynamic-usage ()
-  (the (unsigned-byte 32)
-       (- (sb!sys:sap-int (sb!c::dynamic-space-free-pointer))
-          (current-dynamic-space-start))))
+  (truly-the word
+             (- (sap-int (sb!c::dynamic-space-free-pointer))
+                (current-dynamic-space-start))))
 
 (defun static-space-usage ()
   (- (ash sb!vm:*static-space-free-pointer* sb!vm:n-fixnum-tag-bits)
@@ -42,15 +42,15 @@
 
 (defun control-stack-usage ()
   #!-stack-grows-downward-not-upward
-  (- (sb!sys:sap-int (sb!c::control-stack-pointer-sap))
-     (sb!sys:sap-int (sb!di::descriptor-sap sb!vm:*control-stack-start*)))
+  (- (sap-int (sb!c::control-stack-pointer-sap))
+     (sap-int (sb!di::descriptor-sap sb!vm:*control-stack-start*)))
   #!+stack-grows-downward-not-upward
-  (- (sb!sys:sap-int (sb!di::descriptor-sap sb!vm:*control-stack-end*))
-     (sb!sys:sap-int (sb!c::control-stack-pointer-sap))))
+  (- (sap-int (sb!di::descriptor-sap sb!vm:*control-stack-end*))
+     (sap-int (sb!c::control-stack-pointer-sap))))
 
 (defun binding-stack-usage ()
-  (- (sb!sys:sap-int (sb!c::binding-stack-pointer-sap))
-     (sb!sys:sap-int (sb!di::descriptor-sap sb!vm:*binding-stack-start*))))
+  (- (sap-int (sb!c::binding-stack-pointer-sap))
+     (sap-int (sb!di::descriptor-sap sb!vm:*binding-stack-start*))))
 
 ;;;; ROOM
 
@@ -133,7 +133,8 @@ and submit it as a patch."
 
 ;;;; GC hooks
 
-(defvar *after-gc-hooks* nil
+(!defvar *after-gc-hooks* nil
+  #!+sb-doc
   "Called after each garbage collection, except for garbage collections
 triggered during thread exits. In a multithreaded environment these hooks may
 run in any thread.")
@@ -141,13 +142,13 @@ run in any thread.")
 
 ;;;; internal GC
 
-(sb!alien:define-alien-routine collect-garbage sb!alien:int
-  (#!+gencgc last-gen #!-gencgc ignore sb!alien:int))
+(define-alien-routine collect-garbage int
+  (#!+gencgc last-gen #!-gencgc ignore int))
 
 #!+sb-thread
 (progn
-  (sb!alien:define-alien-routine gc-stop-the-world sb!alien:void)
-  (sb!alien:define-alien-routine gc-start-the-world sb!alien:void))
+  (define-alien-routine gc-stop-the-world void)
+  (define-alien-routine gc-start-the-world void))
 #!-sb-thread
 (progn
   (defun gc-stop-the-world ())
@@ -155,16 +156,16 @@ run in any thread.")
 
 #!+gencgc
 (progn
-  (sb!alien:define-alien-variable ("gc_logfile" %gc-logfile) (* char))
+  (define-alien-variable ("gc_logfile" %gc-logfile) (* char))
   (defun (setf gc-logfile) (pathname)
     (let ((new (when pathname
-                 (sb!alien:make-alien-string
+                 (make-alien-string
                   (native-namestring (translate-logical-pathname pathname)
                                      :as-file t))))
           (old %gc-logfile))
       (setf %gc-logfile new)
       (when old
-        (sb!alien:free-alien old))
+        (free-alien old))
       pathname))
   (defun gc-logfile ()
     #!+sb-doc
@@ -177,8 +178,9 @@ statistics are appended to it."
         (native-pathname val))))
   (declaim (inline dynamic-space-size))
   (defun dynamic-space-size ()
+    #!+sb-doc
     "Size of the dynamic space in bytes."
-    (sb!alien:extern-alien "dynamic_space_size" os-vm-size-t)))
+    (extern-alien "dynamic_space_size" os-vm-size-t)))
 
 ;;;; SUB-GC
 
@@ -213,72 +215,99 @@ statistics are appended to it."
 ;;; comparisons. Unlikely, but the cost of using a cons instead is too
 ;;; small to measure. -- JES, 2007-09-30
 (declaim (type cons *gc-epoch*))
-(defvar *gc-epoch* (cons nil nil))
+(!defvar *gc-epoch* '(nil . nil))
 
 (defun sub-gc (&key (gen 0))
   (cond (*gc-inhibit*
          (setf *gc-pending* t)
          nil)
         (t
-         (without-interrupts
-           (setf *gc-pending* :in-progress)
-           ;; Tricks to to prevent triggerring a recursive gc. This is
-           ;; like a WITHOUT-GCING inside the lock except that we
-           ;; cannot call MAYBE-HANDLE-PENDING-GC at the end, because
-           ;; that would lead to a recursive attempt on the lock. In
-           ;; case you are wondering, wrapping the lock in a
-           ;; WITHOUT-GCING would also deadlock. The
-           ;; *IN-WITHOUT-GCING* part is used to tell the runtime that
-           ;; it's ok to have a pending gc even though *GC-INHIBIT* is
-           ;; NIL.
-           ;;
-           ;; Now, if GET-MUTEX did not cons, that would be enough.
-           ;; Because it does, we need the :IN-PROGRESS bit above to
-           ;; tell the runtime not to trigger gcs.
-           (sb!thread::without-thread-waiting-for (:already-without-interrupts t)
-             (let* ((sb!impl::*in-without-gcing* t)
-                    (sb!impl::*deadline* nil)
-                    (sb!impl::*deadline-seconds* nil))
-               (sb!thread:with-mutex (*already-in-gc*)
-                 (let ((*gc-inhibit* t))
-                   (let ((old-usage (dynamic-usage))
-                         (new-usage 0))
-                     (unsafe-clear-roots gen)
-                     (gc-stop-the-world)
-                     (let ((start-time (get-internal-run-time)))
-                       (collect-garbage gen)
-                       (setf *gc-epoch* (cons nil nil))
-                       (let ((run-time (- (get-internal-run-time) start-time)))
-                         ;; KLUDGE: Sometimes we see the second getrusage() call
-                         ;; return a smaller value than the first, which can
-                         ;; lead to *GC-RUN-TIME* to going negative, which in
-                         ;; turn is a type-error.
-                         (when (plusp run-time)
-                           (incf *gc-run-time* run-time))))
-                     #!+sb-safepoint
-                     (setf *stop-for-gc-pending* nil)
-                     (setf *gc-pending* nil
-                           new-usage (dynamic-usage))
-                     #!+sb-thread
-                     (assert (not *stop-for-gc-pending*))
-                     (gc-start-the-world)
-                     ;; In a multithreaded environment the other threads
-                     ;; will see *n-b-f-o-p* change a little late, but
-                     ;; that's OK.
-                     (let ((freed (- old-usage new-usage)))
-                       ;; GENCGC occasionally reports negative here, but
-                       ;; the current belief is that it is part of the
-                       ;; normal order of things and not a bug.
-                       (when (plusp freed)
-                         (incf *n-bytes-freed-or-purified* freed))))))))
-           ;; While holding the mutex we were protected from
-           ;; SIG_STOP_FOR_GC and recursive GCs. Now, in order to
-           ;; preserve the invariant (*GC-PENDING* ->
-           ;; pseudo-atomic-interrupted or *GC-INHIBIT*), let's check
-           ;; explicitly for a pending gc before interrupts are
-           ;; enabled again.
-           (maybe-handle-pending-gc))
-         t)))
+         (flet ((perform-gc ()
+                  ;; Called from WITHOUT-GCING and WITHOUT-INTERRUPTS
+                  ;; after the world has been stopped, but it's an
+                  ;; awkwardly long piece of code to nest so deeply.
+                  (let ((old-usage (dynamic-usage))
+                        (new-usage 0)
+                        (start-time (get-internal-run-time)))
+                    (collect-garbage gen)
+                    (setf *gc-epoch* (cons nil nil))
+                    (let ((run-time (- (get-internal-run-time) start-time)))
+                      ;; KLUDGE: Sometimes we see the second getrusage() call
+                      ;; return a smaller value than the first, which can
+                      ;; lead to *GC-RUN-TIME* to going negative, which in
+                      ;; turn is a type-error.
+                      (when (plusp run-time)
+                        (incf *gc-run-time* run-time)))
+                    #!+sb-safepoint
+                    (setf *stop-for-gc-pending* nil)
+                    (setf *gc-pending* nil
+                          new-usage (dynamic-usage))
+                    #!+sb-thread
+                    (assert (not *stop-for-gc-pending*))
+                    (gc-start-the-world)
+                    ;; In a multithreaded environment the other threads
+                    ;; will see *n-b-f-o-p* change a little late, but
+                    ;; that's OK.
+                    ;; N.B. the outer without-gcing prevents this
+                    ;; function from being entered, so no need for
+                    ;; locking.
+                    (let ((freed (- old-usage new-usage)))
+                      ;; GENCGC occasionally reports negative here, but
+                      ;; the current belief is that it is part of the
+                      ;; normal order of things and not a bug.
+                      (when (plusp freed)
+                        (incf *n-bytes-freed-or-purified* freed))))))
+           (declare (inline perform-gc))
+           ;; Let's make sure we're not interrupted and that none of
+           ;; the deadline or deadlock detection stuff triggers.
+           (without-interrupts
+             (sb!thread::without-thread-waiting-for
+                 (:already-without-interrupts t)
+               (let ((sb!impl::*deadline* nil)
+                     (sb!impl::*deadline-seconds* nil)
+                     (epoch *gc-epoch*))
+                 (loop
+                  ;; GCing must be done without-gcing to avoid
+                  ;; recursive GC... but we can't block on
+                  ;; *already-in-gc* inside without-gcing: that would
+                  ;; cause a deadlock.
+                  (without-gcing
+                    ;; Try to grab that mutex.  On acquisition, stop
+                    ;; the world from with the mutex held, and then
+                    ;; execute the remainder of the GC: stopping the
+                    ;; world with interrupts disabled is the mother of
+                    ;; all critical sections.
+                    (cond ((sb!thread:with-mutex (*already-in-gc* :wait-p nil)
+                             (unsafe-clear-roots gen)
+                             (gc-stop-the-world)
+                             t)
+                           ;; Success! GC.
+                           (perform-gc)
+                           ;; Return, but leave *gc-pending* as is: we
+                           ;; did allocate a tiny bit after GCing.  In
+                           ;; theory, this could lead to a long chain
+                           ;; of tail-recursive (but not in explicit
+                           ;; tail position) GCs, but that doesn't
+                           ;; seem likely to happen too often... And
+                           ;; the old code already suffered from this
+                           ;; problem.
+                           (return t))
+                          (t
+                           ;; Some other thread is trying to GC. Clear
+                           ;; *gc-pending* (we already know we want a
+                           ;; GC to happen) and either let
+                           ;; without-gcing figure out that the world
+                           ;; is stopping, or try again.
+                           (setf *gc-pending* nil))))
+                  ;; we just wanted a minor GC, and a GC has
+                  ;; occurred. Leave, but don't execute after-gc
+                  ;; hooks.
+                  ;;
+                  ;; Return a 0 for easy ternary logic in the C
+                  ;; runtime.
+                  (when (and (eql gen 0)
+                             (neq epoch *gc-pending*))
+                    (return 0))))))))))
 
 (defun post-gc ()
   ;; Outside the mutex, interrupts may be enabled: these may cause
@@ -317,7 +346,7 @@ is true, all generations are collected. If GEN is provided, it can be
 used to specify the oldest generation guaranteed to be collected.
 
 On CheneyGC platforms arguments FULL and GEN take no effect: a full
-collection is always preformed."
+collection is always performed."
   #!+(and sb-doc (not gencgc))
   "Initiate a garbage collection.
 
@@ -329,10 +358,12 @@ which may in turn trigger a collection of one or more older
 generations as well. If FULL is true, all generations are collected.
 If GEN is provided, it can be used to specify the oldest generation
 guaranteed to be collected."
-  (when (sub-gc :gen (if full sb!vm:+pseudo-static-generation+ gen))
-    (post-gc)))
+  #!-gencgc (declare (ignore full))
+  (let (#!+gencgc (gen (if full sb!vm:+pseudo-static-generation+ gen)))
+    (when (eq t (sub-gc :gen gen))
+      (post-gc))))
 
-(define-alien-routine scrub-control-stack sb!alien:void)
+(define-alien-routine scrub-control-stack void)
 
 (defun unsafe-clear-roots (gen)
   #!-gencgc (declare (ignore gen))
@@ -364,11 +395,11 @@ On GENCGC platforms this is the nursery size, and defaults to 5% of dynamic
 space size.
 
 Note: currently changes to this value are lost when saving core."
-  (sb!alien:extern-alien "bytes_consed_between_gcs" os-vm-size-t))
+  (extern-alien "bytes_consed_between_gcs" os-vm-size-t))
 
 (defun (setf bytes-consed-between-gcs) (val)
   (declare (type index val))
-  (setf (sb!alien:extern-alien "bytes_consed_between_gcs" os-vm-size-t)
+  (setf (extern-alien "bytes_consed_between_gcs" os-vm-size-t)
         val))
 
 (declaim (inline maybe-handle-pending-gc))
@@ -469,6 +500,7 @@ promotion. Available on GENCGC platforms only.
 
 Experimental: interface subject to change."))
   (defun generation-average-age (generation)
+    #!+sb-doc
     "Average age of memory allocated to GENERATION: average number of times
 objects allocated to the generation have seen younger objects promoted to it.
 Available on GENCGC platforms only.

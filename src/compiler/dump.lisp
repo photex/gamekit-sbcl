@@ -121,7 +121,7 @@
 ;;; for either signed or unsigned integers. There's no range checking
 ;;; -- if you don't specify enough bytes for the number to fit, this
 ;;; function cheerfully outputs the low bytes.
-(defun dump-integer-as-n-bytes  (num bytes fasl-output)
+(defun dump-integer-as-n-bytes (num bytes fasl-output)
   (declare (integer num) (type index bytes))
   (declare (type fasl-output fasl-output))
   (do ((n num (ash n -8))
@@ -766,10 +766,21 @@
        #!-sb-unicode
        (bug "how did we get here?"))
       (simple-vector
-       (dump-simple-vector simple-version file)
+       ;; xc-host may upgrade anything to T, so pre-check that it
+       ;; wasn't actually supposed to be a specialized array,
+       ;; and in case a copy was made, tell DUMP-S-V the original type.
+       (cond #+sb-xc-host
+             ((neq (!specialized-array-element-type x) t)
+              (dump-specialized-vector (!specialized-array-element-type x)
+                                       simple-version file))
+             (t
+              (dump-simple-vector simple-version file)))
        (eq-save-object x file))
       (t
-       (dump-specialized-vector simple-version file)
+       ;; Host may have a different specialization, which is ok in itself,
+       ;; but again we might have have copied the vector, losing the type.
+       (dump-specialized-vector
+        #+sb-xc-host (!specialized-array-element-type x) simple-version file)
        (eq-save-object x file)))))
 
 ;;; Dump a SIMPLE-VECTOR, handling any circularities.
@@ -800,8 +811,17 @@
 ;;; we need to be target-endian.  dump-integer-as-n-bytes always writes
 ;;; little-endian (which is correct for all other integers) so for a bigendian
 ;;; target we need to swap octets -- CSR, after DB
+;;; We sanity-check that VECTOR was registered as a specializd array.
+;;; Slight problem: if the host upgraded an array to T and we wanted it
+;;; more specialized, this would be undetected because the check is that
+;;; _if_ the array is specialized, _then_ it must have been registered.
+;;; The reverse is always true. But we wouldn't get here at all for (array T).
+;;; As a practical matter, silent failure is unlikely because
+;;; when building SBCL in SBCL, the needed specializations exist,
+;;; so the sanity-check will be triggered, and we can fix the source.
 #+sb-xc-host
-(defun dump-specialized-vector (vector file &key data-only)
+(defun dump-specialized-vector (element-type vector file
+                                &key data-only) ; basically unused now
   (labels ((octet-swap (word bits)
              "BITS must be a multiple of 8"
              (do ((input word (ash input -8))
@@ -817,28 +837,55 @@
                (dump-integer-as-n-bytes
                 (ecase sb!c:*backend-byte-order*
                   (:little-endian i)
-                  (:big-endian (octet-swap i bits)))
+                  (:big-endian (octet-swap i bits))) ; signed or unsigned OK
                 bytes file))))
-    (etypecase vector
-      ((simple-array (unsigned-byte 8) (*))
-       (dump-unsigned-vector sb!vm:simple-array-unsigned-byte-8-widetag 1 8))
-      ((simple-array (unsigned-byte 16) (*))
-       (dump-unsigned-vector sb!vm:simple-array-unsigned-byte-16-widetag 2 16))
-      ((simple-array (unsigned-byte 32) (*))
-       (dump-unsigned-vector sb!vm:simple-array-unsigned-byte-32-widetag 4 32)))))
+    (cond
+        ((listp element-type)
+         (destructuring-bind (type-id bits) element-type
+           (dump-unsigned-vector
+            (ecase type-id
+              (signed-byte
+               (ecase bits
+                 (8  sb!vm:simple-array-signed-byte-8-widetag)
+                 (16 sb!vm:simple-array-signed-byte-16-widetag)
+                 (32 sb!vm:simple-array-signed-byte-32-widetag)))
+              (unsigned-byte
+               (ecase bits
+                 (8  sb!vm:simple-array-unsigned-byte-8-widetag)
+                 (16 sb!vm:simple-array-unsigned-byte-16-widetag)
+                 (32 sb!vm:simple-array-unsigned-byte-32-widetag))))
+            (/ bits sb!vm:n-byte-bits)
+            bits)))
+        ((typep vector '(simple-bit-vector 0))
+         ;; NIL bits+bytes are ok- DUMP-INTEGER-AS-N-BYTES is unreachable.
+         ;; Otherwise we'd need to fill up octets using an ash/logior loop.
+         (dump-unsigned-vector sb!vm:simple-bit-vector-widetag nil nil))
+        ((and (typep vector '(vector * 0)) data-only)
+         nil) ; empty vector and data-only => nothing to do
+        ((typep vector '(vector (unsigned-byte 8)))
+         ;; FIXME: eliminate this case, falling through to ERROR.
+         (compiler-style-warn
+          "Unportably dumping (ARRAY (UNSIGNED-BYTE 8)) ~S" vector)
+         (dump-unsigned-vector sb!vm:simple-array-unsigned-byte-8-widetag 1 8))
+        (t
+         (error "Won't dump specialized array ~S" vector)))))
 
 #-sb-xc-host
 (defun dump-specialized-vector (vector file &key data-only)
-  (declare (type (simple-array * (*)) vector))
+  ;; The DATA-ONLY option was for the now-obsolete trace-table,
+  ;; but it seems like a good option to keep around.
+  (declare (type (simple-unboxed-array (*)) vector))
   (let* ((length (length vector))
-         (widetag (widetag-of vector))
+         (widetag (%other-pointer-widetag vector))
          (bits-per-length (aref **saetp-bits-per-length** widetag)))
     (aver (< bits-per-length 255))
     (unless data-only
       (dump-fop 'fop-spec-vector file)
       (dump-word length file)
       (dump-byte widetag file))
-    (dump-raw-bytes vector (ceiling (* length bits-per-length) sb!vm:n-byte-bits) file)))
+    (dump-raw-bytes vector
+                    (ceiling (* length bits-per-length) sb!vm:n-byte-bits)
+                    file)))
 
 ;;; Dump characters and string-ish things.
 
@@ -983,7 +1030,11 @@
              (dump-byte (char-code (schar name i)) fasl-output))))
         (:code-object
          (aver (null name))
-         (dump-fop 'fop-code-object-fixup fasl-output)))
+         (dump-fop 'fop-code-object-fixup fasl-output))
+        (:symbol-tls-index
+         (aver (symbolp name))
+         (dump-non-immediate-object name fasl-output)
+         (dump-fop 'fop-symbol-tls-fixup fasl-output)))
       ;; No matter what the flavor, we'll always dump the position
       (dump-word position fasl-output)))
   (values))
@@ -1003,34 +1054,17 @@
 (defun dump-code-object (component
                          code-segment
                          code-length
-                         trace-table-as-list
                          fixups
                          fasl-output)
 
   (declare (type component component)
-           (list trace-table-as-list)
            (type index code-length)
            (type fasl-output fasl-output))
 
   (let* ((2comp (component-info component))
-         (constants (sb!c::ir2-component-constants 2comp))
-         (header-length (length constants))
-         (packed-trace-table (pack-trace-table trace-table-as-list))
-         (total-length (+ code-length
-                          (* (length packed-trace-table)
-                             sb!c::tt-bytes-per-entry))))
-
+         (constants (sb!c:ir2-component-constants 2comp))
+         (header-length (length constants)))
     (collect ((patches))
-
-      ;; Dump the offset of the trace table.
-      (dump-object code-length fasl-output)
-      ;; FIXME: As long as we don't have GENGC, the trace table is
-      ;; hardwired to be empty. And SBCL doesn't have GENGC (and as
-      ;; far as I know no modern CMU CL does either -- WHN
-      ;; 2001-10-05). So might we be able to get rid of trace tables?
-      ;;
-      ;; Note that gencgc also does something with the trace table.
-
       ;; Dump the constants, noting any :ENTRY constants that have to
       ;; be patched.
       (loop for i from sb!vm:code-constants-offset below header-length do
@@ -1071,26 +1105,24 @@
           (dump-push info-handle fasl-output)
           (push info-handle (fasl-output-debug-info fasl-output))))
 
-      (let ((num-consts (- header-length sb!vm:code-trace-table-offset-slot)))
-        (cond ((and (< num-consts #x100) (< total-length #x10000))
+      (let ((num-consts (- header-length sb!vm:code-constants-offset)))
+        (cond ((and (< num-consts #x100) (< code-length #x10000))
                (dump-fop 'fop-small-code fasl-output)
                (dump-byte num-consts fasl-output)
-               (dump-integer-as-n-bytes total-length (/ sb!vm:n-word-bytes 2) fasl-output))
+               (dump-integer-as-n-bytes code-length (/ sb!vm:n-word-bytes 2) fasl-output))
               (t
                (dump-fop 'fop-code fasl-output)
                (dump-word num-consts fasl-output)
-               (dump-word total-length fasl-output))))
+               (dump-word code-length fasl-output))))
 
-      ;; These two dumps are only ones which contribute to our
-      ;; TOTAL-LENGTH value.
       (dump-segment code-segment code-length fasl-output)
-      (dump-specialized-vector packed-trace-table fasl-output :data-only t)
 
       ;; DUMP-FIXUPS does its own internal DUMP-FOPs: the bytes it
-      ;; dumps aren't included in the TOTAL-LENGTH passed to our
+      ;; dumps aren't included in the LENGTH passed to our
       ;; FOP-CODE/FOP-SMALL-CODE fop.
       (dump-fixups fixups fasl-output)
 
+      #!-(or x86 x86-64)
       (dump-fop 'fop-sanctify-for-execution fasl-output)
 
       (let ((handle (dump-pop fasl-output)))
@@ -1109,6 +1141,7 @@
     (dump-fop 'fop-assembler-routine file)
     (dump-word (label-position (cdr routine)) file))
   (dump-fixups fixups file)
+  #!-(or x86 x86-64)
   (dump-fop 'fop-sanctify-for-execution file)
   (dump-pop file))
 
@@ -1143,10 +1176,9 @@
 (defun fasl-dump-component (component
                             code-segment
                             code-length
-                            trace-table
                             fixups
                             file)
-  (declare (type component component) (list trace-table))
+  (declare (type component component))
   (declare (type fasl-output file))
 
   (dump-fop 'fop-verify-table-size file)
@@ -1160,7 +1192,6 @@
   (let ((code-handle (dump-code-object component
                                        code-segment
                                        code-length
-                                       trace-table
                                        fixups
                                        file))
         (2comp (component-info component)))
@@ -1233,11 +1264,17 @@
 
 ;;;; dumping structures
 
+;; Having done nothing more than load all files in obj/from-host, the
+;; cross-compiler running under any host Lisp begins life able to access
+;; SBCL-format metadata for any structure that is a subtype of STRUCTURE!OBJECT.
+;; But if it learns a layout by cross-compiling a DEFSTRUCT, that's ok too.
 (defun dump-structure (struct file)
-  (when *dump-only-valid-structures*
-    (unless (gethash struct (fasl-output-valid-structures file))
-      (error "attempt to dump invalid structure:~%  ~S~%How did this happen?"
-             struct)))
+  (when (and *dump-only-valid-structures*
+             (not (gethash struct (fasl-output-valid-structures file)))
+             #+sb-xc-host
+             (not (sb!kernel::xc-dumpable-structure-instance-p struct)))
+    (error "attempt to dump invalid structure:~%  ~S~%How did this happen?"
+           struct))
   (note-potential-circularity struct file)
   (aver (%instance-ref struct 0))
   (do* ((length (%instance-length struct))

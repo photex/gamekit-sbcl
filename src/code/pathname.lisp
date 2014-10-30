@@ -26,6 +26,7 @@
   (unparse-file (missing-arg) :type function)
   (unparse-enough (missing-arg) :type function)
   (unparse-directory-separator (missing-arg) :type simple-string)
+  (simplify-namestring (missing-arg) :type function)
   (customary-case (missing-arg) :type (member :upper :lower)))
 
 (def!method print-object ((host host) stream)
@@ -51,6 +52,7 @@
                        (unparse-file #'unparse-logical-file)
                        (unparse-enough #'unparse-enough-namestring)
                        (unparse-directory-separator ";")
+                       (simplify-namestring #'identity)
                        (customary-case :upper)))
   (name "" :type simple-string)
   (translations nil :type list)
@@ -131,11 +133,11 @@
 ;;; \ and / as directory separators on Windows, we print our
 ;;; own always with /, which is much less confusing what with
 ;;; being \ needing to be escaped.
-(defun unparse-physical-directory (pathname)
+(defun unparse-physical-directory (pathname escape-char)
   (declare (pathname pathname))
-  (unparse-physical-directory-list (%pathname-directory pathname)))
+  (unparse-physical-directory-list (%pathname-directory pathname) escape-char))
 
-(defun unparse-physical-directory-list (directory)
+(defun unparse-physical-directory-list (directory escape-char)
   (declare (list directory))
   (collect ((pieces))
     (when directory
@@ -164,7 +166,7 @@
          ((member :wild-inferiors)
           (pieces "**/"))
          ((or simple-string pattern (member :wild))
-          (pieces (unparse-physical-piece dir))
+          (pieces (unparse-physical-piece dir escape-char))
           (pieces "/"))
          (t
           (error "invalid directory component: ~S" dir)))))

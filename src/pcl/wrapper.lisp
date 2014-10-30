@@ -31,6 +31,11 @@
 (defmacro wrapper-no-of-instance-slots (wrapper)
   `(layout-length ,wrapper))
 
+(declaim (inline make-wrapper-internal))
+(defun make-wrapper-internal (&key length classoid)
+  (make-layout :length length :classoid classoid :invalid nil
+               :%for-std-class-b 1))
+
 ;;; This is called in BRAID when we are making wrappers for classes
 ;;; whose slots are not initialized yet, and which may be built-in
 ;;; classes. We pass in the class name in addition to the class.
@@ -158,7 +163,7 @@
 ;;; (or the names of our callees.)
 (defun check-wrapper-validity (instance)
   (with-world-lock ()
-    (let* ((owrapper (wrapper-of instance))
+    (let* ((owrapper (layout-of instance))
            (state (layout-invalid owrapper)))
       (aver (not (eq state :uninitialized)))
       (cond ((not state)
@@ -186,7 +191,7 @@
                ;; Error message here is trying to figure out a bit more about the
                ;; situation, since we don't have anything approaching a test-case
                ;; for the bug.
-               (let ((new-state (layout-invalid (wrapper-of instance))))
+               (let ((new-state (layout-invalid (layout-of instance))))
                  (unless (neq t new-state)
                    (cerror "Nevermind and recurse." 'bug
                            :format-control "~@<~4IProblem forcing cache flushes. Please report ~
@@ -197,7 +202,7 @@
                            :format-arguments (mapcar (lambda (x)
                                                        (cons x (layout-invalid x)))
                                                      (list owrapper
-                                                           (wrapper-of instance)
+                                                           (layout-of instance)
                                                            (class-wrapper class)))))))
              (check-wrapper-validity instance))
             ((consp state)
@@ -221,7 +226,7 @@
     (check-wrapper-validity instance)))
 
 (defun valid-wrapper-of (instance)
-  (let ((wrapper (wrapper-of instance)))
+  (let ((wrapper (layout-of instance)))
     (if (invalid-wrapper-p wrapper)
         (check-wrapper-validity instance)
         wrapper)))
@@ -258,13 +263,13 @@
         (fsc       *the-class-funcallable-standard-class*)
         (condition *the-class-condition-class*)
         (structure *the-class-structure-class*)
-        (built-in  *the-class-built-in-class*)
+        (system    *the-class-system-class*)
         (frc       *the-class-forward-referenced-class*))
     (flet ((specializer->metatype (x)
              (let* ((specializer-class (if (eq **boot-state** 'complete)
                                            (specializer-class-or-nil x)
                                            x))
-                   (meta-specializer (class-of specializer-class)))
+                    (meta-specializer (class-of specializer-class)))
                (cond
                  ((eq x *the-class-t*) t)
                  ((not specializer-class) 'non-standard)
@@ -272,7 +277,7 @@
                  ((*subtypep meta-specializer fsc) 'standard-instance)
                  ((*subtypep meta-specializer condition) 'condition-instance)
                  ((*subtypep meta-specializer structure) 'structure-instance)
-                 ((*subtypep meta-specializer built-in) 'built-in-instance)
+                 ((*subtypep meta-specializer system) 'system-instance)
                  ((*subtypep meta-specializer slot) 'slot-instance)
                  ((*subtypep meta-specializer frc) 'forward)
                  (t (error "~@<PCL cannot handle the specializer ~S ~
@@ -311,7 +316,7 @@
                   `((class *the-class-t*)
                     (type t))))
          (unless (eq mt t)
-           (setq wrapper (wrapper-of arg))
+           (setq wrapper (layout-of arg))
            (when (invalid-wrapper-p wrapper)
              (setq ,invalid-wrapper-p t)
              (setq wrapper (check-wrapper-validity arg)))

@@ -96,6 +96,7 @@
                   *the-class-funcallable-standard-object*
                   *the-class-class*
                   *the-class-generic-function*
+                  *the-class-system-class*
                   *the-class-built-in-class*
                   *the-class-slot-class*
                   *the-class-condition-class*
@@ -113,7 +114,9 @@
                   *the-class-global-writer-method*
                   *the-class-global-boundp-method*
                   *the-class-standard-generic-function*
+                  *the-class-standard-direct-slot-definition*
                   *the-class-standard-effective-slot-definition*
+                  *the-class-standard-specializer*
 
                   *the-eslotd-standard-class-slots*
                   *the-eslotd-funcallable-standard-class-slots*))

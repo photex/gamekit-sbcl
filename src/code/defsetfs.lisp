@@ -53,8 +53,11 @@
 ;;; from early-setf.lisp
 (in-package "SB!IMPL")
 
-;;; KLUDGE: Various of these (e.g. AREF and BIT) have DEFUN (SETF FOO) versions
-;;; too. Do we really need both? -- WHN 19990921
+;;; (setf aref/bit/sbit) are implemented using setf-functions,
+;;; because they have to work with (setf (apply #'aref array subscripts))
+;;; All other setfs can be done using setf-functions too, but I
+;;; haven't found technical advantages or disatvantages for either
+;;; scheme.
 #-sb-xc-host (defsetf car %rplaca)
 #-sb-xc-host (defsetf cdr %rplacd)
 #-sb-xc-host (defsetf caar (x) (v) `(%rplaca (car ,x) ,v))
@@ -97,15 +100,12 @@
 #-sb-xc-host (defsetf tenth (x) (v) `(%rplaca (cdr (cddddr (cddddr ,x))) ,v))
 #-sb-xc-host (defsetf rest %rplacd)
 #-sb-xc-host (defsetf elt %setelt)
-#-sb-xc-host (defsetf aref %aset)
 #-sb-xc-host (defsetf row-major-aref %set-row-major-aref)
 #-sb-xc-host (defsetf svref %svset)
 #-sb-xc-host (defsetf char %charset)
-#-sb-xc-host (defsetf bit %bitset)
 #-sb-xc-host (defsetf schar %scharset)
-#-sb-xc-host (defsetf sbit %sbitset)
 (defsetf %array-dimension %set-array-dimension)
-(defsetf sb!kernel:%vector-raw-bits sb!kernel:%set-vector-raw-bits)
+(defsetf %vector-raw-bits %set-vector-raw-bits)
 #-sb-xc-host (defsetf symbol-value set)
 #-sb-xc-host (defsetf symbol-global-value set-symbol-global-value)
 #-sb-xc-host (defsetf symbol-plist %set-symbol-plist)
@@ -138,15 +138,10 @@
 (in-package "SB!KERNEL")
 (defsetf code-header-ref code-header-set)
 
-;;; from serve-event.lisp
-(in-package "SB!IMPL")
-(defsetf object-set-operation %set-object-set-operation
-  #!+sb-doc
-  "Set the handler function for an object set operation.")
-
 ;;; from x86-vm.lisp
 (in-package "SB!VM")
 (defsetf context-register %set-context-register)
 (defsetf context-float-register %set-context-float-register)
+
 
 (sb!int:/show0 "leaving defsetfs.lisp")

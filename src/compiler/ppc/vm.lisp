@@ -118,8 +118,6 @@
       ((null classes)
        (nreverse forms))))
 
-(def!constant kludge-nondeterministic-catch-block-size 6)
-
 (define-storage-classes
 
   ;; Non-immediate contstants in the constant pool
@@ -243,8 +241,7 @@
    :alternate-scs (complex-double-stack))
 
   ;; A catch or unwind block.
-  (catch-block control-stack
-               :element-size kludge-nondeterministic-catch-block-size))
+  (catch-block control-stack :element-size catch-block-size))
 
 ;;;; Make some random tns for important registers.
 
@@ -303,9 +300,9 @@
 ;;;; function call parameters
 
 ;;; the SC numbers for register and stack arguments/return values
-(def!constant register-arg-scn (meta-sc-number-or-lose 'descriptor-reg))
-(def!constant immediate-arg-scn (meta-sc-number-or-lose 'any-reg))
-(def!constant control-stack-arg-scn (meta-sc-number-or-lose 'control-stack))
+(def!constant register-arg-scn (sc-number-or-lose 'descriptor-reg))
+(def!constant immediate-arg-scn (sc-number-or-lose 'any-reg))
+(def!constant control-stack-arg-scn (sc-number-or-lose 'control-stack))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
 
@@ -380,7 +377,7 @@
                                (%logbitp integer index))))
          (t (values :default nil))))
       ;; FIXME: can handle MIN and MAX here
-      (sb!kernel:%ldb
+      (%ldb
        (flet ((validp (type width)
                 (and (valid-funtype `((constant-arg (integer 1 29))
                                       (constant-arg (mod ,width))

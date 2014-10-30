@@ -25,9 +25,8 @@
   "~S is unsupported as of SBCL 0.8.13. Please use LOAD-SHARED-OBJECT."
   (load-1-foreign))
 
-(progn
-  (define-alien-variable undefined-alien-address unsigned)
-  (defvar *runtime-dlhandle*))
+(define-alien-variable undefined-alien-address unsigned)
+(defvar *runtime-dlhandle*)
 
 (defvar *shared-objects*)
 
@@ -39,17 +38,17 @@
 container specified by designated PATHNAME, such as a .so on an ELF platform.
 
 Locating the shared object follows standard rules of the platform, consult the
-manual page for dlopen(3) for details. Typically paths speficied by
+manual page for dlopen(3) for details. Typically paths specified by
 environment variables such as LD_LIBRARY_PATH are searched if the PATHNAME has
 no directory, but on some systems (eg. Mac OS X) search may happen even if
 PATHNAME is absolute. (On Windows LoadLibrary is used instead of dlopen(3).)
 
-On non-Windows platoforms calling LOAD-SHARED-OBJECT again with an PATHNAME
+On non-Windows platforms calling LOAD-SHARED-OBJECT again with a PATHNAME
 EQUAL to the designated pathname of a previous call will replace the old
-definitions; if a symbol was previously referenced thru the object and is not
-present in the reloaded version an error will be signalled. Reloading may not
-work as expected if user or library-code has called dlopen(3) on the same
-shared object.
+definitions; if a symbol was previously referenced through the object and
+is not present in the reloaded version an error will be signalled. Reloading
+may not work as expected if user or library-code has called dlopen(3) on the
+same shared object.
 
 LOAD-SHARED-OBJECT interacts with SB-EXT:SAVE-LISP-AND-DIE:
 
@@ -155,6 +154,8 @@ Experimental."
 (defun reopen-shared-objects ()
   ;; Ensure that the runtime is open
   (setf *runtime-dlhandle* (dlopen-or-lose))
+  ;; Without this many symbols aren't accessible.
+  #!+android (load-shared-object "libc.so" :dont-save t)
   ;; Reopen stuff.
   (setf *shared-objects*
         (remove nil (mapcar #'try-reopen-shared-object *shared-objects*))))
@@ -174,6 +175,7 @@ Experimental."
 (let ((symbols (make-hash-table :test #'equal))
       (undefineds (make-hash-table :test #'equal)))
   (defun ensure-dynamic-foreign-symbol-address (symbol &optional datap)
+    #!+sb-doc
     "Returns the address of the foreign symbol as an integer. On linkage-table
 ports if the symbols isn't found a special guard address is returned instead,
 accesses to which will result in an UNDEFINED-ALIEN-ERROR. On other ports an
@@ -192,7 +194,7 @@ is never in the linkage-table."
               (remhash symbol symbols)
               (if datap
                   undefined-alien-address
-                  (foreign-symbol-address "undefined_alien_function")))
+                  (find-foreign-symbol-address "undefined_alien_function")))
              (addr
               (setf (gethash symbol symbols) t)
               (remhash symbol undefineds)

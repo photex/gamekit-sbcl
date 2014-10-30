@@ -264,6 +264,7 @@
 
 (declaim (type list *on-package-variance*))
 (defvar *on-package-variance* '(:warn t)
+  #!+sb-doc
   "Specifies behavior when redefining a package using DEFPACKAGE and the
 definition is in variance with the current state of the package.
 
@@ -298,9 +299,9 @@ specifies to signal a warning if SWANK package is in variance, and an error othe
                          :warn))))
         (ecase what
           (:error
-           (apply #'error 'sb!kernel::package-at-variance-error args))
+           (apply #'error 'package-at-variance-error args))
           (:warn
-           (apply #'warn 'sb!kernel::package-at-variance args)))))))
+           (apply #'warn 'package-at-variance args)))))))
 
 (defun update-package-with-variance (package name nicknames source-location
                                      shadows shadowing-imports
@@ -358,6 +359,7 @@ specifies to signal a warning if SWANK package is in variance, and an error othe
            (unexport no-longer-exported package))
          (keep-them ()
            :report "Keep exporting them.")))))
+  #!+sb-package-locks
   (let ((old-implements
           (set-difference (package-implements-list package)
                           (mapcar #'find-undeleted-package-or-lose implement))))

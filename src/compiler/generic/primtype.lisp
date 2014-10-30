@@ -40,7 +40,7 @@
 (!def-primitive-type unsigned-byte-64 (unsigned-reg descriptor-reg)
   :type (unsigned-byte 64))
 (!def-primitive-type fixnum (any-reg signed-reg)
-  :type (signed-byte #.(1+ sb!vm:n-positive-fixnum-bits)))
+  :type (signed-byte #.(1+ n-positive-fixnum-bits)))
 #!+#.(cl:if (cl:= sb!vm::n-machine-word-bits 32) '(and) '(or))
 (!def-primitive-type signed-byte-32 (signed-reg descriptor-reg)
   :type (signed-byte 32))
@@ -51,20 +51,17 @@
 (defvar *fixnum-primitive-type* (primitive-type-or-lose 'fixnum))
 
 (/show0 "primtype.lisp 53")
-(!def-primitive-type-alias tagged-num (:or positive-fixnum fixnum))
-(progn
-  (!def-primitive-type-alias unsigned-num #1=
-    #!+#.(cl:if (cl:= sb!vm::n-machine-word-bits 64) '(and) '(or))
-    (:or unsigned-byte-64 unsigned-byte-63 positive-fixnum)
-    #!-#.(cl:if (cl:= sb!vm::n-machine-word-bits 64) '(and) '(or))
-    (:or unsigned-byte-32 unsigned-byte-31 positive-fixnum))
-  (!def-primitive-type-alias signed-num #2=
-    #!+#.(cl:if (cl:= sb!vm::n-machine-word-bits 64) '(and) '(or))
-    (:or signed-byte-64 fixnum unsigned-byte-63 positive-fixnum)
-    #!-#.(cl:if (cl:= sb!vm::n-machine-word-bits 64) '(and) '(or))
-    (:or signed-byte-32 fixnum unsigned-byte-31 positive-fixnum))
+(!def-primitive-type-alias tagged-num '(:or positive-fixnum fixnum))
+(multiple-value-bind (unsigned signed)
+    (case sb!vm::n-machine-word-bits
+      (64 (values '(unsigned-byte-64 unsigned-byte-63 positive-fixnum)
+                  '(signed-byte-64 fixnum unsigned-byte-63 positive-fixnum)))
+      (32 (values '(unsigned-byte-32 unsigned-byte-31 positive-fixnum)
+                  '(signed-byte-32 fixnum unsigned-byte-31 positive-fixnum))))
+  (!def-primitive-type-alias unsigned-num `(:or ,@unsigned))
+  (!def-primitive-type-alias signed-num `(:or ,@signed))
   (!def-primitive-type-alias untagged-num
-    (:or . #.(sort (copy-list (union (cdr '#1#) (cdr '#2#))) #'string<))))
+    `(:or ,@(sort (copy-list (union unsigned signed)) #'string<))))
 
 ;;; other primitive immediate types
 (/show0 "primtype.lisp 68")
@@ -104,7 +101,8 @@
     :type (simd-pack double-float))
   (!def-primitive-type simd-pack-int (int-sse-reg descriptor-reg)
    :type (simd-pack integer))
-  (!def-primitive-type-alias simd-pack (:or simd-pack-single simd-pack-double simd-pack-int)))
+  (!def-primitive-type-alias simd-pack
+   '(:or simd-pack-single simd-pack-double simd-pack-int)))
 
 ;;; primitive other-pointer array types
 (/show0 "primtype.lisp 96")
@@ -148,6 +146,7 @@
 ;;; In a bootstrapping situation, we should be careful to use the
 ;;; correct values for the system parameters.
 ;;;
+;;; Meta: the following comment is not true. Should remove the AUX fn.
 ;;; We need an aux function because we need to use both
 ;;; !DEF-VM-SUPPORT-ROUTINE and DEFUN-CACHED.
 (/show0 "primtype.lisp 188")
@@ -156,11 +155,9 @@
   (primitive-type-aux type))
 (/show0 "primtype.lisp 191")
 (defun-cached (primitive-type-aux
-               :hash-function (lambda (x)
-                                (logand (type-hash-value x) #x1FF))
+               :hash-function #'type-hash-value
                :hash-bits 9
-               :values 2
-               :default (values nil :empty))
+               :values 2)
               ((type eq))
   (declare (type ctype type))
   (macrolet ((any () '(values *backend-t-primitive-type* nil))
@@ -175,44 +172,44 @@
                  (positive-fixnum
                   (if (or (eq t2-name 'fixnum)
                           (eq t2-name
-                              (ecase sb!vm::n-machine-word-bits
+                              (ecase n-machine-word-bits
                                 (32 'signed-byte-32)
                                 (64 'signed-byte-64)))
                           (eq t2-name
-                              (ecase sb!vm::n-machine-word-bits
+                              (ecase n-machine-word-bits
                                 (32 'unsigned-byte-31)
                                 (64 'unsigned-byte-63)))
                           (eq t2-name
-                              (ecase sb!vm::n-machine-word-bits
+                              (ecase n-machine-word-bits
                                 (32 'unsigned-byte-32)
                                 (64 'unsigned-byte-64))))
                       t2))
                  (fixnum
                   (case t2-name
-                    (#.(ecase sb!vm::n-machine-word-bits
+                    (#.(ecase n-machine-word-bits
                          (32 'signed-byte-32)
                          (64 'signed-byte-64))
                        t2)
-                    (#.(ecase sb!vm::n-machine-word-bits
+                    (#.(ecase n-machine-word-bits
                          (32 'unsigned-byte-31)
                          (64 'unsigned-byte-63))
                        (primitive-type-or-lose
-                        (ecase sb!vm::n-machine-word-bits
+                        (ecase n-machine-word-bits
                           (32 'signed-byte-32)
                           (64 'signed-byte-64))))))
-                 (#.(ecase sb!vm::n-machine-word-bits
+                 (#.(ecase n-machine-word-bits
                       (32 'signed-byte-32)
                       (64 'signed-byte-64))
                   (if (eq t2-name
-                          (ecase sb!vm::n-machine-word-bits
+                          (ecase n-machine-word-bits
                             (32 'unsigned-byte-31)
                             (64 'unsigned-byte-63)))
                       t1))
-                 (#.(ecase sb!vm::n-machine-word-bits
+                 (#.(ecase n-machine-word-bits
                       (32 'unsigned-byte-31)
                       (64 'unsigned-byte-63))
                     (if (eq t2-name
-                            (ecase sb!vm::n-machine-word-bits
+                            (ecase n-machine-word-bits
                               (32 'unsigned-byte-32)
                               (64 'unsigned-byte-64)))
                         t2))))))
@@ -227,7 +224,7 @@
                  (cond ((and hi lo)
                         (dolist (spec
                                   `((positive-fixnum 0 ,sb!xc:most-positive-fixnum)
-                                    ,@(ecase sb!vm::n-machine-word-bits
+                                    ,@(ecase n-machine-word-bits
                                         (32
                                          `((unsigned-byte-31
                                             0 ,(1- (ash 1 31)))
@@ -240,7 +237,7 @@
                                             0 ,(1- (ash 1 64))))))
                                     (fixnum ,sb!xc:most-negative-fixnum
                                             ,sb!xc:most-positive-fixnum)
-                                    ,(ecase sb!vm::n-machine-word-bits
+                                    ,(ecase n-machine-word-bits
                                        (32
                                         `(signed-byte-32 ,(ash -1 31)
                                                          ,(1- (ash 1 31))))

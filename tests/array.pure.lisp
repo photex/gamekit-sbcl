@@ -120,12 +120,12 @@
 (multiple-value-bind (fun warn fail)
     (compile nil '(lambda () (aref (make-array 0) 0)))
   #+nil (assert fail) ; doesn't work, (maybe because ASSERTED-TYPE is NIL?)
-  (assert (raises-error? (funcall fun) type-error)))
+  (assert-error (funcall fun) type-error))
 
 (multiple-value-bind (fun warn fail)
     (compile nil '(lambda () (aref (make-array 1) 1)))
   (assert fail)
-  (assert (raises-error? (funcall fun) type-error)))
+  (assert-error (funcall fun) type-error))
 
 (multiple-value-bind (fun warn fail)
     (compile nil '(lambda () (make-array 5 :element-type 'undefined-type)))
@@ -298,3 +298,22 @@
        t)
      (:no-error (&rest args)
        nil))))
+
+(with-test (:name :dont-make-array-bad-keywords)
+  ;; This used to get a heap exhaustion error because of trying
+  ;; to make the array before checking keyword validity.
+  (handler-case
+      (locally
+          (declare (notinline make-array))
+        (make-array (1- array-total-size-limit)
+                    :initial-contents '(a b c) :initial-element 9))
+    (simple-error (c)
+      (assert
+       (string= (simple-condition-format-control c)
+                "Can't specify both :INITIAL-ELEMENT and :INITIAL-CONTENTS")))))
+
+(with-test (:name :make-array-size-overflow)
+  ;; 1-bit fixnum tags make array limits overflow the word length
+  ;; when converted to bytes
+  (when (= sb-vm:n-fixnum-tag-bits 1)
+    (assert-error (make-array (1- array-total-size-limit)) error)))

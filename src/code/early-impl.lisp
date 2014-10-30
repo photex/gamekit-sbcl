@@ -21,14 +21,14 @@
                   *stdout*
                   *stderr*
                   *tty*
-                  *read-only-space-free-pointer*
+                  sb!vm:*read-only-space-free-pointer*
                   sb!vm:*static-space-free-pointer*
-                  sb!vm::*current-catch-block*
+                  sb!vm:*current-catch-block*
                   sb!vm::*current-unwind-protect-block*
-                  sb!vm::*alien-stack*
-                  sb!vm::*control-stack-start*
-                  sb!vm::*control-stack-end*
-                  sb!vm::*binding-stack-start*
+                  sb!vm::*alien-stack-pointer*
+                  sb!vm:*control-stack-start*
+                  sb!vm:*control-stack-end*
+                  sb!vm:*binding-stack-start*
                   ;; FIXME: The pseudo-atomic variable stuff should be
                   ;; conditional on :SB-PSEUDO-ATOMIC-SYMBOLS, which
                   ;; should be conditional on :X86, instead of the
@@ -60,7 +60,7 @@
                   sb!vm::*fp-constant-l2e*
                   sb!vm::*fp-constant-lg2*
                   sb!vm::*fp-constant-ln2*
-                  sb!vm:*alloc-signal*
                   sb!pcl::..slot-unbound..
                   sb!pcl::*cache-miss-values-stack*
                   sb!pcl::*dfun-miss-gfs-on-stack*))
+(!defvar sb!vm:*alloc-signal* nil)

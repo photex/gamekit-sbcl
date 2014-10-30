@@ -88,6 +88,7 @@
               double-float complex-double-float))
 
             (system-area-pointer sap-reg move-if/sap)))
+  #!+sb-doc
   "Alist of primitive type -> (storage-class-name VOP-name)
    if values of such a type should be cmoved, and NIL otherwise.
 
@@ -130,17 +131,19 @@
                 (let ((val (tn-value constant-tn)))
                   (etypecase val
                     (integer
-                       (if (memq sc '(any-reg descriptor-reg))
-                           (inst mov dst (fixnumize val))
-                           (inst mov dst val)))
+                     ;; Can't use ZEROIZE here, since XOR will affect
+                     ;; the flags.
+                     (if (memq sc '(any-reg descriptor-reg))
+                         (inst mov dst (fixnumize val))
+                         (inst mov dst val)))
                     (symbol
-                       (aver (eq sc 'descriptor-reg))
-                       (load-symbol dst val))
+                     (aver (eq sc 'descriptor-reg))
+                     (load-symbol dst val))
                     (character
-                       (if (eq sc 'descriptor-reg)
-                           (inst mov dst (logior (ash (char-code val) n-widetag-bits)
-                                                 character-widetag))
-                           (inst mov dst (char-code val))))))))
+                     (if (eq sc 'descriptor-reg)
+                         (inst mov dst (logior (ash (char-code val) n-widetag-bits)
+                                               character-widetag))
+                         (inst mov dst (char-code val))))))))
          (cond ((null (rest flags))
                 (if (sc-is else immediate)
                     (load-immediate res else)

@@ -49,7 +49,8 @@
                           pathname (stream-external-format stream)))
                    (sb!c::*source-info* info))
               (setf (sb!c::source-info-stream info) stream)
-              (sb!c::do-forms-from-info ((form current-index) info)
+              (sb!c::do-forms-from-info ((form current-index) info
+                                         'sb!c::input-error-in-load)
                 (sb!c::with-source-paths
                   (sb!c::find-source-paths form current-index)
                   (eval-form form current-index))))
@@ -89,6 +90,13 @@
   "Load the file given by FILESPEC into the Lisp environment, returning
    T on success."
   (flet ((load-stream (stream faslp)
+           (when (and (fd-stream-p stream)
+                      (eq (sb!impl::fd-stream-fd-type stream) :directory))
+             (error 'simple-file-error
+                    :pathname (pathname stream)
+                    :format-control
+                    "Can't LOAD a directory: ~s."
+                    :format-arguments (list (pathname stream))))
            (let* (;; Bindings required by ANSI.
                   (*readtable* *readtable*)
                   (*package* (sane-package))
@@ -201,15 +209,13 @@
 #!-x86
 (defun load-code (box-num code-length)
   (declare (fixnum box-num code-length))
-  (with-fop-stack t
-    (let ((code (sb!c:allocate-code-object box-num code-length))
-          (index (+ sb!vm:code-trace-table-offset-slot box-num)))
-      (declare (type index index))
-      (setf (%code-debug-info code) (pop-stack))
-      (dotimes (i box-num)
-        (declare (fixnum i))
-        (setf (code-header-ref code (decf index)) (pop-stack)))
-      (sb!sys:without-gcing
+  (let ((code (sb!c:allocate-code-object box-num code-length)))
+    (with-fop-stack (stack ptr (1+ box-num))
+      (setf (%code-debug-info code) (fop-stack-ref (+ ptr box-num)))
+      (loop for i of-type index from sb!vm:code-constants-offset
+            for j of-type index from ptr below (+ ptr box-num)
+            do (setf (code-header-ref code i) (fop-stack-ref j)))
+      (without-gcing
         (read-n-bytes *fasl-input-stream*
                       (code-instructions code)
                       0
@@ -227,44 +233,38 @@
 #!+x86
 (defun load-code (box-num code-length)
   (declare (fixnum box-num code-length))
-  (with-fop-stack t
-    (let ((stuff (list (pop-stack))))
-      (dotimes (i box-num)
-        (declare (fixnum i))
-        (push (pop-stack) stuff))
-      (let* ((dbi (car (last stuff)))   ; debug-info
-             (tto (first stuff)))       ; trace-table-offset
-
-        (setq stuff (nreverse stuff))
-
+  (with-fop-stack (stack ptr (1+ box-num))
+    (let* ((dbi (fop-stack-ref (+ ptr box-num))) ; debug-info
+           (stuff (cons dbi (loop for i of-type index
+                                  downfrom (+ ptr box-num -1) to ptr
+                                  collect (fop-stack-ref i)))))
         ;; FIXME: *LOAD-CODE-VERBOSE* should probably be #!+SB-SHOW.
         (when *load-code-verbose*
-              (format t "stuff: ~S~%" stuff)
-              (format t
-                      "   : ~S ~S ~S ~S~%"
-                      (sb!c::compiled-debug-info-p dbi)
-                      (sb!c::debug-info-p dbi)
-                      (sb!c::compiled-debug-info-name dbi)
-                      tto)
-              (format t "   loading to the dynamic space~%"))
+          (format t "stuff: ~S~%" stuff)
+          (format t
+                  "   : ~S ~S ~S~%"
+                  (sb!c::compiled-debug-info-p dbi)
+                  (sb!c::debug-info-p dbi)
+                  (sb!c::compiled-debug-info-name dbi))
+          (format t "   loading to the dynamic space~%"))
 
         (let ((code (sb!c:allocate-code-object box-num code-length))
-              (index (+ sb!vm:code-trace-table-offset-slot box-num)))
+              (index (+ sb!vm:code-constants-offset box-num)))
           (declare (type index index))
           (when *load-code-verbose*
             (format t
                     "  obj addr=~X~%"
-                    (sb!kernel::get-lisp-obj-address code)))
+                    (get-lisp-obj-address code)))
           (setf (%code-debug-info code) (pop stuff))
           (dotimes (i box-num)
             (declare (fixnum i))
             (setf (code-header-ref code (decf index)) (pop stuff)))
-          (sb!sys:without-gcing
-           (read-n-bytes *fasl-input-stream*
-                         (code-instructions code)
-                         0
-                         code-length))
-          code)))))
+          (without-gcing
+            (read-n-bytes *fasl-input-stream*
+                          (code-instructions code)
+                          0
+                          code-length))
+          code))))
 
 ;;;; linkage fixups
 

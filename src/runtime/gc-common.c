@@ -111,6 +111,24 @@ copy_code_object(lispobj object, sword_t nwords)
     return gc_general_copy_object(object, nwords, CODE_PAGE_FLAG);
 }
 
+boolean
+from_space_p(lispobj obj)
+{
+    page_index_t page_index;
+
+    if (space_matches_p(obj, from_space, &page_index)) {
+        lispobj *native = native_pointer(obj);
+        if (in_dontmove_nativeptr_p(page_index, native)) {
+            // pretend it is not in oldspace to protect it from being moved
+            return 0;
+        } else {
+            return 1;
+        }
+    } else {
+        return 0;
+    }
+}
+
 static sword_t scav_lose(lispobj *where, lispobj object); /* forward decl */
 
 /* FIXME: Most calls end up going to some trouble to compute an
@@ -126,7 +144,7 @@ scavenge(lispobj *start, sword_t n_words)
         lispobj object = *object_ptr;
 #ifdef LISP_FEATURE_GENCGC
         if (forwarding_pointer_p(object_ptr))
-            lose("unexpect forwarding pointer in scavenge: %p, start=%p, n=%l\n",
+            lose("unexpect forwarding pointer in scavenge: %p, start=%p, n=%ld\n",
                  object_ptr, start, n_words);
 #endif
         if (is_lisp_pointer(object)) {
@@ -250,7 +268,7 @@ trans_code(struct code *code)
     /* prepare to transport the code vector */
     l_code = (lispobj) LOW_WORD(code) | OTHER_POINTER_LOWTAG;
 
-    ncode_words = fixnum_value(code->code_size);
+    ncode_words = fixnum_word_value(code->code_size);
     nheader_words = HeaderValue(code->header);
     nwords = ncode_words + nheader_words;
     nwords = CEILING(nwords, 2);
@@ -333,7 +351,7 @@ scav_code_header(lispobj *where, lispobj object)
     struct simple_fun *function_ptr; /* untagged pointer to entry point */
 
     code = (struct code *) where;
-    n_code_words = fixnum_value(code->code_size);
+    n_code_words = fixnum_word_value(code->code_size);
     n_header_words = HeaderValue(object);
     n_words = n_code_words + n_header_words;
     n_words = CEILING(n_words, 2);
@@ -381,7 +399,7 @@ size_code_header(lispobj *where)
 
     code = (struct code *) where;
 
-    ncode_words = fixnum_value(code->code_size);
+    ncode_words = fixnum_word_value(code->code_size);
     nheader_words = HeaderValue(code->header);
     nwords = ncode_words + nheader_words;
     nwords = CEILING(nwords, 2);
@@ -683,7 +701,6 @@ trans_boxed(lispobj object)
     return copy_object(object, length);
 }
 
-
 static sword_t
 size_boxed(lispobj *where)
 {
@@ -697,9 +714,37 @@ size_boxed(lispobj *where)
     return length;
 }
 
+static lispobj
+trans_tiny_boxed(lispobj object)
+{
+    lispobj header;
+    uword_t length;
+
+    gc_assert(is_lisp_pointer(object));
+
+    header = *((lispobj *) native_pointer(object));
+    length = (HeaderValue(header) & 0xFF) + 1;
+    length = CEILING(length, 2);
+
+    return copy_object(object, length);
+}
+
+static sword_t
+size_tiny_boxed(lispobj *where)
+{
+    lispobj header;
+    uword_t length;
+
+    header = *where;
+    length = (HeaderValue(header) & 0xFF) + 1;
+    length = CEILING(length, 2);
+
+    return length;
+}
+
 /* Note: on the sparc we don't have to do anything special for fdefns, */
 /* 'cause the raw-addr has a function lowtag. */
-#if !defined(LISP_FEATURE_SPARC)
+#if (!defined(LISP_FEATURE_SPARC)) && (!defined(LISP_FEATURE_ARM))
 static sword_t
 scav_fdefn(lispobj *where, lispobj object)
 {
@@ -820,6 +865,7 @@ size_base_string(lispobj *where)
     return nwords;
 }
 
+#ifdef SIMPLE_CHARACTER_STRING_WIDETAG
 static sword_t
 scav_character_string(lispobj *where, lispobj object)
 {
@@ -870,6 +916,7 @@ size_character_string(lispobj *where)
 
     return nwords;
 }
+#endif
 
 static lispobj
 trans_vector(lispobj object)
@@ -1713,7 +1760,7 @@ scav_vector (lispobj *where, lispobj object)
                 "non-fatal corruption caused by concurrent access to a "
                 "hash-table from multiple threads. Any accesses to "
                 "hash-tables shared between threads should be protected "
-                "by locks.\n", (uword_t)&where[2]);
+                "by locks.\n", (void*)&where[2]);
         // We've scavenged three words.
         return 3;
     }
@@ -1856,7 +1903,7 @@ scan_weak_hash_tables (void)
 static sword_t
 scav_lose(lispobj *where, lispobj object)
 {
-    lose("no scavenge function for object 0x%08x (widetag 0x%x)\n",
+    lose("no scavenge function for object %p (widetag 0x%x)\n",
          (uword_t)object,
          widetag_of(*where));
 
@@ -1866,8 +1913,8 @@ scav_lose(lispobj *where, lispobj object)
 static lispobj
 trans_lose(lispobj object)
 {
-    lose("no transport function for object 0x%08x (widetag 0x%x)\n",
-         (uword_t)object,
+    lose("no transport function for object %p (widetag 0x%x)\n",
+         (void*)object,
          widetag_of(*(lispobj*)native_pointer(object)));
     return NIL; /* bogus return value to satisfy static type checking */
 }
@@ -1875,8 +1922,8 @@ trans_lose(lispobj object)
 static sword_t
 size_lose(lispobj *where)
 {
-    lose("no size function for object at 0x%08x (widetag 0x%x)\n",
-         (uword_t)where,
+    lose("no size function for object at %p (widetag 0x%x)\n",
+         (void*)where,
          widetag_of(*where));
     return 1; /* bogus return value to satisfy static type checking */
 }
@@ -2049,7 +2096,7 @@ gc_init_tables(void)
     scavtab[UNBOUND_MARKER_WIDETAG] = scav_immediate;
     scavtab[NO_TLS_VALUE_MARKER_WIDETAG] = scav_immediate;
     scavtab[INSTANCE_HEADER_WIDETAG] = scav_instance;
-#if defined(LISP_FEATURE_SPARC)
+#if defined(LISP_FEATURE_SPARC) || defined(LISP_FEATURE_ARM)
     scavtab[FDEFN_WIDETAG] = scav_boxed;
 #else
     scavtab[FDEFN_WIDETAG] = scav_fdefn;
@@ -2179,7 +2226,7 @@ gc_init_tables(void)
     transother[CLOSURE_HEADER_WIDETAG] = trans_boxed;
     transother[FUNCALLABLE_INSTANCE_HEADER_WIDETAG] = trans_boxed;
     transother[VALUE_CELL_HEADER_WIDETAG] = trans_boxed;
-    transother[SYMBOL_HEADER_WIDETAG] = trans_boxed;
+    transother[SYMBOL_HEADER_WIDETAG] = trans_tiny_boxed;
     transother[CHARACTER_WIDETAG] = trans_immediate;
     transother[SAP_WIDETAG] = trans_unboxed;
 #ifdef SIMD_PACK_WIDETAG
@@ -2325,7 +2372,7 @@ gc_init_tables(void)
     sizetab[CLOSURE_HEADER_WIDETAG] = size_boxed;
     sizetab[FUNCALLABLE_INSTANCE_HEADER_WIDETAG] = size_boxed;
     sizetab[VALUE_CELL_HEADER_WIDETAG] = size_boxed;
-    sizetab[SYMBOL_HEADER_WIDETAG] = size_boxed;
+    sizetab[SYMBOL_HEADER_WIDETAG] = size_tiny_boxed;
     sizetab[CHARACTER_WIDETAG] = size_immediate;
     sizetab[SAP_WIDETAG] = size_unboxed;
 #ifdef SIMD_PACK_WIDETAG
@@ -2661,8 +2708,24 @@ maybe_gc(os_context_t *context)
      * we may even be in a WITHOUT-INTERRUPTS. */
     gc_happened = funcall0(StaticSymbolFunction(SUB_GC));
     FSHOW((stderr, "/maybe_gc: gc_happened=%s\n",
-           (gc_happened == NIL) ? "NIL" : "T"));
-    if ((gc_happened != NIL) &&
+           (gc_happened == NIL)
+           ? "NIL"
+           : ((gc_happened == T)
+              ? "T"
+              : "0")));
+    /* gc_happened can take three values: T, NIL, 0.
+     *
+     * T means that the thread managed to trigger a GC, and post-gc
+     * must be called.
+     *
+     * NIL means that the thread is within without-gcing, and no GC
+     * has occurred.
+     *
+     * Finally, 0 means that *a* GC has occurred, but it wasn't
+     * triggered by this thread; success, but post-gc doesn't have
+     * to be called.
+     */
+    if ((gc_happened == T) &&
         /* See if interrupts are enabled or it's possible to enable
          * them. POST-GC has a similar check, but we don't want to
          * unlock deferrables in that case and get a pending interrupt

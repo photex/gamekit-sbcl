@@ -11,8 +11,6 @@
 
 (in-package "SB!VM")
 
-(declaim (special sb!vm:*read-only-space-free-pointer*
-                  sb!vm:*static-space-free-pointer*))
 
 ;;;; type format database
 
@@ -22,7 +20,7 @@
     (name nil :type symbol)
     ;; kind of type (how to reconstitute an object)
     (kind (missing-arg)
-          :type (member :other :closure :instance :list
+          :type (member :other :small-other :closure :instance :list
                         :code :vector-nil :weak-pointer))))
 
 (defun room-info-type-name (info)
@@ -43,7 +41,9 @@
                (not (eq name 'weak-pointer)))
       (setf (svref *meta-room-info* (symbol-value widetag))
             (make-room-info :name name
-                            :kind :other)))))
+                            :kind (if (eq name 'symbol)
+                                      :small-other
+                                      :other))))))
 
 (dolist (code (list #!+sb-unicode complex-character-string-widetag
                     complex-base-string-widetag simple-array-widetag
@@ -199,12 +199,12 @@
          (widetag (logand header widetag-mask))
          (header-value (ash header (- n-widetag-bits)))
          (info (svref *room-info* widetag)))
-    (symbol-macrolet
-        ((boxed-size (round-to-dualword (ash (1+ header-value) word-shift))))
-      (macrolet
-          ((tagged-object (tag)
-             `(%make-lisp-obj (logior ,tag (get-lisp-obj-address address)))))
-        (cond
+    (macrolet
+        ((boxed-size (header-value)
+           `(round-to-dualword (ash (1+ ,header-value) word-shift)))
+         (tagged-object (tag)
+           `(%make-lisp-obj (logior ,tag (get-lisp-obj-address address)))))
+      (cond
           ;; Pick off arrays, as they're the only plausible cause for
           ;; a non-nil, non-ROOM-INFO object as INFO.
           ((specialized-array-element-type-properties-p info)
@@ -222,17 +222,22 @@
           ((eq (room-info-kind info) :closure)
            (values (tagged-object fun-pointer-lowtag)
                    widetag
-                   boxed-size))
+                   (boxed-size header-value)))
 
           ((eq (room-info-kind info) :instance)
            (values (tagged-object instance-pointer-lowtag)
                    widetag
-                   boxed-size))
+                   (boxed-size header-value)))
 
           ((eq (room-info-kind info) :other)
            (values (tagged-object other-pointer-lowtag)
                    widetag
-                   boxed-size))
+                   (boxed-size header-value)))
+
+          ((eq (room-info-kind info) :small-other)
+           (values (tagged-object other-pointer-lowtag)
+                   widetag
+                   (boxed-size (logand header-value #xff))))
 
           ((eq (room-info-kind info) :vector-nil)
            (values (tagged-object other-pointer-lowtag)
@@ -250,16 +255,15 @@
            (values (tagged-object other-pointer-lowtag)
                    code-header-widetag
                    (round-to-dualword
-                    (* (+ header-value
-                          (the fixnum
+                    (+ (* header-value n-word-bytes)
+                       (the fixnum
                             (sap-ref-lispobj object-sap
                                              (* code-code-size-slot
-                                                n-word-bytes))))
-                       n-word-bytes))))
+                                                n-word-bytes)))))))
 
           (t
            (error "Unrecognized room-info-kind ~S in reconstitute-object"
-                  (room-info-kind info))))))))
+                  (room-info-kind info)))))))
 
 ;;; Iterate over all the objects in the contiguous block of memory
 ;;; with the low address at START and the high address just before
@@ -306,7 +310,8 @@
                                  16
                                  32)))
               (flags (unsigned 8))
-              (gen (signed 8))))
+              (gen (signed 8))
+              (conservative-words signed)))
   (declaim (inline find-page-index))
   (define-alien-routine "find_page_index" long (index signed))
   (define-alien-variable "last_free_page" sb!kernel::page-index-t)
@@ -315,10 +320,7 @@
 
 ;;; Iterate over all the objects allocated in SPACE, calling FUN with
 ;;; the object, the object's type code, and the object's total size in
-;;; bytes, including any header and padding. CAREFUL makes
-;;; MAP-ALLOCATED-OBJECTS slightly more accurate, but a lot slower: it
-;;; is intended for slightly more demanding uses of heap groveling
-;;; then ROOM.
+;;; bytes, including any header and padding.
 #!-sb-fluid (declaim (maybe-inline map-allocated-objects))
 (defun map-allocated-objects (fun space)
   (declare (type function fun)
@@ -530,102 +532,6 @@
 
   (values))
 
-;;; Print info about how much code and no-ops there are in SPACE.
-(defun count-no-ops (space)
-  (declare (type spaces space))
-  (let ((code-words 0)
-        (no-ops 0)
-        (total-bytes 0))
-    (declare (fixnum code-words no-ops)
-             (type unsigned-byte total-bytes))
-    (map-allocated-objects
-     (lambda (obj type size)
-       (when (eql type code-header-widetag)
-         (let ((words (truly-the fixnum (%code-code-size obj)))
-               (sap (%primitive code-instructions obj))
-               (size size))
-           (declare (fixnum size))
-           (incf total-bytes size)
-           (incf code-words words)
-           (dotimes (i words)
-             (when (zerop (sap-ref-word sap (* i n-word-bytes)))
-               (incf no-ops))))))
-     space)
-
-    (format t
-            "~:D code-object bytes, ~:D code words, with ~:D no-ops (~D%).~%"
-            total-bytes code-words no-ops
-            (round (* no-ops 100) code-words)))
-
-  (values))
-
-(defun descriptor-vs-non-descriptor-storage (&rest spaces)
-  (let ((descriptor-words 0)
-        (non-descriptor-headers 0)
-        (non-descriptor-bytes 0))
-    (declare (type unsigned-byte descriptor-words non-descriptor-headers
-                   non-descriptor-bytes))
-    (dolist (space (or spaces '(:read-only :static :dynamic)))
-      (declare (inline map-allocated-objects))
-      (map-allocated-objects
-       (lambda (obj type size)
-         (case type
-           (#.code-header-widetag
-            (let ((inst-words (truly-the fixnum (%code-code-size obj)))
-                  (size size))
-              (declare (type fixnum size inst-words))
-              (incf non-descriptor-bytes (* inst-words n-word-bytes))
-              (incf descriptor-words
-                    (- (truncate size n-word-bytes) inst-words))))
-           ((#.bignum-widetag
-             #.single-float-widetag
-             #.double-float-widetag
-             #.simple-base-string-widetag
-             #!+sb-unicode #.simple-character-string-widetag
-             #.simple-array-nil-widetag
-             #.simple-bit-vector-widetag
-             #.simple-array-unsigned-byte-2-widetag
-             #.simple-array-unsigned-byte-4-widetag
-             #.simple-array-unsigned-byte-8-widetag
-             #.simple-array-unsigned-byte-16-widetag
-             #.simple-array-unsigned-byte-32-widetag
-             #.simple-array-signed-byte-8-widetag
-             #.simple-array-signed-byte-16-widetag
-             #.simple-array-signed-byte-32-widetag
-             #.simple-array-single-float-widetag
-             #.simple-array-double-float-widetag
-             #.simple-array-complex-single-float-widetag
-             #.simple-array-complex-double-float-widetag)
-            (incf non-descriptor-headers)
-            (incf non-descriptor-bytes (- size n-word-bytes)))
-           ((#.list-pointer-lowtag
-             #.instance-pointer-lowtag
-             #.ratio-widetag
-             #.complex-widetag
-             #.simple-array-widetag
-             #.simple-vector-widetag
-             #.complex-base-string-widetag
-             #.complex-vector-nil-widetag
-             #.complex-bit-vector-widetag
-             #.complex-vector-widetag
-             #.complex-array-widetag
-             #.closure-header-widetag
-             #.funcallable-instance-header-widetag
-             #.value-cell-header-widetag
-             #.symbol-header-widetag
-             #.sap-widetag
-             #.weak-pointer-widetag
-             #.instance-header-widetag)
-            (incf descriptor-words (truncate (the fixnum size) n-word-bytes)))
-           (t
-            (error "bogus widetag: ~W" type))))
-       space))
-    (format t "~:D words allocated for descriptor objects.~%"
-            descriptor-words)
-    (format t "~:D bytes data/~:D words header for non-descriptor objects.~%"
-            non-descriptor-bytes non-descriptor-headers)
-    (values)))
-
 ;;; Print a breakdown by instance type of all the instances allocated
 ;;; in SPACE. If TOP-N is true, print only information for the
 ;;; TOP-N types with largest usage.
@@ -696,7 +602,7 @@
     (let* ((space-start (sap-int start-sap))
            (space-end (sap-int end-sap))
            (space-size (- space-end space-start))
-           (pagesize (sb!sys:get-page-size))
+           (pagesize (get-page-size))
            (start (+ space-start (round (* space-size percent) 100)))
            (printed-conses (make-hash-table :test 'eq))
            (pages-so-far 0)
@@ -837,7 +743,8 @@
                     (eq (cdr obj) object))
             (maybe-call fun obj)))
          (instance
-          (dotimes (i (%instance-length obj))
+          (dotimes (i (- (%instance-length obj)
+                         (layout-n-untagged-slots (%instance-layout obj))))
             (when (eq (%instance-ref obj i) object)
               (maybe-call fun obj)
               (return))))
@@ -856,7 +763,7 @@
          (symbol
           (when (or (eq (symbol-name obj) object)
                     (eq (symbol-package obj) object)
-                    (eq (symbol-plist obj) object)
+                    (eq (symbol-info obj) object)
                     (and (boundp obj)
                          (eq (symbol-value obj) object)))
             (maybe-call fun obj)))))

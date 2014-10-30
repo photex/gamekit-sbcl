@@ -38,8 +38,6 @@
     (error "~S isn't a floating-point register." tn))
   (tn-offset tn))
 
-;(sb!disassem:set-disassem-params :instruction-alignment 32)
-
 (defvar *disassem-use-lisp-reg-names* t)
 
 (defun location-number (loc)
@@ -224,27 +222,26 @@
                       stream)))
 
 (defun snarf-error-junk (sap offset &optional length-only)
-  (let* ((length (sb!sys:sap-ref-8 sap offset))
+  (let* ((length (sap-ref-8 sap offset))
          (vector (make-array length :element-type '(unsigned-byte 8))))
-    (declare (type sb!sys:system-area-pointer sap)
+    (declare (type system-area-pointer sap)
              (type (unsigned-byte 8) length)
              (type (simple-array (unsigned-byte 8) (*)) vector))
     (cond (length-only
            (values 0 (1+ length) nil nil))
           (t
-           (sb!kernel:copy-ub8-from-system-area sap (1+ offset)
-                                                vector 0 length)
+           (copy-ub8-from-system-area sap (1+ offset) vector 0 length)
            (collect ((sc-offsets)
                      (lengths))
              (lengths 1)                ; the length byte
              (let* ((index 0)
-                    (error-number (sb!c:read-var-integer vector index)))
+                    (error-number (read-var-integer vector index)))
                (lengths index)
                (loop
                  (when (>= index length)
                    (return))
                  (let ((old-index index))
-                   (sc-offsets (sb!c:read-var-integer vector index))
+                   (sc-offsets (read-var-integer vector index))
                    (lengths (- index old-index))))
                (values error-number
                        (1+ length)
@@ -386,10 +383,6 @@
 (sb!disassem:define-instruction-format (instr 32)
   (op :field (byte 6 26))
   (other :field (byte 26 0)))
-
-(sb!disassem:define-instruction-format (xinstr 32 :default-printer '(:name :tab data))
-  (op-to-a :field (byte 16 16))
-  (data :field (byte 16 0)))
 
 (sb!disassem:define-instruction-format (sc 32 :default-printer '(:name :tab rest))
   (op :field (byte 6 26))
@@ -575,6 +568,9 @@
 (def-ppc-iformat (m-sh '(:name :tab ra "," rs "," sh "," mb "," me))
   rs ra sh mb me rc)))
 
+(sb!disassem:define-instruction-format (xinstr 32 :default-printer '(:name :tab data))
+  (op-to-a :field (byte 16 16))
+  (data :field (byte 16 0) :reader xinstr-data))
 
 
 

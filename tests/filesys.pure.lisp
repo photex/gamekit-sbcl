@@ -208,34 +208,45 @@
                      "a-really-non-existing-file")
                  :direction direction
                  :if-exists if-exists :if-does-not-exist if-does-not-exist)))
-    (assert (raises-error?
-             (do-open nil nil :error)))
+    (assert-error
+     (do-open nil nil :error))
     (assert (not
              (do-open nil :error nil)))
     (assert (not
              (do-open t nil :error)))
-    (assert (raises-error?
-             (do-open t :error nil)))
+    (assert-error
+     (do-open t :error nil))
     (assert (not
              (do-open nil nil nil)))
-    (assert (raises-error?
-             (do-open nil :error :error)))
+    (assert-error
+     (do-open nil :error :error))
     (assert (not
              (do-open t nil nil)))
-    (assert (raises-error? (do-open t :error :error)))
+    (assert-error (do-open t :error :error))
 
-    (assert (raises-error?
-             (do-open nil nil :error :io)))
+    (assert-error
+     (do-open nil nil :error :io))
     (assert (not
              (do-open nil :error nil :io)))
     (assert (not
              (do-open t nil :error :io)))
-    (assert (raises-error?
-             (do-open t :error nil :io)))
+    (assert-error
+     (do-open t :error nil :io))
     (assert (not
              (do-open nil nil nil :io)))
-    (assert (raises-error?
-             (do-open nil :error :error :io)))
+    (assert-error
+     (do-open nil :error :error :io))
     (assert (not
              (do-open t nil nil :io)))
-    (assert (raises-error? (do-open t :error :error :io)))))
+    (assert-error (do-open t :error :error :io))))
+
+(with-test (:name :open-new-version)
+  (multiple-value-bind (value error)
+      (ignore-errors (open #.(or *compile-file-truename* *load-truename*)
+                           :direction :output
+                           :if-exists :new-version))
+    (assert (not value))
+    (assert error)
+    (assert (equal (simple-condition-format-control error)
+                   "OPEN :IF-EXISTS :NEW-VERSION is not supported ~
+                            when a new version must be created."))))

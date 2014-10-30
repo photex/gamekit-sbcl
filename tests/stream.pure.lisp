@@ -312,6 +312,8 @@
   (assert (char= (peek-char t (make-string-input-stream " a")) #\a))
   (set-syntax-from-char #\Space #\a)
   (assert (char= (peek-char t (make-string-input-stream " a")) #\Space)))
+(with-test (:name :whitespace[2]p-is-type-safe)
+  (assert-error (sb-impl::whitespace[2]p :potato)))
 
 ;;; It is actually easier to run into the problem exercised by this
 ;;; test with sockets, due to their delays between availabilities of
@@ -369,3 +371,13 @@
          ;; returned BAR, not "BAR" (and then subsequent reads would
          ;; lose).
          "bar"))
+
+;; WITH-INPUT-FROM-STRING would multiply evaluate the :END argument,
+;; and so previously this returned the symbol A, not ABC.
+(with-test (:name :with-input-from-string-end-once-only)
+  (assert (eq (let ((s "ABCDEFG")
+                    (i 5))
+                (symbol-macrolet ((ptr (decf i 2)))
+                  (with-input-from-string (stream s :end ptr)
+                    (read stream))))
+              'abc)))

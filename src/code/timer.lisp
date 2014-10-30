@@ -98,12 +98,14 @@
             (length (%pqueue-contents object)))))
 
 (defun priority-queue-maximum (priority-queue)
+  #!+sb-doc
   "Return the item in PRIORITY-QUEUE with the largest key."
   (symbol-macrolet ((contents (%pqueue-contents priority-queue)))
     (unless (zerop (length contents))
       (heap-maximum contents))))
 
 (defun priority-queue-extract-maximum (priority-queue)
+  #!+sb-doc
   "Remove and return the item in PRIORITY-QUEUE with the largest key."
   (symbol-macrolet ((contents (%pqueue-contents priority-queue))
                     (keyfun (%pqueue-keyfun priority-queue)))
@@ -111,7 +113,8 @@
       (heap-extract-maximum contents :key keyfun :test #'<=))))
 
 (defun priority-queue-insert (priority-queue new-item)
-  "Add NEW-ITEM to PRIOIRITY-QUEUE."
+  #!+sb-doc
+  "Add NEW-ITEM to PRIORITY-QUEUE."
   (symbol-macrolet ((contents (%pqueue-contents priority-queue))
                     (keyfun (%pqueue-keyfun priority-queue)))
     (heap-insert contents new-item :key keyfun :test #'<=)))
@@ -120,6 +123,7 @@
   (zerop (length (%pqueue-contents priority-queue))))
 
 (defun priority-queue-remove (priority-queue item &key (test #'eq))
+  #!+sb-doc
   "Remove and return ITEM from PRIORITY-QUEUE."
   (symbol-macrolet ((contents (%pqueue-contents priority-queue))
                     (keyfun (%pqueue-keyfun priority-queue)))
@@ -326,7 +330,7 @@ triggers."
 (define-alien-type wtimer
     #!+win32 system-area-pointer ;HANDLE, but that's not defined yet
     #!+sunos system-area-pointer ;struct os_wtimer *
-    #!+(or linux bsd) int)
+    #!+(or android linux bsd) int)
 
 #!+sb-wtimer
 (progn
@@ -447,9 +451,9 @@ triggers."
         (run-timers)))))
 
 (defun timeout-cerror ()
-  (cerror "Continue" 'sb!ext::timeout))
+  (cerror "Continue" 'timeout))
 
-(defmacro sb!ext:with-timeout (expires &body body)
+(defmacro with-timeout (expires &body body)
   #!+sb-doc
   "Execute the body, asynchronously interrupting it and signalling a TIMEOUT
 condition after at least EXPIRES seconds have passed.

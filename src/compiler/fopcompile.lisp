@@ -50,6 +50,10 @@
                    (member kind '(:special :constant :global :unknown))))))
       (and (listp form)
            (ignore-errors (list-length form))
+           (let ((macroexpansion (expand-compiler-macro form)))
+             (if (neq macroexpansion form)
+                 (return-from fopcompilable-p (fopcompilable-p macroexpansion))
+                 t))
            (multiple-value-bind (macroexpansion macroexpanded-p)
                (%macroexpand form *lexenv*)
              (if macroexpanded-p
@@ -85,15 +89,13 @@
                      ((if)
                       (and (<= 2 (length args) 3)
                            (every #'fopcompilable-p args)))
-                     ;; Allow SETQ only on special variables
+                     ;; Allow SETQ only on special or global variables
                      ((setq)
                       (loop for (name value) on args by #'cddr
-                            unless (and (symbolp name)
-                                        (let ((kind (info :variable :kind name)))
-                                          (eq kind :special))
-                                        (fopcompilable-p value))
-                            return nil
-                            finally (return t)))
+                            always (and (symbolp name)
+                                        (member (info :variable :kind name)
+                                                '(:special :global))
+                                        (fopcompilable-p value))))
                      ;; The real toplevel form processing has already been
                      ;; done, so EVAL-WHEN handling will be easy.
                      ((eval-when)
@@ -126,7 +128,7 @@
                            ;; DECLARE would violate a package lock.
                            (not (eq operator 'declare))
                            (not (special-operator-p operator))
-                           (not (macro-function operator))
+                           (not (macro-function operator)) ; redundant check
                            ;; We can't FOP-FUNCALL with more than 255
                            ;; parameters. (We could theoretically use
                            ;; APPLY, but then we'd need to construct
@@ -174,13 +176,14 @@
        (member (car form)
                '(lambda named-lambda lambda-with-lexenv))))
 
-;;; Check that a literal form is fopcompilable. It would not for example
+;;; Check that a literal form is fopcompilable. It would not be, for example,
 ;;; when the form contains structures with funny MAKE-LOAD-FORMS.
 (defun constant-fopcompilable-p (constant)
   (let ((xset (alloc-xset)))
     (labels ((grovel (value)
                ;; Unless VALUE is an object which which obviously
                ;; can't contain other objects
+               ;; FIXME: OAOOM. See MAYBE-EMIT-MAKE-LOAD-FORMS.
                (unless (typep value
                               '(or unboxed-array
                                 symbol
@@ -275,6 +278,11 @@
                                         path
                                         for-value-p))))))))))
         ((listp form)
+         (let ((macroexpansion (expand-compiler-macro form)))
+           (if (neq macroexpansion form)
+               ;; could expand into an atom, so start from the top
+               (return-from fopcompile
+                 (fopcompile macroexpansion path for-value-p))))
          (multiple-value-bind (macroexpansion macroexpanded-p)
              (%macroexpand form *lexenv*)
            (if macroexpanded-p
@@ -292,9 +300,9 @@
                    ((function)
                     (fopcompile-function (second form) path for-value-p))
                    ;; KLUDGE! SB!C:SOURCE-LOCATION calls are normally handled
-                   ;; by a compiler-macro. Doing general compiler-macro
-                   ;; expansion in the fopcompiler is probably not sensible,
-                   ;; so we'll just special-case it.
+                   ;; by a compiler-macro. But if SPACE > DEBUG we choose not
+                   ;; to record locations, which is strange because the main
+                   ;; compiler does not have similar logic afaict.
                    ((source-location)
                     (if (policy *policy* (and (> space 1)
                                               (> space debug)))
@@ -362,6 +370,8 @@
                        (sb!fasl::dump-fop 'sb!fasl::fop-package
                                           *compile-object*))
                       (t
+                       (when (eq (info :function :where-from operator) :assumed)
+                         (note-undefined-reference operator :function))
                        (fopcompile-constant operator t)
                        (dolist (arg args)
                          (fopcompile arg path t))

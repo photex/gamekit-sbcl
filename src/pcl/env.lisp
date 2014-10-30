@@ -166,14 +166,15 @@
       (sb-sys:structure!object-make-load-form obj env)
       (sb-sys:structure!object-make-load-form obj)))
 
-(defmethod make-load-form ((object wrapper) &optional env)
+(defmethod make-load-form ((object layout) &optional env)
   (declare (ignore env))
-  (let ((pname (classoid-proper-name
-                (layout-classoid object))))
-    (unless pname
-      (error "can't dump wrapper for anonymous class:~%  ~S"
-             (layout-classoid object)))
-    `(classoid-layout (find-classoid ',pname))))
+  (if (layout-for-std-class-p object)
+      (let ((pname (classoid-proper-name (layout-classoid object))))
+        (unless pname
+          (error "can't dump wrapper for anonymous class:~%  ~S"
+                 (layout-classoid object)))
+        `(classoid-layout (find-classoid ',pname)))
+      :ignore-it))
 
 (defmethod make-load-form ((object structure-object) &optional env)
   (declare (ignore env))
@@ -189,6 +190,10 @@
   (declare (ignore env))
   (error "~@<don't know how to dump ~S (default ~S method called).~>"
          object 'make-load-form))
+
+(defmethod make-load-form ((object sb-impl::comma) &optional env)
+  (declare (ignore object env))
+  :sb-just-dump-it-normally)
 
 (defun make-load-form-saving-slots (object &key (slot-names nil slot-names-p) environment)
   (declare (ignore environment))

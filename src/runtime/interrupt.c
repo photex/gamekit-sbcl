@@ -641,6 +641,7 @@ build_fake_control_stack_frames(struct thread *th,os_context_t *context)
 
     /* Build a fake stack frame or frames */
 
+#if !defined(LISP_FEATURE_ARM)
     access_control_frame_pointer(th) =
         (lispobj *)(uword_t)
             (*os_context_register_addr(context, reg_CSP));
@@ -666,12 +667,16 @@ build_fake_control_stack_frames(struct thread *th,os_context_t *context)
              * partial frame wasn't there. */
             oldcont = (lispobj)(*os_context_register_addr(context, reg_OCFP));
         }
-    }
+    } else
+#else /* LISP_FEATURE_ARM */
+    access_control_frame_pointer(th) =
+        SymbolValue(CONTROL_STACK_POINTER, th);
+#endif
     /* We can't tell whether we are still in the caller if it had to
      * allocate a stack frame due to stack arguments. */
     /* This observation provoked some past CMUCL maintainer to ask
      * "Can anything strange happen during return?" */
-    else {
+    {
         /* normal case */
         oldcont = (lispobj)(*os_context_register_addr(context, reg_CFP));
     }
@@ -697,6 +702,9 @@ fake_foreign_function_call(os_context_t *context)
     check_blockables_blocked_or_lose(0);
 
     /* Get current Lisp state from context. */
+#if defined(LISP_FEATURE_ARM) && !defined(LISP_FEATURE_GENCGC)
+    dynamic_space_free_pointer = SymbolValue(ALLOCATION_POINTER, thread);
+#endif
 #ifdef reg_ALLOC
 #ifdef LISP_FEATURE_SB_THREAD
     thread->pseudo_atomic_bits =
@@ -722,6 +730,13 @@ fake_foreign_function_call(os_context_t *context)
 #ifdef reg_BSP
     set_binding_stack_pointer(thread,
         *os_context_register_addr(context, reg_BSP));
+#endif
+
+#ifdef LISP_FEATURE_ARM
+    /* Stash our control stack pointer */
+    bind_variable(INTERRUPTED_CONTROL_STACK_POINTER,
+                  SymbolValue(CONTROL_STACK_POINTER, thread),
+                  thread);
 #endif
 
     build_fake_control_stack_frames(thread,context);
@@ -763,6 +778,15 @@ undo_fake_foreign_function_call(os_context_t *context)
     /* Undo dynamic binding of FREE_INTERRUPT_CONTEXT_INDEX */
     unbind(thread);
 
+#ifdef LISP_FEATURE_ARM
+    /* Restore our saved control stack pointer */
+    SetSymbolValue(CONTROL_STACK_POINTER,
+                   SymbolValue(INTERRUPTED_CONTROL_STACK_POINTER,
+                               thread),
+                   thread);
+    unbind(thread);
+#endif
+
 #if defined(reg_ALLOC) && !defined(LISP_FEATURE_SB_THREAD)
     /* Put the dynamic space free pointer back into the context. */
     *os_context_register_addr(context, reg_ALLOC) =
@@ -785,6 +809,9 @@ undo_fake_foreign_function_call(os_context_t *context)
     /* And clear them so we don't get bit later by call-in/call-out
      * not updating them. */
     thread->pseudo_atomic_bits = 0;
+#endif
+#if defined(LISP_FEATURE_ARM) && !defined(LISP_FEATURE_GENCGC)
+    SetSymbolValue(ALLOCATION_POINTER, dynamic_space_free_pointer, thread);
 #endif
 }
 
@@ -1355,7 +1382,7 @@ interrupt_handle_now_handler(int signal, siginfo_t *info, void *void_context)
     SAVE_ERRNO(signal,context,void_context);
 #ifndef LISP_FEATURE_WIN32
     if ((signal == SIGILL) || (signal == SIGBUS)
-#ifndef LISP_FEATURE_LINUX
+#if !(defined(LISP_FEATURE_LINUX) || defined(LISP_FEATURE_ANDROID))
         || (signal == SIGEMT)
 #endif
         )
@@ -1547,8 +1574,10 @@ arrange_return_to_c_function(os_context_t *context,
        non-x86 ports */
     *os_context_pc_addr(context) = (os_context_register_t)(unsigned long)code;
     *os_context_register_addr(context,reg_NARGS) = 0;
+#ifdef reg_LIP
     *os_context_register_addr(context,reg_LIP) =
         (os_context_register_t)(unsigned long)code;
+#endif
     *os_context_register_addr(context,reg_CFP) =
         (os_context_register_t)(unsigned long)access_control_frame_pointer(th);
 #endif
@@ -1556,7 +1585,7 @@ arrange_return_to_c_function(os_context_t *context,
     *os_context_npc_addr(context) =
         4 + *os_context_pc_addr(context);
 #endif
-#ifdef LISP_FEATURE_SPARC
+#if defined(LISP_FEATURE_SPARC) || defined(LISP_FEATURE_ARM)
     *os_context_register_addr(context,reg_CODE) =
         (os_context_register_t)(fun + FUN_POINTER_LOWTAG);
 #endif
@@ -1574,6 +1603,8 @@ arrange_return_to_lisp_function(os_context_t *context, lispobj function)
 #endif
 }
 
+// These have undefined_alien_function tramp in x-assem.S
+#if !(defined(LISP_FEATURE_X86_64) || defined(LISP_FEATURE_ARM))
 /* KLUDGE: Theoretically the approach we use for undefined alien
  * variables should work for functions as well, but on PPC/Darwin
  * we get bus error at bogus addresses instead, hence this workaround,
@@ -1583,8 +1614,9 @@ arrange_return_to_lisp_function(os_context_t *context, lispobj function)
 void
 undefined_alien_function(void)
 {
-    funcall0(StaticSymbolFunction(UNDEFINED_ALIEN_FUNCTION_ERROR));
+    funcall0(StaticSymbolFunction(UNDEFINED_ALIEN_FUN_ERROR));
 }
+#endif
 
 void lower_thread_control_stack_guard_page(struct thread *th)
 {
@@ -1930,7 +1962,7 @@ undoably_install_low_level_interrupt_handler (int signal,
     sigcopyset(&sa.sa_mask, &blockable_sigset);
     sa.sa_flags = SA_SIGINFO | SA_RESTART
         | (sigaction_nodefer_works ? SA_NODEFER : 0);
-#ifdef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
+#if defined(LISP_FEATURE_C_STACK_IS_CONTROL_STACK)
     if(signal==SIG_MEMORY_FAULT) {
         sa.sa_flags |= SA_ONSTACK;
 # ifdef LISP_FEATURE_SB_SAFEPOINT

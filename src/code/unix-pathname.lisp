@@ -11,6 +11,23 @@
 
 (in-package "SB!IMPL")
 
+(def!struct (unix-host
+             (:make-load-form-fun make-host-load-form)
+             (:include host
+                       (parse #'parse-unix-namestring)
+                       (parse-native #'parse-native-unix-namestring)
+                       (unparse #'unparse-unix-namestring)
+                       (unparse-native #'unparse-native-unix-namestring)
+                       (unparse-host #'unparse-unix-host)
+                       (unparse-directory #'unparse-unix-directory)
+                       (unparse-file #'unparse-unix-file)
+                       (unparse-enough #'unparse-unix-enough)
+                       (unparse-directory-separator "/")
+                       (simplify-namestring #'simplify-unix-namestring)
+                       (customary-case :lower))))
+
+(defvar *physical-host* (make-unix-host))
+
 ;;; Take a string and return a list of cons cells that mark the char
 ;;; separated subseq. The first value is true if absolute directories
 ;;; location.
@@ -43,7 +60,7 @@
                (tail-end (cdr tail)))
           (unless (= tail-start tail-end)
             (setf pieces (butlast pieces))
-            (extract-name-type-and-version namestring tail-start tail-end)))
+            (extract-name-type-and-version namestring tail-start tail-end #\\)))
 
       (when (stringp name)
         (let ((position (position-if (lambda (char)
@@ -90,7 +107,8 @@
                               (t
                                (dirs (maybe-make-pattern namestring
                                                          piece-start
-                                                         piece-end)))))))
+                                                         piece-end
+                                                         #\\)))))))
                   (cond (absolute
                          (if home
                              (list* :absolute home (dirs))
@@ -150,6 +168,9 @@
   ;; 2002-05-09
   "")
 
+(defun unparse-unix-directory (pathname)
+  (unparse-physical-directory pathname #\\))
+
 (defun unparse-unix-file (pathname)
   (declare (type pathname pathname))
   (collect ((strings))
@@ -168,7 +189,7 @@
         (when (and (typep name 'string)
                    (string= name ""))
           (error "name is of length 0: ~S" pathname))
-        (strings (unparse-physical-piece name)))
+        (strings (unparse-physical-piece name #\\)))
       (when type-supplied
         (unless name
           (error "cannot specify the type without a file: ~S" pathname))
@@ -176,7 +197,7 @@
           (when (position #\. type)
             (error "type component can't have a #\. inside: ~S" pathname)))
         (strings ".")
-        (strings (unparse-physical-piece type))))
+        (strings (unparse-physical-piece type #\\))))
     (apply #'concatenate 'simple-string (strings))))
 
 (/show0 "filesys.lisp 406")
@@ -184,7 +205,7 @@
 (defun unparse-unix-namestring (pathname)
   (declare (type pathname pathname))
   (concatenate 'simple-string
-               (unparse-physical-directory pathname)
+               (unparse-unix-directory pathname)
                (unparse-unix-file pathname)))
 
 (defun unparse-native-unix-namestring (pathname as-file)
@@ -210,19 +231,19 @@
                      (let ((where (user-homedir-namestring (second next))))
                        (if where
                            (write-string where s)
-                           (error "User homedir unknown for: ~S" (second next)))))
+                           (error "User homedir unknown for: ~S." (second next)))))
                     (next
                      (push next directory)))
               (write-char #\/ s)))
            (:relative)))
        (loop for (piece . subdirs) on directory
           do (typecase piece
-               ((member :up)
+               ((member :up :back)
                 (write-string ".." s))
                (string
                 (write-string piece s))
                (t
-                (error "ungood directory segment in NATIVE-NAMESTRING: ~S"
+                (error "Bad directory segment in NATIVE-NAMESTRING: ~S."
                        piece)))
           if (or subdirs (stringp name))
           do (write-char #\/ s)
@@ -232,16 +253,16 @@
        (if name-present-p
            (progn
              (unless (stringp name-string) ;some kind of wild field
-               (error "ungood name component in NATIVE-NAMESTRING: ~S" name))
+               (error "Bad name component in NATIVE-NAMESTRING: ~S." name))
              (write-string name-string s)
              (when type-present-p
                (unless (stringp type-string) ;some kind of wild field
-                 (error "ungood type component in NATIVE-NAMESTRING: ~S" type))
+                 (error "Bad type component in NATIVE-NAMESTRING: ~S." type))
                (write-char #\. s)
                (write-string type-string s)))
            (when type-present-p ; type without a name
              (error
-              "type component without a name component in NATIVE-NAMESTRING: ~S"
+              "Type component without a name component in NATIVE-NAMESTRING: ~S."
               type))))
      'simple-string)))
 
@@ -271,7 +292,7 @@
                      pathname-directory)
                     (t
                      (bug "Bad fallthrough in ~S" 'unparse-unix-enough)))))
-        (strings (unparse-physical-directory-list result-directory)))
+        (strings (unparse-physical-directory-list result-directory #\\)))
       (let* ((pathname-type (%pathname-type pathname))
              (type-needed (and pathname-type
                                (not (eq pathname-type :unspecific))))
@@ -287,7 +308,7 @@
                      (typep pathname-name 'simple-string)
                      (position #\. pathname-name :start 1))
             (error "too many dots in the name: ~S" pathname))
-          (strings (unparse-physical-piece pathname-name)))
+          (strings (unparse-physical-piece pathname-name #\\)))
         (when type-needed
           (when (or (null pathname-type) (eq pathname-type :unspecific))
             (lose))
@@ -295,7 +316,7 @@
             (when (position #\. pathname-type)
               (error "type component can't have a #\. inside: ~S" pathname)))
           (strings ".")
-          (strings (unparse-physical-piece pathname-type))))
+          (strings (unparse-physical-piece pathname-type #\\))))
       (apply #'concatenate 'simple-string (strings)))))
 
 (defun simplify-unix-namestring (src)

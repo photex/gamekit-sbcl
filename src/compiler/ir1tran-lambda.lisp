@@ -410,7 +410,10 @@
                         (default-bindings `(,var ,default))
                         (default-vals var))))
                 (let ((bindings (default-bindings))
-                      (call `(%funcall ,fun ,@(reverse vals) ,@(default-vals))))
+                      (call
+                       `(locally
+                            (declare (muffle-conditions code-deletion-note))
+                          (%funcall ,fun ,@(reverse vals) ,@(default-vals)))))
                   (ir1-convert-lambda-body (if bindings
                                                `((let (,@bindings) ,call))
                                                `(,call))
@@ -712,9 +715,8 @@
              (default (arg-info-default info))
              (hairy-default (not (sb!xc:constantp default)))
              (supplied-p (arg-info-supplied-p info))
-             (n-val (make-symbol (format nil
-                                         "~A-DEFAULTING-TEMP"
-                                         (leaf-source-name key))))
+             ;; was: (format nil "~A-DEFAULTING-TEMP" (leaf-source-name key))
+             (n-val (make-symbol ".DEFAULTING-TEMP."))
              (val-temp (make-lambda-var :%source-name n-val)))
         (main-vars val-temp)
         (bind-vars key)
@@ -1275,6 +1277,30 @@
             (specifier-type 'function))))
 
   (values))
+
+;; Similar to above, detect duplicate definitions within a file,
+;; but the package lock check is unnecessary - it's handled elsewhere.
+;;
+;; Additionally, this is a STYLE-WARNING, not a WARNING, because there is
+;; meaningful behavior that can be ascribed to some redefinitions, e.g.
+;;  (defmacro foo () first-definition)
+;;  (defun f () (use-it (foo )))
+;;  (defmacro foo () other-definition)
+;; will use the first definition when compiling F, but make the second available
+;; in the loaded fasl. In this usage it would have made sense to wrap the
+;; respective definitions with EVAL-WHEN for different situations,
+;; but as long as the compile-time behavior is deterministic, it's just bad style
+;; and not flat-out wrong, though there is indeed some waste in the fasl.
+;;
+;; KIND is the globaldb KIND of this NAME
+(defun %compiler-defmacro (kind name compile-toplevel)
+  (when compile-toplevel
+    (let ((name-key `(,kind ,name)))
+      (when (boundp '*lexenv*)
+        (aver (fasl-output-p *compile-object*))
+        (if (member name-key *fun-names-in-this-file* :test #'equal)
+            (compiler-style-warn 'same-file-redefinition-warning :name name)
+            (push name-key *fun-names-in-this-file*))))))
 
 
 ;;; Entry point utilities

@@ -95,34 +95,35 @@
            (type location-kind kind) (type (or index null) tlf-num)
            (type hash-table var-locs) (type (or vop null) vop))
 
-  (vector-push-extend
-   (dpb (position-or-lose kind *compiled-code-location-kinds*)
-        compiled-code-location-kind-byte
-        0)
-   *byte-buffer*)
+  (let ((byte-buffer *byte-buffer*))
+    (vector-push-extend
+     (dpb (position-or-lose kind *compiled-code-location-kinds*)
+          compiled-code-location-kind-byte
+          0)
+     byte-buffer)
 
-  (let ((loc (if (fixnump label) label (label-position label))))
-    (write-var-integer (- loc *previous-location*) *byte-buffer*)
-    (setq *previous-location* loc))
+    (let ((loc (if (fixnump label) label (label-position label))))
+      (write-var-integer (- loc *previous-location*) byte-buffer)
+      (setq *previous-location* loc))
 
-  (let ((path (node-source-path node)))
-    (unless tlf-num
-      (write-var-integer (source-path-tlf-number path) *byte-buffer*))
-    (write-var-integer (source-path-form-number path) *byte-buffer*))
+    (let ((path (node-source-path node)))
+      (unless tlf-num
+        (write-var-integer (source-path-tlf-number path) byte-buffer))
+      (write-var-integer (source-path-form-number path) byte-buffer))
 
-  (if live
-      (write-packed-bit-vector (compute-live-vars live node block var-locs vop)
-                               *byte-buffer*)
-      (write-packed-bit-vector
-       (make-array (logandc2 (+ (hash-table-count var-locs) 7) 7)
-                   :initial-element 0
-                   :element-type 'bit)
-       *byte-buffer*))
+    (if live
+        (write-packed-bit-vector (compute-live-vars live node block var-locs vop)
+                                 byte-buffer)
+        (write-packed-bit-vector
+         (make-array (logandc2 (+ (hash-table-count var-locs) 7) 7)
+                     :initial-element 0
+                     :element-type 'bit)
+         byte-buffer))
 
-  (write-var-string (or (and (typep node 'combination)
-                             (combination-step-info node))
-                        "")
-                    *byte-buffer*)
+    (write-var-string (or (and (typep node 'combination)
+                               (combination-step-info node))
+                          "")
+                      byte-buffer))
   (values))
 
 ;;; Extract context info from a Location-Info structure and use it to
@@ -194,17 +195,18 @@
                    (or (eq (car succ) tail)
                        (not (eq (block-physenv (car succ)) physenv))))
               ()
-              succ)))
+              succ))
+         (byte-buffer *byte-buffer*))
     (vector-push-extend
      (dpb (length valid-succ) compiled-debug-block-nsucc-byte 0)
-     *byte-buffer*)
+     byte-buffer)
     (let ((base (block-number
                  (node-block
                   (lambda-bind (physenv-lambda physenv))))))
       (dolist (b valid-succ)
         (write-var-integer
          (the index (- (block-number b) base))
-         *byte-buffer*))))
+         byte-buffer))))
   (values))
 
 ;;; Return a vector and an integer (or null) suitable for use as the
@@ -216,12 +218,13 @@
 ;;;    locations (if any.)
 (defun compute-debug-blocks (fun var-locs)
   (declare (type clambda fun) (type hash-table var-locs))
-  (setf (fill-pointer *byte-buffer*) 0)
   (let ((*previous-location* 0)
         (tlf-num (find-tlf-number fun))
         (physenv (lambda-physenv fun))
         (prev-locs nil)
-        (prev-block nil))
+        (prev-block nil)
+        (byte-buffer *byte-buffer*))
+    (setf (fill-pointer byte-buffer) 0)
     (collect ((elsewhere))
       (do-physenv-ir2-blocks (2block physenv)
         (let ((block (ir2-block-block 2block)))
@@ -241,12 +244,14 @@
       (dump-block-locations prev-block prev-locs tlf-num var-locs)
 
       (when (elsewhere)
-        (vector-push-extend compiled-debug-block-elsewhere-p *byte-buffer*)
-        (write-var-integer (length (elsewhere)) *byte-buffer*)
+        (vector-push-extend compiled-debug-block-elsewhere-p byte-buffer)
+        (write-var-integer (length (elsewhere)) byte-buffer)
         (dolist (loc (elsewhere))
           (dump-location-from-info loc tlf-num var-locs))))
 
-    (values (copy-seq *byte-buffer*) tlf-num)))
+    (values (!make-specialized-array (length byte-buffer) '(unsigned-byte 8)
+                                     byte-buffer)
+            tlf-num)))
 
 ;;; Return DEBUG-SOURCE structure containing information derived from
 ;;; INFO.
@@ -273,13 +278,12 @@
 
 ;;; Given an arbitrary sequence, coerce it to an unsigned vector if
 ;;; possible. Ordinarily we coerce it to the smallest specialized
-;;; vector we can. However, we also have a special hack for
-;;; cross-compiling at bootstrap time, when arbitrarily-specialized
-;;; vectors aren't fully supported: in that case, we coerce it only to
-;;; a vector whose element size is an integer multiple of output byte
-;;; size.
+;;; vector we can.
+;;; During cross-compilation the in-memory representation is opaque -
+;;; we don't care how it looks, but can recover the intended specialization.
+
 (defun coerce-to-smallest-eltype (seq)
-  (let ((maxoid 0))
+  (let ((maxoid 0) (length 0))
     (flet ((frob (x)
              (if (typep x 'unsigned-byte)
                  (when (>= x maxoid)
@@ -288,33 +292,18 @@
                    (coerce seq 'simple-vector)))))
       (if (listp seq)
           (dolist (i seq)
+            (incf length) ; so not to traverse again to compute it
             (frob i))
-          (dovector (i seq)
+          (dovector (i seq (setq length (length seq)))
             (frob i)))
       (let ((specializer `(unsigned-byte
                            ,(etypecase maxoid
                               ((unsigned-byte 8) 8)
                               ((unsigned-byte 16) 16)
                               ((unsigned-byte 32) 32)))))
-        ;; cross-compilers beware! It would be possible for the
-        ;; upgraded-array-element-type of (UNSIGNED-BYTE 16) to be
-        ;; (SIGNED-BYTE 17) or (UNSIGNED-BYTE 23), and this is
-        ;; completely valid by ANSI.  However, the cross-compiler
-        ;; doesn't know how to dump (in practice) anything but the
-        ;; above three specialized array types, so make it break here
-        ;; if this is violated.
-        #+sb-xc-host
-        (aver
-         ;; not SB!XC:UPGRADED-ARRAY-ELEMENT-TYPE, because we are
-         ;; worried about whether the host's implementation of arrays.
-         (let ((uaet (upgraded-array-element-type specializer)))
-           (dolist (et '((unsigned-byte 8)
-                         (unsigned-byte 16)
-                         (unsigned-byte 32))
-                    nil)
-             (when (and (subtypep et uaet) (subtypep uaet et))
-               (return t)))))
-        (coerce seq `(simple-array ,specializer (*)))))))
+        ;; formerly (coerce seq `(simple-array ,specializer (*)))
+        ;; plus a kludge for cross-compilation. This is nicer.
+        (!make-specialized-array length specializer seq)))))
 
 ;;;; variables
 

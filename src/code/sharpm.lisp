@@ -9,7 +9,7 @@
 
 (in-package "SB!IMPL")
 
-(declaim (special *read-suppress* *standard-readtable* *bq-vector-flag*))
+(declaim (special *read-suppress*))
 
 ;;; FIXME: Is it standard to ignore numeric args instead of raising errors?
 (defun ignore-numarg (sub-char numarg)
@@ -19,13 +19,12 @@
 ;;;; reading arrays and vectors: the #(, #*, and #A readmacros
 
 (defun sharp-left-paren (stream ignore length)
-  (declare (ignore ignore) (special *backquote-count*))
+  (declare (ignore ignore))
   (let* ((list (read-list stream nil))
-         (list-length (handler-case (length list)
-                        (type-error ()
-                          (simple-reader-error stream
-                                               "Improper list in #(): ~S."
-                                               list)))))
+         (list-length
+          (handler-case (length list)
+            (type-error ()
+              (simple-reader-error stream "Improper list in #(): ~S." list)))))
     (declare (list list)
              (fixnum list-length))
     (cond (*read-suppress* nil)
@@ -34,59 +33,55 @@
             stream
             "Vector longer than the specified length: #~S~S."
             length list))
-          ((zerop *backquote-count*)
-           (if length
-               (fill (replace (make-array length) list)
-                     (car (last list))
-                     :start list-length)
-               (coerce list 'vector)))
+          (length
+           ;; the syntax `#n(foo ,@bar) is not well-defined. [See lp#1096043.]
+           ;; We take it to mean that the vector as read should be padded to
+           ;; length 'n'. It could be argued that 'n' is the length after
+           ;; expansion, but that's not easy, not to mention unportable.
+           (fill (replace (make-array length) list)
+                 (car (last list)) :start list-length))
           (t
-           (cons *bq-vector-flag*
-                 (if length
-                     (append list
-                             (make-list (- length list-length)
-                                        :initial-element (car (last list))))
-                     list))))))
+           (coerce list 'vector)))))
 
 (defun sharp-star (stream ignore numarg)
   (declare (ignore ignore))
-  (multiple-value-bind (bstring escape-appearedp) (read-extended-token stream)
-    (declare (simple-string bstring))
+  (declare (type (or null fixnum) numarg))
+  (binding* (((buffer escape-appearedp) (read-extended-token stream))
+             (input-len (token-buf-fill-ptr buffer))
+             (bstring (token-buf-string buffer)))
     (cond (*read-suppress* nil)
           (escape-appearedp
            (simple-reader-error stream
                                 "An escape character appeared after #*."))
-          ((and numarg (zerop (length bstring)) (not (zerop numarg)))
+          ((and numarg (zerop input-len) (not (zerop numarg)))
            (simple-reader-error
             stream
             "You have to give a little bit for non-zero #* bit-vectors."))
-          ((or (null numarg) (>= (the fixnum numarg) (length bstring)))
-           (let* ((len1 (length bstring))
-                  (last1 (1- len1))
-                  (len2 (or numarg len1))
-                  (bvec (make-array len2 :element-type 'bit
-                                    :initial-element 0)))
-             (declare (fixnum len1 last1 len2))
-             (do ((i 0 (1+ i))
-                  (char ()))
-                 ((= i len2))
-               (declare (fixnum i))
-               (setq char (elt bstring (if (< i len1) i last1)))
+          ((or (null numarg) (>= numarg input-len))
+           (do ((bvec
+                 (make-array (or numarg input-len)
+                             :element-type 'bit
+                             :initial-element
+                             (if (and (plusp input-len)
+                                      (char= (char bstring (1- input-len)) #\1))
+                                 1 0)))
+                (i 0 (1+ i)))
+               ((= i input-len) bvec)
+             (declare (index i) (optimize (sb!c::insert-array-bounds-checks 0)))
+             (let ((char (char bstring i)))
                (setf (elt bvec i)
-                     (cond ((char= char #\0) 0)
-                           ((char= char #\1) 1)
-                           (t
-                            (simple-reader-error
-                             stream
-                             "illegal element given for bit-vector: ~S"
-                             char)))))
-             bvec))
+                     (case char
+                       (#\0 0)
+                       (#\1 1)
+                       (t (simple-reader-error
+                           stream "illegal element given for bit-vector: ~S"
+                           char)))))))
           (t
            (simple-reader-error
             stream
             "Bit vector is longer than specified length #~A*~A"
             numarg
-            bstring)))))
+            (copy-token-buf-string buffer))))))
 
 (defun sharp-A (stream ignore dimensions)
   (declare (ignore ignore))
@@ -97,10 +92,10 @@
     (simple-reader-error stream "No dimensions argument to #A."))
   (collect ((dims))
     (let* ((*bq-error*
-            (if (zerop *backquote-count*)
+            (if (zerop *backquote-depth*)
                 *bq-error*
                 "Comma inside a backquoted array (not a list or general vector.)"))
-           (*backquote-count* 0)
+           (*backquote-depth* 0)
            (contents (read stream t nil t))
            (seq contents))
       (dotimes (axis dimensions
@@ -128,12 +123,11 @@
     (read stream t nil t)
     (return-from sharp-S nil))
   (let* ((*bq-error*
-          (if (zerop *backquote-count*)
+          (if (zerop *backquote-depth*)
               *bq-error*
               "Comma inside backquoted structure (not a list or general vector.)"))
-         (*backquote-count* 0)
          (body (if (char= (read-char stream t) #\( )
-                  (let ((*backquote-count* 0))
+                  (let ((*backquote-depth* 0))
                     (read-list stream nil))
                   (simple-reader-error stream "non-list following #S"))))
     (unless (listp body)
@@ -221,6 +215,11 @@
         ((not (<= 2 radix 36))
          (simple-reader-error stream "illegal radix for #R: ~D." radix))
         (t
+         ;; FIXME: (read-from-string "#o#x1f") should not work!
+         ;; The token should be comprised strictly of digits in the radix,
+         ;; though the docs say this is undefined behavior, so it's ok,
+         ;; other than it being something we should complain about
+         ;; for portability reasons.
          (let ((res (let ((*read-base* radix))
                       (read stream t nil t))))
            (unless (typep res 'rational)
@@ -276,13 +275,7 @@
                     (let* ((old (%instance-ref tree i))
                            (new (circle-subst old-new-alist old)))
                       (unless (eq old new)
-                        (setf (%instance-ref tree i) new))))
-                  (do ((i 0 (1+ i)))
-                      ((= i n-untagged))
-                    (let* ((old (%raw-instance-ref/word tree i))
-                           (new (circle-subst old-new-alist old)))
-                      (unless (= old new)
-                        (setf (%raw-instance-ref/word tree i) new))))))
+                        (setf (%instance-ref tree i) new))))))
                ((typep tree 'funcallable-instance)
                 (do ((i 1 (1+ i))
                      (end (- (1+ (get-closure-length tree)) sb!vm:funcallable-instance-info-offset)))
@@ -355,6 +348,7 @@
 
 (flet ((guts (stream not-p)
          (unless (if (let ((*package* *keyword-package*)
+                           (*reader-package* nil)
                            (*read-suppress* nil))
                        (featurep (read stream t nil t)))
                      (not not-p)
@@ -381,16 +375,16 @@
 
 (defun sharp-backslash (stream backslash numarg)
   (ignore-numarg backslash numarg)
-  (let ((charstring (read-extended-token-escaped stream)))
-    (declare (simple-string charstring))
+  (let ((buf (read-extended-token-escaped stream)))
     (cond (*read-suppress* nil)
-          ((= (the fixnum (length charstring)) 1)
-           (char charstring 0))
-          ((name-char charstring))
+          ((= (token-buf-fill-ptr buf) 1)
+           (char (token-buf-string buf) 0))
+          ;; NAME-CHAR is specified as case-insensitive
+          ((name-char (sized-token-buf-string buf)))
           (t
            (simple-reader-error stream
                                 "unrecognized character name: ~S"
-                                charstring)))))
+                                (copy-token-buf-string buf))))))
 
 (defun sharp-vertical-bar (stream sub-char numarg)
   (ignore-numarg sub-char numarg)
@@ -439,17 +433,44 @@
   ;; The fourth arg tells READ that this is a recursive call.
   `(function ,(read stream t nil t)))
 
+;;; Read an uninterned symbol.
+;;; Unescaped whitespace terminates the token, however a token comprised
+;;; of zero characters is an edge-case that is not extremely portable other
+;;; than for a few well-known uses, such as the incontrovertible fact that
+;;; "#* foo" is two tokens: an empty bit-vector followed by a symbol.
+;;; But different behaviors can be observed for #: in other implementations:
+;;;  (read-from-string "#:  foo") => #:FOO
+;;;  (read-from-string "#:  foo") => ERROR "token expected"
 (defun sharp-colon (stream sub-char numarg)
   (ignore-numarg sub-char numarg)
-  (multiple-value-bind (token escapep colon) (read-extended-token stream)
-    (declare (simple-string token) (ignore escapep))
-    (cond
-     (*read-suppress* nil)
-     (colon
-      (simple-reader-error
-       stream "The symbol following #: contains a package marker: ~S" token))
-     (t
-      (make-symbol token)))))
+  (multiple-value-bind (buffer escapep colon) (read-extended-token stream)
+    (unless *read-suppress*
+      (casify-read-buffer buffer)
+      (let ((token (copy-token-buf-string buffer)))
+        (cond (colon
+               (simple-reader-error
+                stream "The symbol following #: contains a package marker: ~S"
+                token))
+              ;; We'd like to signal errors on tokens that look like numbers,
+              ;; but doing that is actually nontrivial. None of the possible
+              ;; ways to test for numeric syntax are great:
+              ;; - using SYMBOL-QUOTEP to see if it says that the symbol would
+              ;;   print using escapes could produce false positives
+              ;;   because it's seldom wrong to use vertical bars.
+              ;; - calling READ-FROM-STRING to see if it returns a number
+              ;;   would demand a new string stream.
+              ;; - a potential number with _ and/or ^ should not be allowed.
+              ;; An acceptable rough cut is to use PARSE-INTEGER even though it
+              ;; won't help to reject ratios or floating point syntax.
+              ((and (not escapep)
+                    (multiple-value-bind (num end)
+                        (parse-integer token :radix *read-base* :junk-allowed t)
+                      (and num (= end (length token)))))
+               (simple-reader-error
+                stream "The symbol following #: has numeric syntax: ~S"
+                token))
+              (t
+               (make-symbol token)))))))
 
 (defvar *read-eval* t
   #!+sb-doc
@@ -457,11 +478,12 @@
 
 (defun sharp-dot (stream sub-char numarg)
   (ignore-numarg sub-char numarg)
-  (let ((token (read stream t nil t)))
-    (unless *read-suppress*
-      (unless *read-eval*
-        (simple-reader-error stream "can't read #. while *READ-EVAL* is NIL"))
-      (eval token))))
+  (let ((*backquote-depth* 0))
+    (let ((expr (read stream t nil t)))
+      (unless *read-suppress*
+        (unless *read-eval*
+          (simple-reader-error stream "can't read #. while *READ-EVAL* is NIL"))
+        (eval expr)))))
 
 (defun sharp-illegal (stream sub-char ignore)
   (declare (ignore ignore))
@@ -476,27 +498,22 @@
   (set-dispatch-macro-character #\# #\* #'sharp-star)
   (set-dispatch-macro-character #\# #\: #'sharp-colon)
   (set-dispatch-macro-character #\# #\. #'sharp-dot)
-  (set-dispatch-macro-character #\# #\R #'sharp-R)
+  ;; This used to set the dispatch-function for pairs of alphabetics, but
+  ;; {SET,GET}-DISPATCH-MACRO-CHARACTER and READ-DISPATCH-CHAR
+  ;; all use CHAR-UPCASE on the sub-char, so it makes no difference.
   (set-dispatch-macro-character #\# #\r #'sharp-R)
-  (set-dispatch-macro-character #\# #\B #'sharp-B)
   (set-dispatch-macro-character #\# #\b #'sharp-B)
-  (set-dispatch-macro-character #\# #\O #'sharp-O)
   (set-dispatch-macro-character #\# #\o #'sharp-O)
-  (set-dispatch-macro-character #\# #\X #'sharp-X)
   (set-dispatch-macro-character #\# #\x #'sharp-X)
-  (set-dispatch-macro-character #\# #\A #'sharp-A)
   (set-dispatch-macro-character #\# #\a #'sharp-A)
-  (set-dispatch-macro-character #\# #\S #'sharp-S)
   (set-dispatch-macro-character #\# #\s #'sharp-S)
   (set-dispatch-macro-character #\# #\= #'sharp-equal)
   (set-dispatch-macro-character #\# #\# #'sharp-sharp)
   (set-dispatch-macro-character #\# #\+ #'sharp-plus)
   (set-dispatch-macro-character #\# #\- #'sharp-minus)
-  (set-dispatch-macro-character #\# #\C #'sharp-C)
   (set-dispatch-macro-character #\# #\c #'sharp-C)
   (set-dispatch-macro-character #\# #\| #'sharp-vertical-bar)
   (set-dispatch-macro-character #\# #\p #'sharp-P)
-  (set-dispatch-macro-character #\# #\P #'sharp-P)
   (set-dispatch-macro-character #\# #\) #'sharp-illegal)
   (set-dispatch-macro-character #\# #\< #'sharp-illegal)
   (set-dispatch-macro-character #\# #\Space #'sharp-illegal)

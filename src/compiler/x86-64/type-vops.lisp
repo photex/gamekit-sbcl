@@ -18,74 +18,108 @@
 (defun move-qword-to-eax (value)
   (if (and (sc-is value any-reg descriptor-reg)
            (< (tn-offset value) r8-offset))
-      (move eax-tn (make-dword-tn value))
+      (move eax-tn (reg-in-size value :dword))
       (move rax-tn value)))
 
 (defun generate-fixnum-test (value)
-  "zero flag set if VALUE is fixnum"
+  #!+sb-doc
+  "Set the Z flag if VALUE is fixnum"
   (inst test
         (cond ((sc-is value any-reg descriptor-reg)
-               (make-byte-tn value))
+               (reg-in-size value :byte))
+              ;; This is hooey. None of the type-vops presently allow
+              ;; control-stack as a storage class.
               ((sc-is value control-stack)
                (make-ea :byte :base rbp-tn
                         :disp (frame-byte-offset (tn-offset value))))
               (t
                value))
-        sb!vm::fixnum-tag-mask))
+        fixnum-tag-mask))
 
 (defun %test-fixnum (value target not-p)
   (generate-fixnum-test value)
   (inst jmp (if not-p :nz :z) target))
 
+;;; General FIXME: it's fine that we wire these to use rAX which has
+;;; the shortest encoding, but for goodness sake can we pass the TN
+;;; from the VOP like every other backend does? Freely referencing the
+;;; permanent globals RAX-TN,EAX-TN,AL-TN is a bad way to go about it.
+
+(defun %lea-for-lowtag-test (target value lowtag)
+  (inst lea target (make-ea :dword :base value :disp (- lowtag))))
+
+;; Numerics including fixnum, excluding short-float. (INTEGER,RATIONAL)
 (defun %test-fixnum-and-headers (value target not-p headers)
   (let ((drop-through (gen-label)))
-    (generate-fixnum-test value)
-    (inst jmp :z (if not-p drop-through target))
-    (%test-headers value target not-p nil headers drop-through)))
+    (case n-fixnum-tag-bits
+     (1 (%lea-for-lowtag-test eax-tn value other-pointer-lowtag)
+        (inst test al-tn 1)
+        (inst jmp :nz (if not-p drop-through target)) ; inverted
+        (%test-headers value target not-p nil headers
+                       :drop-through drop-through :compute-eax nil))
+     (t
+      (generate-fixnum-test value)
+      (inst jmp :z (if not-p drop-through target))
+      (%test-headers value target not-p nil headers
+                     :drop-through drop-through)))))
 
+;; I can see no reason this would ever be used.
+;; (or fixnum character|unbound-marker) is implausible.
 (defun %test-fixnum-and-immediate (value target not-p immediate)
   (let ((drop-through (gen-label)))
     (generate-fixnum-test value)
     (inst jmp :z (if not-p drop-through target))
     (%test-immediate value target not-p immediate drop-through)))
 
+;; Numerics
 (defun %test-fixnum-immediate-and-headers (value target not-p immediate
                                            headers)
   (let ((drop-through (gen-label)))
-    (generate-fixnum-test value)
-    (inst jmp :z (if not-p drop-through target))
-    (%test-immediate-and-headers value target not-p immediate headers
-                                 drop-through)))
+    (case n-fixnum-tag-bits
+     (1 (%lea-for-lowtag-test eax-tn value other-pointer-lowtag)
+        (inst test al-tn 1)
+        (inst jmp :nz (if not-p drop-through target)) ; inverted
+        (inst cmp al-tn (- immediate other-pointer-lowtag))
+        (inst jmp :e (if not-p drop-through target))
+        (%test-headers value target not-p nil headers
+                       :drop-through drop-through :compute-eax nil))
+     (t (generate-fixnum-test value)
+        (inst jmp :z (if not-p drop-through target))
+        (%test-immediate-and-headers value target not-p immediate headers
+                                     drop-through)))))
 
 (defun %test-immediate (value target not-p immediate
                         &optional (drop-through (gen-label)))
   ;; Code a single instruction byte test if possible.
   (cond ((sc-is value any-reg descriptor-reg)
-         (inst cmp (make-byte-tn value) immediate))
+         (inst cmp (reg-in-size value :byte) immediate))
         (t
          (move rax-tn value)
          (inst cmp al-tn immediate)))
   (inst jmp (if not-p :ne :e) target)
   (emit-label drop-through))
 
+;; Numerics including short-float, excluding fixnum
 (defun %test-immediate-and-headers (value target not-p immediate headers
                                     &optional (drop-through (gen-label)))
   ;; Code a single instruction byte test if possible.
   (cond ((sc-is value any-reg descriptor-reg)
-         (inst cmp (make-byte-tn value) immediate))
+         (inst cmp (reg-in-size value :byte) immediate))
         (t
          (move rax-tn value)
          (inst cmp al-tn immediate)))
   (inst jmp :e (if not-p drop-through target))
-  (%test-headers value target not-p nil headers drop-through))
+  (%test-headers value target not-p nil headers :drop-through drop-through))
 
 (defun %test-lowtag (value target not-p lowtag)
-  (inst lea eax-tn (make-ea :dword :base value :disp (- lowtag)))
+  (%lea-for-lowtag-test eax-tn value lowtag)
   (inst test al-tn lowtag-mask)
   (inst jmp (if not-p :nz :z) target))
 
 (defun %test-headers (value target not-p function-p headers
-                            &optional (drop-through (gen-label)))
+                      &key except
+                           (drop-through (gen-label))
+                           (compute-eax t))
   (let ((lowtag (if function-p fun-pointer-lowtag other-pointer-lowtag)))
     (multiple-value-bind (equal less-or-equal greater-or-equal when-true
                                 when-false)
@@ -96,7 +130,13 @@
         (if not-p
             (values :ne :a :b drop-through target)
             (values :e :na :nb target drop-through))
-      (%test-lowtag value when-false t lowtag)
+      (when compute-eax
+        (%lea-for-lowtag-test eax-tn value lowtag))
+      (inst test al-tn lowtag-mask)
+      (inst jmp :nz when-false)
+      ;; FIXME: this backend seems to be missing the special logic for
+      ;;        testing exactly two widetags differing only in a single bit,
+      ;;        which through evolution is almost totally unworkable anyway...
       (do ((remaining headers (cdr remaining))
            ;; It is preferable (smaller and faster code) to directly
            ;; compare the value in memory instead of loading it into
@@ -104,9 +144,10 @@
            ;; WIDETAG-TN accordingly. If impossible, generate the
            ;; register load.
            ;; Compared to x86 we additionally optimize the cases of a
-           ;; range starting with BIGNUM-WIDETAG or ending with
-           ;; COMPLEX-ARRAY-WIDETAG.
+           ;; range starting with BIGNUM-WIDETAG (= min widetag)
+           ;; or ending with COMPLEX-ARRAY-WIDETAG (= max widetag)
            (widetag-tn (if (and (null (cdr headers))
+                                (not except)
                                 (or (atom (car headers))
                                     (= (caar headers) bignum-widetag)
                                     (= (cdar headers) complex-array-widetag)))
@@ -116,6 +157,10 @@
                                                        :disp (- lowtag)))
                              al-tn))))
           ((null remaining))
+        (dolist (widetag except) ; only after loading widetag-tn
+          (inst cmp al-tn widetag)
+          (inst jmp :e when-false))
+        (setq except nil)
         (let ((header (car remaining))
               (last (null (cdr remaining))))
           (cond
@@ -229,7 +274,7 @@
   (:args (value :scs (signed-reg)))
   (:info)
   (:conditional :z)
-  (:temporary (:sc unsigned-reg :offset eax-offset) eax)
+  (:temporary (:sc unsigned-reg) temp)
   (:arg-types signed-num)
   (:translate fixnump)
   (:generator 5
@@ -237,9 +282,9 @@
     ;;    a <= x <= a + 2^n - 1
     ;; is equivalent to unsigned
     ;;    ((x-a) >> n) = 0
-    (inst mov rax-tn #.(- sb!xc:most-negative-fixnum))
-    (inst add rax-tn value)
-    (inst shr rax-tn n-fixnum-bits)))
+    (inst mov temp #.(- sb!xc:most-negative-fixnum))
+    (inst add temp value)
+    (inst shr temp n-fixnum-bits)))
 
 #+#.(cl:if (cl:= sb!vm:n-fixnum-tag-bits 1) '(:and) '(:or))
 (define-vop (fixnump/signed-byte-64 simple-type-predicate)
@@ -264,18 +309,31 @@
         (if not-p
             (values not-target target)
             (values target not-target))
-      (move-qword-to-eax value)
-      (inst test al-tn fixnum-tag-mask)
-      (inst jmp :e yep)
-
-      (inst and al-tn lowtag-mask)
-      (inst cmp al-tn other-pointer-lowtag)
+      #.(case n-fixnum-tag-bits
+          (1 '(progn
+               (%lea-for-lowtag-test eax-tn value other-pointer-lowtag)
+               (inst test al-tn fixnum-tag-mask) ; 0th bit = 1 => fixnum
+               (inst jmp :nz yep)
+               (inst test al-tn lowtag-mask)))
+          (t '(progn
+               (move-qword-to-eax value)
+               (inst test al-tn fixnum-tag-mask)
+               (inst jmp :e yep)
+               (inst and al-tn lowtag-mask)
+               (inst cmp al-tn other-pointer-lowtag))))
       (inst jmp :ne nope)
       (inst cmp (make-ea-for-object-slot value 0 other-pointer-lowtag)
             (+ (ash 1 n-widetag-bits) bignum-widetag))
       (inst jmp (if not-p :ne :e) target))
     NOT-TARGET))
 
+;; FIXME: this vop is never emitted. I suspect that is because whenever
+;; we have something which needs to be asserted as (SIGNED-BYTE 64) and
+;; then moved to a signed-reg, the signed-byte-64-p vop is used and then
+;; move-to-word. We apparently never want to both assert the type and
+;; keep it as a tagged object. Anyway if it ever were emitted before,
+;; GENERATE-ERROR-CODE would have failed since OBJECT-NOT-SIGNED-BYTE-64
+;; did not have an error number.
 (define-vop (check-signed-byte-64 check-type)
   (:generator 45
     (let ((nope (generate-error-code vop
@@ -481,6 +539,17 @@
       (inst jmp :e error)
       (test-type value error t (list-pointer-lowtag))
       (move result value))))
+
+;; A vop that accepts a computed set of widetags.
+(define-vop (%other-pointer-subtype-p type-predicate)
+  (:translate %other-pointer-subtype-p)
+  (:info target not-p widetags)
+  (:arg-types * (:constant t)) ; voodoo - 'target' and 'not-p' are absent
+  (:generator 15 ; arbitrary
+    (multiple-value-bind (headers exceptions)
+        (canonicalize-headers-and-exceptions widetags)
+      (%test-headers value target not-p nil headers
+                     :except exceptions))))
 
 #!+sb-simd-pack
 (progn

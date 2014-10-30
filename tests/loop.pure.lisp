@@ -181,8 +181,8 @@
   (assert (= (loop for v fixnum being each hash-key in ht sum v) 8))
   (assert (= (loop for v fixnum being each hash-value in ht sum v) 18))
   #+#.(cl:if (cl:eq sb-ext:*evaluator-mode* :compile) '(and) '(or))
-  (assert (raises-error? (loop for v float being each hash-value in ht sum v)
-                         type-error)))
+  (assert-error (loop for v float being each hash-value in ht sum v)
+                type-error))
 
 ;; arithmetic indexes can be NIL or symbols.
 (assert (equal (loop for nil from 0 to 2 collect nil)
@@ -285,3 +285,126 @@
                                     collect (char-code c)))))
          (consts (ctu:find-code-constants fun :type '(or symbol list))))
     (assert (or (null consts) (equal 'character consts)))))
+
+(with-test (:name :type-of-nilled-vars)
+  (assert (equal (loop for (a b) float = '(1.0 2.0)
+                       return (list a b))
+                 '(1.0 2.0)))
+  (assert (equal (loop for (a nil b) float = '(1.0 3.0 2.0)
+                       return (list a b))
+                 '(1.0 2.0))))
+
+(with-test (:name :misplaced-diclarations)
+  (assert-no-signal
+   (compile nil `(lambda ()
+                   (loop with (a) = '(1.0)
+                         and (nil f)
+                         return (list a f))))
+   warning))
+
+(with-test (:name :duplicate-bindings)
+  (assert-error
+   (funcall (compile nil `(lambda ()
+                            (loop with (a b) = '(1.0 2.0)
+                                  and (c a) = '(3.0 4.0)
+                                  return (list a b c))))))
+  (assert-error
+   (funcall (compile nil `(lambda ()
+                            (loop with a = 10
+                                  with ((a) b) = '((1.0) 2.0)
+                                  return (list a b))))))
+  (assert-error
+   (funcall (compile nil `(lambda ()
+                            (loop with (b) = '(10)
+                                  with (a) = '(3)
+                                  for b to 10
+                                  collect a)))))
+  (assert-error
+   (funcall (compile nil `(lambda ()
+                            (loop with (a) = '(3)
+                                  for b to 10
+                                  collect a into b))))))
+
+(with-test (:name :multiple-maximize)
+  (assert-no-signal
+   (compile nil `(lambda ()
+                   (loop for x to 10 maximize x minimize x)))
+   warning)
+  (assert-no-signal
+   (compile nil `(lambda ()
+                   (loop for x to 10 minimize x minimize x)))
+   warning)
+  (assert-no-signal
+   (compile nil `(lambda ()
+                   (loop for x to 10 minimize x into z minimize x into z finally (return z))))
+   warning))
+
+(with-test (:name :destructuring-less)
+  (assert (equal (loop with (a b) = '() repeat 1 collect (list a b))
+                 '((NIL NIL)))))
+
+(with-test (:name :count-with-sum)
+  (assert (= (loop repeat 1 count 1 sum #c(1 2))
+             #c(2 2)))
+  (assert (= (loop repeat 1 sum 1 count 1)
+             2)))
+
+(with-test (:name :iterate-over-complex)
+  (assert
+   (equal
+    (loop for c from #c(0 1) repeat 5 collect c)
+    '(#C(0 1) #C(1 1) #C(2 1) #C(3 1) #C(4 1)))))
+
+(with-test (:name :side-effecting-start-form)
+  (assert (equal (let ((n 0))
+                   (loop for x from (incf n) to (+ n 5) collect x))
+                 '(1 2 3 4 5 6))))
+
+(with-test (:name :summing-complex)
+  (assert (equal (loop for i from 1 to 4
+                       sum (complex i (1+ i)) of-type complex)
+                 #c(10 14))))
+
+(with-test (:name :negative-repeat)
+  (assert (zerop (let ((z 0))
+                   (loop repeat 0 do (incf z))
+                   z)))
+  (assert (zerop (let ((z 0))
+                   (loop repeat -1.5 do (incf z))
+                   z)))
+  (assert (zerop (let ((z 0))
+                   (loop repeat -1.5 do (incf z))
+                   z)))
+  (assert (zerop (let ((z 0))
+                   (loop repeat -1000000 do (incf z))
+                   z))))
+
+(with-test (:name :of-type-character)
+  (assert (null (loop with a t return a)))
+  #+sb-unicode
+  (assert (typep (loop with a of-type extended-char return a) 'extended-char))
+  (assert (typep (loop with a of-type character return a) 'character))
+  (assert (typep (loop with a of-type base-char return a) 'base-char))
+  (assert (typep (loop with a of-type standard-char return a) 'standard-char)))
+
+(with-test (:name :empty-type)
+  (assert-signal
+   (compile nil `(lambda ()
+                   (loop with a of-type (and fixnum string) return a)))
+   warning)
+  (assert-signal
+   (compile nil `(lambda ()
+                   (loop for i to 10 sum i of-type (and fixnum string))))
+   warning))
+
+(with-test (:name :loop-repeat-const)
+  ;; without explicit constant-folding in LOOP-DO-REPEAT, the type of this loop's
+  ;; counter is INTEGER which unfortunately resulted in generic math throughout,
+  ;; since a FOR/THEN clause interacts badly with type inference.
+  ;; [if there is no FOR/THEN, the compiler understands the code better,
+  ;; and is able to infer a lower bound on decrementing from (+ 1 5)]
+  (assert-no-signal
+   (compile nil '(lambda ()
+                   (declare (optimize speed))
+                   (loop repeat (+ 1 5) for baz = 'this then 'that
+                         do (print baz))))))

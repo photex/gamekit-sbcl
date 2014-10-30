@@ -17,7 +17,7 @@
   ;; we can save a couple of instructions and a branch on the ppc.
   :mask fixnum-tag-mask)
 
-(!define-type-vops functionp check-fun function object-not-fun-error
+(!define-type-vops functionp check-fun function object-not-function-error
   (fun-pointer-lowtag)
   :mask lowtag-mask)
 
@@ -88,6 +88,18 @@
                   *specialized-array-element-type-properties*))))
   (define-simple-array-type-vops))
 
+(macrolet
+    ((def ()
+       `(!define-type-vops simple-rank-1-array-*-p check-simple-rank-1-array-*
+         nil
+         ;; TODO: eliminate naming of errors. The error-emitting logic can find
+         ;; an error number from a type specifier. As impetus to remove them,
+         ;; I'm not adding a new exported symbol to sb-kernel.
+         sb!kernel::object-not-simple-rank-1-array-error
+         ,(map 'list #'saetp-typecode
+               *specialized-array-element-type-properties*))))
+  (def)) ; simple-rank-1-array-*-p
+
 (!define-type-vops characterp check-character character
     object-not-character-error
   (character-widetag))
@@ -109,6 +121,11 @@
 
 (!define-type-vops fdefn-p nil nil nil
   (fdefn-widetag))
+
+(!define-type-vops closurep nil nil nil (closure-header-widetag))
+
+(!define-type-vops simple-fun-p nil nil nil
+  (simple-fun-header-widetag))
 
 (!define-type-vops funcallable-instance-p nil nil nil
   (funcallable-instance-header-widetag))

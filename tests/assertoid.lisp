@@ -14,7 +14,9 @@
 
 (cl:defpackage "ASSERTOID"
   (:use "CL")
-  (:export "GRAB-CONDITION" "RAISES-ERROR?" "IS" "ASSERTOID"))
+  (:export "GRAB-CONDITION" "ASSERT-ERROR"
+           "HAS-ERROR?" "IS" "ASSERTOID"
+           "ASSERT-SIGNAL" "ASSERT-NO-SIGNAL"))
 
 (cl:in-package "ASSERTOID")
 
@@ -22,8 +24,27 @@
   `(nth-value 1
      (ignore-errors ,@body)))
 
-(defmacro raises-error? (form &optional (error-subtype-spec 'error))
+(defmacro has-error? (form &optional (error-subtype-spec 'error))
   `(typep (nth-value 1 (ignore-errors ,form)) ',error-subtype-spec))
+
+(defmacro assert-error (form &optional (error-subtype-spec 'error))
+  `(assert (typep (nth-value 1 (ignore-errors ,form)) ',error-subtype-spec)))
+
+(defmacro assert-signal (form &optional (signal-type 'condition))
+  (let ((signal (gensym)))
+    `(let (,signal)
+       (handler-bind ((,signal-type (lambda (c)
+                                      (setf ,signal c))))
+         ,form)
+       (assert ,signal))))
+
+(defmacro assert-no-signal (form &optional (signal-type 'condition))
+  (let ((signal (gensym)))
+    `(let (,signal)
+       (handler-bind ((,signal-type (lambda (c)
+                                      (setf ,signal c))))
+         ,form)
+       (assert (not ,signal)))))
 
 ;;; EXPR is an expression to evaluate (both with EVAL and with
 ;;; COMPILE/FUNCALL). EXTRA-OPTIMIZATIONS is a list of lists of

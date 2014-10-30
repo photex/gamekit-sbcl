@@ -102,27 +102,6 @@
   (with-available-buffers-lock ()
     (push buffer *available-buffers*)))
 
-;;; This is a separate buffer management function, as it wants to be
-;;; clever about locking -- grabbing the lock just once.
-(defun release-fd-stream-buffers (fd-stream)
-  (let ((ibuf (fd-stream-ibuf fd-stream))
-        (obuf (fd-stream-obuf fd-stream))
-        (queue (loop for item in (fd-stream-output-queue fd-stream)
-                       when (buffer-p item)
-                       collect (reset-buffer item))))
-    (when ibuf
-      (push (reset-buffer ibuf) queue))
-    (when obuf
-      (push (reset-buffer obuf) queue))
-    ;; ...so, anything found?
-    (when queue
-      ;; detach from stream
-      (setf (fd-stream-ibuf fd-stream) nil
-            (fd-stream-obuf fd-stream) nil
-            (fd-stream-output-queue fd-stream) nil)
-      ;; splice to *available-buffers*
-      (with-available-buffers-lock ()
-        (setf *available-buffers* (nconc queue *available-buffers*))))))
 
 ;;;; the FD-STREAM structure
 
@@ -192,6 +171,28 @@
   (declare (type stream stream))
   (print-unreadable-object (fd-stream stream :type t :identity t)
     (format stream "for ~S" (fd-stream-name fd-stream))))
+
+;;; This is a separate buffer management function, as it wants to be
+;;; clever about locking -- grabbing the lock just once.
+(defun release-fd-stream-buffers (fd-stream)
+  (let ((ibuf (fd-stream-ibuf fd-stream))
+        (obuf (fd-stream-obuf fd-stream))
+        (queue (loop for item in (fd-stream-output-queue fd-stream)
+                       when (buffer-p item)
+                       collect (reset-buffer item))))
+    (when ibuf
+      (push (reset-buffer ibuf) queue))
+    (when obuf
+      (push (reset-buffer obuf) queue))
+    ;; ...so, anything found?
+    (when queue
+      ;; detach from stream
+      (setf (fd-stream-ibuf fd-stream) nil
+            (fd-stream-obuf fd-stream) nil
+            (fd-stream-output-queue fd-stream) nil)
+      ;; splice to *available-buffers*
+      (with-available-buffers-lock ()
+        (setf *available-buffers* (nconc queue *available-buffers*))))))
 
 ;;;; CORE OUTPUT FUNCTIONS
 
@@ -1629,7 +1630,7 @@
                         for byte of-type character = (aref string i)
                         for bits = (char-code byte)
                         sum (setf (aref char-length i)
-                                  (the index ,out-size-expr)))
+                                  (the index ,out-size-expr)) of-type index)
                      (let* ((byte (code-char 0))
                             (bits (char-code byte)))
                        (declare (ignorable byte bits))
@@ -1869,8 +1870,7 @@
         ;; FD that appears open.
         (sb!unix:unix-close (fd-stream-fd fd-stream))
         (set-closed-flame fd-stream)
-        (when (fboundp 'cancel-finalization)
-          (cancel-finalization fd-stream)))
+        (cancel-finalization fd-stream))
     ;; On error unwind from WITHOUT-INTERRUPTS.
     (serious-condition (e)
       (error e)))
@@ -2225,12 +2225,12 @@
         ((not (or input output))
          (error "File descriptor must be opened either for input or output.")))
   (let ((stream (%make-fd-stream :fd fd
-                                 :fd-type (progn
-                                            #!-win32 (sb!unix:fd-type fd)
-                                            ;; KLUDGE.
-                                            #!+win32 (if serve-events
-                                                         :unknown
-                                                         :regular))
+                                 :fd-type
+                                 #!-win32 (sb!unix:fd-type fd)
+                                 ;; KLUDGE.
+                                 #!+win32 (if serve-events
+                                              :unknown
+                                              :regular)
                                  :name name
                                  :file file
                                  :original original
@@ -2246,7 +2246,7 @@
                                      nil))))
     (set-fd-stream-routines stream element-type external-format
                             input output input-buffer-p)
-    (when (and auto-close (fboundp 'finalize))
+    (when auto-close
       (finalize stream
                 (lambda ()
                   (sb!unix:unix-close fd)
@@ -2261,16 +2261,6 @@
 (defun pick-backup-name (name)
   (declare (type simple-string name))
   (concatenate 'simple-string name ".bak"))
-
-;;; Ensure that the given arg is one of the given list of valid
-;;; things. Allow the user to fix any problems.
-(defun ensure-one-of (item list what)
-  (unless (member item list)
-    (error 'simple-type-error
-           :datum item
-           :expected-type `(member ,@list)
-           :format-control "~@<~S is ~_invalid for ~S; ~_need one of~{ ~S~}~:>"
-           :format-arguments (list item what list))))
 
 ;;; Rename NAMESTRING to ORIGINAL. First, check whether we have write
 ;;; access, since we don't want to trash unwritable files even if we
@@ -2340,11 +2330,6 @@
                        (if (eq (pathname-version pathname) :newest)
                            :new-version
                            :error)))
-               (ensure-one-of if-exists
-                              '(:error :new-version :rename
-                                :rename-and-delete :overwrite
-                                :append :supersede nil)
-                              :if-exists)
                (case if-exists
                  ((:new-version :error nil)
                   (setf mask (logior mask sb!unix:o_excl)))
@@ -2367,10 +2352,12 @@
                        nil)
                       (t
                        :create))))
-        (ensure-one-of if-does-not-exist
-                       '(:error :create nil)
-                       :if-does-not-exist)
-        (cond ((eq if-does-not-exist :create)
+        (cond ((and if-exists-given
+                    truename
+                    (eq if-exists :new-version))
+               (open-error "OPEN :IF-EXISTS :NEW-VERSION is not supported ~
+                            when a new version must be created."))
+              ((eq if-does-not-exist :create)
                (setf mask (logior mask sb!unix:o_creat)))
               ((not (member if-exists '(:error nil))))
               ;; Both if-does-not-exist and if-exists now imply
@@ -2504,6 +2491,9 @@
 ;;; This is called when the cold load is first started up, and may also
 ;;; be called in an attempt to recover from nested errors.
 (defun stream-cold-init-or-reset ()
+  ;; FIXME: on gencgc the 4 standard fd-streams {stdin,stdout,stderr,tty}
+  ;; and these synonym streams are baked into +pseudo-static-generation+.
+  ;; Is that inadvertent?
   (stream-reinit)
   (setf *terminal-io* (make-synonym-stream '*tty*))
   (setf *standard-output* (make-synonym-stream '*stdout*))
@@ -2545,33 +2535,64 @@
     (multiple-value-bind (in out err)
         #!-win32 (values 0 1 2)
         #!+win32 (sb!win32::get-std-handles)
-      (flet ((stdio-stream (handle name inputp outputp)
-               (make-fd-stream
-                handle
-                :name name
-                :input inputp
-                :output outputp
-                :buffering :line
-                :element-type :default
-                :serve-events inputp
-                :external-format (stdstream-external-format handle outputp))))
-        (setf *stdin*  (stdio-stream in  "standard input"    t nil))
-        (setf *stdout* (stdio-stream out "standard output" nil   t))
-        (setf *stderr* (stdio-stream err "standard error"  nil   t))))
+      (labels (#!+win32
+               (nul-stream (name inputp outputp)
+                 (let* ((nul-name #.(coerce "NUL" 'simple-base-string))
+                        (nul-handle
+                          (cond
+                            ((and inputp outputp)
+                             (sb!win32:unixlike-open nul-name sb!unix:o_rdwr 0))
+                            (inputp
+                             (sb!win32:unixlike-open nul-name sb!unix:o_rdonly 0))
+                            (outputp
+                             (sb!win32:unixlike-open nul-name sb!unix:o_wronly 0))
+                            (t
+                             ;; Not quite sure what to do in this case.
+                             nil))))
+                   (make-fd-stream
+                    nul-handle
+                    :name name
+                    :input inputp
+                    :output outputp
+                    :buffering :line
+                    :element-type :default
+                    :serve-events inputp
+                    :auto-close t
+                    :external-format (stdstream-external-format nul-handle outputp))))
+               (stdio-stream (handle name inputp outputp)
+                 (cond
+                   #!+win32
+                   ((null handle)
+                    ;; If no actual handle was present, create a stream to NUL
+                    (nul-stream name inputp outputp))
+                   (t
+                    (make-fd-stream
+                     handle
+                     :name name
+                     :input inputp
+                     :output outputp
+                     :buffering :line
+                     :element-type :default
+                     :serve-events inputp
+                     :external-format (stdstream-external-format handle outputp))))))
+        (setf *stdin*  (stdio-stream in  "standard input"  t   nil)
+              *stdout* (stdio-stream out "standard output" nil t)
+              *stderr* (stdio-stream err "standard error"  nil t))))
     #!+win32
     (setf *tty* (make-two-way-stream *stdin* *stdout*))
     #!-win32
+    ;; FIXME: what is this call to COERCE doing? XC can't dump non-base-strings.
     (let* ((ttyname #.(coerce "/dev/tty" 'simple-base-string))
            (tty (sb!unix:unix-open ttyname sb!unix:o_rdwr #o666)))
-      (if tty
-          (setf *tty*
+      (setf *tty*
+            (if tty
                 (make-fd-stream tty :name "the terminal"
-                                :input t :output t :buffering :line
-                                :external-format (stdstream-external-format
-                                                  tty t)
-                                :serve-events (or #!-win32 t)
-                                :auto-close t))
-          (setf *tty* (make-two-way-stream *stdin* *stdout*))))
+                                    :input t :output t :buffering :line
+                                    :external-format (stdstream-external-format
+                                                      tty t)
+                                    :serve-events t
+                                    :auto-close t)
+                (make-two-way-stream *stdin* *stdout*))))
     (princ (get-output-stream-string *error-output*) *stderr*))
   (values))
 
@@ -2596,3 +2617,42 @@
              t)
             (t
              (fd-stream-pathname stream)))))
+
+;; Placing this definition (formerly in "toplevel") after the important
+;; stream types are known produces smaller+faster code than it did before.
+(defun stream-output-stream (stream)
+  (typecase stream
+    (fd-stream
+     stream)
+    (synonym-stream
+     (stream-output-stream
+      (symbol-value (synonym-stream-symbol stream))))
+    (two-way-stream
+     (stream-output-stream
+      (two-way-stream-output-stream stream)))
+    (t
+     stream)))
+
+;; Using (get-std-handle-or-null +std-error-handle+) instead of the file
+;; descriptor might make this work on win32, but I don't know.
+#!-win32
+(macrolet ((stderr () 2))
+ (!defglobal !*cold-stderr-buf* " ")
+ (defun !make-cold-stderr-stream ()
+   (%make-fd-stream
+    :out (lambda (stream ch)
+           (declare (ignore stream))
+           (let ((b (truly-the (simple-base-string 1) !*cold-stderr-buf*)))
+             (setf (char b 0) ch)
+             (sb!unix:unix-write (stderr) b 0 1)))
+    :sout (lambda (stream string start end)
+            (declare (ignore stream))
+            (flet ((out (s start len)
+                     (sb!unix:unix-write (stderr) s start len)))
+              (if (typep string 'simple-base-string)
+                  (out string start (- end start))
+                  (let ((n (- end start)))
+                    ;; will croak if there is any non-BASE-CHAR in the string
+                    (out (replace (make-array n :element-type 'base-char)
+                                  string :start2 start) 0 n)))))
+    :misc (constantly nil))))

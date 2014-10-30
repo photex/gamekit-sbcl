@@ -31,7 +31,8 @@
     (when (special-operator-p name)
       (error "The special operator ~S can't be redefined as a macro."
              name))
-    (with-unique-names (whole environment)
+    (let ((whole (make-symbol ".WHOLE."))
+          (environment (make-symbol ".ENVIRONMENT.")))
       (multiple-value-bind (new-body local-decs doc)
           (parse-defmacro lambda-list whole body name 'defmacro
                           :environment environment)
@@ -45,10 +46,18 @@
                      ;; vice versa.
                      #-sb-xc-host named-lambda #-sb-xc-host (defmacro ,name)
                      (,whole ,environment)
+                      ,@(sb!c:macro-policy-decls t)
                       ,@local-decs
                       ,new-body))
               (debug-name (sb!c::debug-name 'macro-function name)))
           `(progn
+             #-sb-xc-host
+             ;; Getting  this to cross-compile with the check enabled
+             ;; would require %COMPILER-DEFMACRO to be defined earlier,
+             ;; but symmetry suggests it be near %COMPILER-DEFUN,
+             ;; which isn't soon enough. So leave it out.
+             (eval-when (:compile-toplevel)
+               (sb!c::%compiler-defmacro :macro-function ',name t))
              (eval-when (:compile-toplevel :load-toplevel :execute)
                (sb!c::%defmacro ',name #',def ',lambda-list ,doc ',debug-name
                                 (sb!c:source-location)))))))))
@@ -58,6 +67,7 @@
        `(eval-when (,@times)
           (defun sb!c::%defmacro (name definition lambda-list doc debug-name
                                   source-location)
+            (declare (ignorable source-location)) ; xc-host doesn't use
             ;; old note (ca. 1985, maybe:-): "Eventually %%DEFMACRO
             ;; should deal with clearing old compiler information for
             ;; the functional value."
@@ -82,7 +92,7 @@
                   ;; being incompatibly redefined. Doing this right
                   ;; will involve finding the old macro lambda-list
                   ;; and comparing it with the new one.
-                  (warn 'sb!kernel::redefinition-with-defmacro
+                  (warn 'redefinition-with-defmacro
                         :name name
                         :new-function definition
                         :new-location source-location))

@@ -105,6 +105,7 @@
     (write-sequence data in)
     (let ((process (sb-ext:run-program "/bin/cat" '() :wait t :output out :input in))
           (buf (make-array (length data))))
+      (declare (ignore process))
       (assert (= 13 (read-sequence buf out)))
       (assert (= 0 (read-sequence (make-array 8) out)))
       (assert (equalp buf data)))))
@@ -160,53 +161,47 @@
 ;;; buffering of stdin and stdout depends on their TTYness, and ed isn't sufficiently
 ;;; agressive about flushing them. So, here's another test using :PTY.
 
-#-win32 (progn ;; kludge: It would be nicer to disable individual test cases,
-               ;; but we are not using WITH-TEST yet here.
+#-win32
+(with-test (:name :is-/bin/ed-installed?)
+  (assert (probe-file "/bin/ed")))
 
-(defparameter *tmpfile* "run-program-ed-test.tmp")
+#-win32
+(progn
+  (defparameter *tmpfile* "run-program-ed-test.tmp")
 
-(with-open-file (f *tmpfile*
-                   :direction :output
-                   :if-exists :supersede)
-  (write-line "bar" f))
-
-(defparameter *ed*
-  (run-program "/bin/ed" (list *tmpfile*) :wait nil :pty t))
-
-(defparameter *ed-pipe* (make-two-way-stream (process-pty *ed*) (process-pty *ed*)))
-(defparameter *ed-in* (make-synonym-stream '*ed-pipe*))
-(defparameter *ed-out* (make-synonym-stream '*ed-pipe*))
-
-(defun read-linish (stream)
-  (with-output-to-string (s)
-    (loop for c = (read-char stream)
-          while (and c (not (eq #\newline c)))
-             ;; Some eds like to send \r\n
-          do (unless (eq #\return c)
-               (write-char c s)))))
-
-(defun assert-ed (command response)
-  (when command
-    (write-line command *ed-in*)
-    (force-output *ed-in*))
-  (when response
-    (let ((got (read-linish *ed-out*)))
-      (unless (equal response got)
-        (error "wanted '~A' from ed, got '~A'" response got))))
-  *ed*)
-
-(unwind-protect
-     (with-test (:name :run-program-ed)
-       (assert-ed nil "4")
-       (assert-ed ".s/bar/baz/g" nil)
-       (assert-ed "w" "4")
-       (assert-ed "q" nil)
-       (process-wait *ed*)
-       (with-open-file (f *tmpfile*)
-         (assert (equal "baz" (read-line f)))))
-  (delete-file *tmpfile*))
-
-) ;; #-win32
+  (with-test (:name :run-program-/bin/ed)
+    (with-open-file (f *tmpfile*
+                       :direction :output
+                       :if-exists :supersede)
+      (write-line "bar" f))
+    (unwind-protect
+         (let* ((ed (run-program "/bin/ed" (list *tmpfile*) :wait nil :pty t))
+                (ed-in (process-pty ed))
+                (ed-out (process-pty ed)))
+           (labels ((read-linish (stream)
+                      (with-output-to-string (s)
+                        (loop for c = (read-char stream)
+                              while (and c (not (eq #\newline c)))
+                              ;; Some eds like to send \r\n
+                              do (unless (eq #\return c)
+                                   (write-char c s)))))
+                    (assert-ed (command response)
+                      (when command
+                        (write-line command ed-in)
+                        (force-output ed-in))
+                      (when response
+                        (let ((got (read-linish ed-out)))
+                          (unless (equal response got)
+                            (error "wanted '~A' from ed, got '~A'" response got))))
+                      ed))
+             (assert-ed nil "4")
+             (assert-ed ".s/bar/baz/g" nil)
+             (assert-ed "w" "4")
+             (assert-ed "q" nil)
+             (process-wait ed)
+             (with-open-file (f *tmpfile*)
+               (assert (equal "baz" (read-line f))))))
+      (delete-file *tmpfile*)))) ;; #-win32
 
 ;; Around 1.0.12 there was a regression when :INPUT or :OUTPUT was a
 ;; pathname designator.  Since these use the same code, it should
@@ -239,14 +234,17 @@
 
 (with-test (:name (:run-program :pty-stream) :fails-on :win32)
   (assert (equal "OK"
-                 (subseq
-                  (with-output-to-string (s)
-                    (assert (= 42 (process-exit-code
-                                   (run-program "/bin/sh" '("-c" "echo OK; exit 42") :wait t
-                                                :pty s))))
-                    s)
-                  0
-                  2))))
+                 (handler-case
+                  (with-timeout 1
+                    (subseq
+                     (with-output-to-string (s)
+                       (assert (= 42 (process-exit-code
+                                      (run-program "/bin/sh" '("-c" "echo OK; exit 42") :wait t
+                                                                                        :pty s))))
+                       s)
+                     0
+                     2))
+                  (timeout () "timeout")))))
 
 ;; Check whether RUN-PROGRAM puts its child process into the foreground
 ;; when stdin is inherited. If it fails to do so we will receive a SIGTTIN.
@@ -338,3 +336,11 @@
     (assert
      (equal directory
             (string-right-trim '(#\Return) (read-line out))))))
+
+(with-test (:name (:run-program :directory-nil))
+  (sb-ext:run-program #-win32 "/bin/sh"
+                      #-win32 '("-c" "pwd")
+                      #+win32 "cmd.exe"
+                      #+win32 '("/c" "cd")
+                      :directory nil
+                      :search t))

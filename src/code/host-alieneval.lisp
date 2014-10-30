@@ -346,7 +346,13 @@
   (alignment nil :type (or null unsigned-byte)))
 (def!method print-object ((type alien-type) stream)
   (print-unreadable-object (type stream :type t)
-    (prin1 (unparse-alien-type type) stream)))
+    ;; Kludge to avoid printing #'(SIGNED 64) instead of (FUNCTION (SIGNED 64))
+    ;; for a 0-argument function. This is only a problem with alien types
+    ;; because ordinary FUNCTION type specifiers are 3-lists.
+    (let ((sb!pretty:*pprint-quote-with-syntactic-sugar* nil))
+      ;; forward-reference of this special variable unfortunately
+      (declare (special sb!pretty:*pprint-quote-with-syntactic-sugar*))
+      (prin1 (unparse-alien-type type) stream))))
 
 ;;;; the SAP type
 
@@ -1115,6 +1121,7 @@
                      (alien-record-field-type field2))))
 
 (defvar *alien-type-matches* nil
+  #!+sb-doc
   "A hashtable used to detect cycles while comparing record types.")
 
 (define-alien-type-method (record :type=) (type1 type2)

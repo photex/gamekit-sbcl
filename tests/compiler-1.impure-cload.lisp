@@ -111,10 +111,10 @@
   (declare (type (vector cons) x))
   (when (consp (aref x 0))
     (aref x 0)))
-(assert (raises-error?
-         (array-element-type-handling
-          (make-array 3 :element-type t :initial-element 0))
-         type-error))
+(assert-error
+ (array-element-type-handling
+  (make-array 3 :element-type t :initial-element 0))
+ type-error)
 
 ;;; bug 220: type check inserted after all arguments in MV-CALL caused
 ;;; failure of stack analysis
@@ -186,7 +186,7 @@
 (defun bug231a-1 (x)
   (declare (optimize safety) (type (integer 0 8) x))
   (incf x))
-(assert (raises-error? (bug231a-1 8) type-error))
+(assert-error (bug231a-1 8) type-error)
 
 (defun bug231a-2 (x)
   (declare (optimize safety) (type (integer 0 8) x))
@@ -195,7 +195,7 @@
 (destructuring-bind (set get) (bug231a-2 0)
   (funcall set 8)
   (assert (eql (funcall get) 8))
-  (assert (raises-error? (funcall set 9) type-error))
+  (assert-error (funcall set 9) type-error)
   (assert (eql (funcall get) 8)))
 
 (defun bug231b (x z)
@@ -204,9 +204,9 @@
       (declare (type (real 1) x))
     (setq x z))
   (list x z))
-(assert (raises-error? (bug231b nil 1) type-error))
-(assert (raises-error? (bug231b 0 1.5) type-error))
-(assert (raises-error? (bug231b 0 0) type-error))
+(assert-error (bug231b nil 1) type-error)
+(assert-error (bug231b 0 1.5) type-error)
+(assert-error (bug231b 0 0) type-error)
 
 ;;; A bug appeared in flaky7_branch. Python got lost in unconverting
 ;;; embedded tail calls during let-conversion.
@@ -238,3 +238,54 @@
   (find-class 'some-structure nil))
 (eval-when (:load-toplevel)
   (assert (typep (find-class 'some-structure) 'class)))
+
+;; When loading from fasl, if a form in that file tried referencing
+;; compiled-debug-info for a function provided earlier in that same file,
+;; it wouldn't work because the earlier function's #<code> component is
+;; present but without its debug-info-source, which is dumped later.
+(defun f1 (x) (+ x 3))
+;; There's nothing to assert other than that this works.
+(print (multiple-value-list (function-lambda-expression #'f1)))
+
+;; It's possible for an instance to refer to a LAYOUT that has no classoid.
+;; This can arise from one file compiling a defstruct and another file compiling
+;; a function that refers to an instance of it as a literal either from
+;; LOAD-TIME-VALUE or MAKE-LOAD-FORM. Then you restart lisp and load the second
+;; but not the first file.  A function to recreate the instance was correctly
+;; dumped, but everything including the disassembler would crash trying to view
+;; the resultant object.
+
+(eval-when (:compile-toplevel)
+  (declaim (inline make-my-awesome-struct))
+  (defstruct (my-awesome-struct (:predicate nil) (:copier nil)) a b c)
+  (defmethod make-load-form ((self my-awesome-struct) &optional env)
+    (declare (ignore env))
+    ;; Can't use MAKE-LOAD-FORM-SAVING-SLOTS
+    ;; because that goes (ALLOCATE-INSTANCE (FIND-CLASS 'MY-AWESOME-STRUCT).
+    ;; Our named constructor is inlined and doesn't need the class.
+    (with-slots (a b c) self `(make-my-awesome-struct :a ',a :b ',b :c ',c)))
+  (defvar *my-awesome-instance*
+    (make-my-awesome-struct :a 1 :b '(foo . #*101) :c #(4 5 3))))
+
+(defun trythis (x)
+  ;; use a macro to return the object itself, not the symbol naming it.
+  (macrolet ((it () *my-awesome-instance*))
+    (list x (it))))
+
+(defun get-foo-val (x) (my-awesome-struct-b x))
+
+;; This approximates the test case - no class's proper name is MY-AWESOME-STRUCT.
+;; The old metaobjects are detritus in the object hierarchy but don't affect
+;; corectness of the test.
+(eval-when (:compile-toplevel)
+  (dolist (sym '("MY-AWESOME-STRUCT" "MY-AWESOME-STRUCT-A"
+                 "MY-AWESOME-STRUCT-B" "MY-AWESOME-STRUCT-C"))
+    (unintern (find-symbol sym))))
+
+(assert (not (find-class 'my-awesome-struct nil)))
+
+(let ((x (trythis 9))
+      (*print-pretty* nil))
+  (format t "~&Hi! ~S~%" x)
+  (assert (search "UNPRINTABLE" (write-to-string x)))
+  (assert (equal (get-foo-val (second x)) '(foo . #*101))))

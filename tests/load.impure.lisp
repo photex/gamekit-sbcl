@@ -275,21 +275,12 @@
 
 (with-test (:name :bug-332)
   (flet ((stimulate-sbcl ()
-           (let ((filename
-                  (format nil "~A/~A.lisp"
-                          (or (posix-getenv "TEST_DIRECTORY")
-                              (posix-getenv "TMPDIR")
-                              "/tmp")
-                          (gensym))))
-             (ensure-directories-exist filename)
-             ;; create a file which redefines a structure incompatibly
-             (with-open-file (f filename :direction :output :if-exists :supersede)
-               (print '(defstruct bug-332 foo) f)
-               (print '(defstruct bug-332 foo bar) f))
-             ;; compile and load the file, then invoke the continue restart on
-             ;; the structure redefinition error
-             (handler-bind ((error (lambda (c) (continue c))))
-               (load (compile-file filename))))))
+           ;; compile and load the file, then invoke the continue restart on
+           ;; the structure redefinition error
+           (handler-bind ((error (lambda (c) (continue c))))
+             (let ((fasl (compile-file "bug-332.lisp")))
+               (load fasl)
+               (ignore-errors (delete-file fasl))))))
     (stimulate-sbcl)
     (stimulate-sbcl)
     (stimulate-sbcl)))
@@ -313,7 +304,14 @@
 (with-test (:name (load :empty.fasl))
   (assert (not (load-empty-file "fasl"))))
 
-(with-test (:name :parallel-fasl-load)
+;; There is a concurrency bug in ALLOCATE-CODE-OBJECT leading to deadlock.
+;; Some changes to the compiler caused it to more often compile a TLF into
+;; a callable lamda - as contrasted with a sequence of operations performed
+;; entirely by the fasl interpreter - which exacerbated the problem.
+;; A meager attempt at a fix of mutex-guarding ALLOCATE-CODE-OBJECT did not
+;; resolve the deadlock, and was not ideal anyway.
+(with-test (:name :parallel-fasl-load
+            :skipped-on :sb-safepoint)
   #+sb-thread
   (let ((lisp #p"parallel-fasl-load-test.lisp")
         (fasl nil)
@@ -416,3 +414,48 @@
                             '(1d0 2d0)))))
       (when tmp-fasl (delete-file tmp-fasl))
       (delete-file *tmp-filename*))))
+
+;; Check that ':load print' on a fasl has some non-null effect
+(with-test (:name :fasloader-print)
+  (with-open-file (stream *tmp-filename*
+                          :direction :output :if-exists :supersede)
+    (dolist (form '((defmacro some-fancy-macro (x) `(car ,x))
+                    (defvar *some-var* () nil)
+                    (deftype my-favorite-type () '(integer -1 8))
+                    (defun fred (x) (- x))
+                    (push (some-fancy-macro '(a . b)) *some-var*)))
+      (write form :stream stream)))
+  (let* ((s (make-string-output-stream))
+         (output (compile-file *tmp-filename*)))
+    (let ((*standard-output* s))
+      (load output :print t))
+    (delete-file output)
+    (assert (string= (get-output-stream-string s)
+";; SOME-FANCY-MACRO
+;; *SOME-VAR*
+;; MY-FAVORITE-TYPE
+;; NIL
+;; FRED
+;; (A)"))
+     (delete-file *tmp-filename*)))
+
+(with-test (:name :load-reader-error)
+  (unwind-protect
+       (block result
+         (with-open-file (f *tmp-filename* :direction :output
+                            :if-does-not-exist :create :if-exists :supersede)
+           (write-string "(defun fool () (nosuchpackage: " f))
+         (handler-bind
+             ((condition
+               (lambda (e)
+                 (if (eql (search "READ error during LOAD:"
+                                  (write-to-string e :escape nil))
+                          0)
+                     (return-from result t)
+                     (error "Unexpectedly erred: ~S" e)))))
+           (load *tmp-filename* :verbose nil)))
+    (delete-file *tmp-filename*))
+  ;; Not really a test of the bugfix, but a reminder that asdf-dependency-grovel
+  ;; uses this internal macro and that we should endeavor not to break the syntax.
+  (macroexpand '(sb-c::do-forms-from-info
+                 ((myform myindex) my-source-info) (something))))

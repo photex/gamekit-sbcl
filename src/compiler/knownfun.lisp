@@ -95,7 +95,10 @@
   ;; should never be converted into a full call).  This is used strictly
   ;; as a consistency checking mechanism inside the compiler during IR2
   ;; transformation.
-  always-translatable)
+  always-translatable
+  ;; If a function is called with two arguments and the first one is a
+  ;; constant, then the arguments will be swapped.
+  commutative)
 
 (defstruct (fun-info #-sb-xc-host (:pure t))
   ;; boolean attributes of this function.
@@ -131,6 +134,27 @@
   ;; If true, the function can stack-allocate the result. The
   ;; COMBINATION node is passed as an argument.
   (stack-allocate-result nil :type (or function null))
+  ;; If true, the function can add flow-sensitive type information
+  ;; about the state of the world after its execution. The COMBINATION
+  ;; node is passed as an argument, along with the current set of
+  ;; active constraints for the block.  The function returns a
+  ;; sequence of constraints; a constraint is a triplet of a
+  ;; constraint kind (a symbol, see (defstruct (constraint ...)) in
+  ;; constraint.lisp) and arguments, either LVARs, LAMBDA-VARs, or
+  ;; CTYPEs.  If any of these arguments is NIL, the constraint is
+  ;; skipped. This simplifies integration with OK-LVAR-LAMBDA-VAR,
+  ;; which maps LVARs to LAMBDA-VARs.  An optional fourth value in
+  ;; each constraint flips the meaning of the constraint if it is
+  ;; non-NIL.
+  (constraint-propagate nil :type (or function null))
+  ;; If true, the function can add flow-sensitive type information
+  ;; depending on the truthiness of its return value.  Returns two
+  ;; values, a LVAR and a CTYPE. The LVAR is of that CTYPE iff the
+  ;; function returns true.
+  ;; It may also return additional third and fourth values. Each is
+  ;; a sequence of constraints (see CONSTRAINT-PROPAGATE), for the
+  ;; consequent and alternative branches, respectively.
+  (constraint-propagate-if nil :type (or function null))
   ;; all the templates that could be used to translate this function
   ;; into IR2, sorted by increasing cost.
   (templates nil :type list)
@@ -170,14 +194,14 @@
   ;; string used in efficiency notes
   (note (missing-arg) :type string)
   ;; T if we should emit a failure note even if SPEED=INHIBIT-WARNINGS.
-  (important nil :type (member t nil)))
+  (important nil :type (member nil :slightly t)))
 
 (defprinter (transform) type note important)
 
 ;;; Grab the FUN-INFO and enter the function, replacing any old
 ;;; one with the same type and note.
 (declaim (ftype (function (t list function &optional (or string null)
-                             (member t nil))
+                             (member nil :slightly t))
                           *)
                 %deftransform))
 (defun %deftransform (name type fun &optional note important)
@@ -190,7 +214,7 @@
                               (eq (transform-important x) important)))
                        (fun-info-transforms info))))
     (cond (old
-           (style-warn 'sb!kernel:redefinition-with-deftransform
+           (style-warn 'redefinition-with-deftransform
                        :transform old)
            (setf (transform-function old) fun
                  (transform-note old) note))
@@ -246,17 +270,24 @@
 ;;; shared, we copy it. We don't have to copy the lists, since each
 ;;; function that has generators or transforms has already been
 ;;; through here.
+;;;
+;;; Note that this operation is somewhat garbage-producing in the current
+;;; globaldb implementation.  Setting a piece of INFO for a name makes
+;;; a shallow copy of the name's info-vector. FUN-INFO-OR-LOSE sounds
+;;; like a data reader, and you might be disinclined to think that it
+;;; copies at all, but:
+;;;   (TIME (LOOP REPEAT 1000 COUNT (FUN-INFO-OR-LOSE '*)))
+;;;   294,160 bytes consed
+;;; whereas just copying the info per se is not half as bad:
+;;;   (LET ((X (INFO :FUNCTION :INFO '*)))
+;;;     (TIME (LOOP REPEAT 1000 COUNT (COPY-FUN-INFO X))))
+;;;   130,992 bytes consed
+;;;
 (declaim (ftype (sfunction (t) fun-info) fun-info-or-lose))
 (defun fun-info-or-lose (name)
-  (let (;; FIXME: Do we need this rebinding here? It's a literal
-        ;; translation of the old CMU CL rebinding to
-        ;; (OR *BACKEND-INFO-ENVIRONMENT* *INFO-ENVIRONMENT*),
-        ;; and it's not obvious whether the rebinding to itself is
-        ;; needed that SBCL doesn't need *BACKEND-INFO-ENVIRONMENT*.
-        (*info-environment* *info-environment*))
     (let ((old (info :function :info name)))
       (unless old (error "~S is not a known function." name))
-      (setf (info :function :info name) (copy-fun-info old)))))
+      (setf (info :function :info name) (copy-fun-info old))))
 
 ;;;; generic type inference methods
 
@@ -308,6 +339,13 @@
 ;;; with the additional restriptions noted in the CLHS for STRING and
 ;;; SIMPLE-STRING, defined to specialize on CHARACTER, and for VECTOR
 ;;; (under the page for MAKE-SEQUENCE).
+;;; At present this is used to derive the output type of CONCATENATE,
+;;; MAKE-SEQUENCE, and MERGE. Two things seem slightly amiss:
+;;; 1. The sequence type actually produced might not be exactly that specified.
+;;;    (TYPE-OF (MAKE-SEQUENCE '(AND (NOT SIMPLE-ARRAY) (VECTOR BIT)) 9))
+;;;    => (SIMPLE-BIT-VECTOR 9)
+;;; 2. Because we *know* that a hairy array won't be produced,
+;;;    why does derivation preserve the non-simpleness, if so specified?
 (defun creation-result-type-specifier-nth-arg (n)
   (lambda (call)
     (declare (type combination call))
@@ -333,15 +371,10 @@
                (if (and (array-type-p ctype)
                         (eq (array-type-specialized-element-type ctype)
                             *wild-type*))
-                   ;; I don't think I'm allowed to modify what I get
-                   ;; back from SPECIFIER-TYPE; it is, after all,
-                   ;; cached.  Better copy it, then.
-                   (let ((real-ctype (copy-structure ctype)))
-                     (setf (array-type-element-type real-ctype)
-                           *universal-type*
-                           (array-type-specialized-element-type real-ctype)
-                           *universal-type*)
-                     real-ctype)
+                   (make-array-type (array-type-dimensions ctype)
+                    :complexp (array-type-complexp ctype)
+                    :element-type *universal-type*
+                    :specialized-element-type *universal-type*)
                    ctype)))))))))
 
 (defun remove-non-constants-and-nils (fun)
@@ -383,5 +416,37 @@
                           (typep value '(vector * 0)))
                 (push (car list) result))))
           (setf indices (cdr indices)))))))
+
+(defun read-elt-type-deriver (skip-arg-p element-type-spec no-hang)
+  (lambda (call)
+    (let* ((element-type (specifier-type element-type-spec))
+           (null-type (specifier-type 'null))
+           (err-args (if skip-arg-p ; for PEEK-CHAR, skip 'peek-type' + 'stream'
+                         (cddr (combination-args call))
+                         (cdr (combination-args call)))) ; else just 'stream'
+           (eof-error-p (first err-args))
+           (eof-value (second err-args))
+           (unexceptional-type ; the normally returned thing
+            (if (and eof-error-p
+                     (types-equal-or-intersect (lvar-type eof-error-p)
+                                               null-type))
+                ;; (READ-elt stream nil <x>) returns (OR (EQL <x>) elt-type)
+                (type-union (if eof-value (lvar-type eof-value) null-type)
+                            element-type)
+                ;; If eof-error is unsupplied, or was but couldn't be nil
+                element-type)))
+      (if no-hang
+          (type-union unexceptional-type null-type)
+          unexceptional-type))))
+
+(defun position-derive-type (call)
+  (declare (type combination call))
+  (let ((seq (second (combination-args call))))
+    ;; Could possibly constrain the result more highly if
+    ;; the :start/:end were provided and of known types.
+    (when (constant-lvar-p seq)
+      (let ((seq (lvar-value seq)))
+        (when (typep seq '(simple-array * (*)))
+          (specifier-type `(or (integer 0 (,(length seq))) null)))))))
 
 (/show0 "knownfun.lisp end of file")

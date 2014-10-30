@@ -110,6 +110,7 @@ format."
 (defconstant +mar-1-1903+ #.(encode-universal-time 0 0 0 1 3 1903 0))
 
 (defun years-since-mar-2000 (utime)
+  #!+sb-doc
   "Returns number of complete years since March 1st 2000, and remainder in seconds"
   (let* ((days-in-year (* 86400 365))
          (days-in-4year (+ (* 4 days-in-year) 86400))
@@ -393,7 +394,7 @@ normally during operations like SLEEP."
 ;;; function, report the times.
 (defun call-with-timing (timer function &rest arguments)
   #!+sb-doc
-  "Calls FUNCTION with ARGUMENTS, and gathers timing infomation about it.
+  "Calls FUNCTION with ARGUMENTS, and gathers timing information about it.
 Then calls TIMER with keyword arguments describing the information collected.
 Calls TIMER even if FUNCTION performs a non-local transfer of control. Finally
 returns values returned by FUNCTION.

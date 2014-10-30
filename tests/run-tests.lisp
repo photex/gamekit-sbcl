@@ -1,7 +1,3 @@
-#+#.(cl:if (cl:find-package "ASDF") '(or) '(and))
-(require :asdf)
-
-#+#.(cl:if (cl:find-package "SB-POSIX") '(or) '(and))
 (handler-bind (#+win32 (warning #'muffle-warning))
   (require :sb-posix))
 
@@ -19,7 +15,7 @@
 (defvar *all-failures* nil)
 (defvar *break-on-error* nil)
 (defvar *report-skipped-tests* nil)
-(defvar *accept-files* nil)
+(defvar *explicit-test-files* nil)
 
 (defun run-all ()
   (dolist (arg (cdr *posix-argv*))
@@ -32,7 +28,8 @@
            (setf *report-skipped-tests* t))
           ((string= arg "--no-color"))
           (t
-           (push (truename (parse-namestring arg)) *accept-files*))))
+           (push (truename (parse-namestring arg)) *explicit-test-files*))))
+  (setf *explicit-test-files* (nreverse *explicit-test-files*))
   (pure-runner (pure-load-files) #'load-test)
   (pure-runner (pure-cload-files) #'cload-test)
   (impure-runner (impure-load-files) #'load-test)
@@ -88,18 +85,18 @@
            (format t "All tests succeeded~%")))))
 
 (defun pure-runner (files test-fun)
-  (format t "// Running pure tests (~a)~%" test-fun)
-  (let ((*package* (find-package :cl-user))
-        (*failures* nil))
-    (setup-cl-user)
-    (dolist (file files)
-      (when (accept-test-file file)
+  (when files
+    (format t "// Running pure tests (~a)~%" test-fun)
+    (let ((*package* (find-package :cl-user))
+          (*failures* nil))
+      (setup-cl-user)
+      (dolist (file files)
         (format t "// Running ~a~%" file)
         (restart-case
             (handler-bind ((error (make-error-handler file)))
               (eval (funcall test-fun file)))
-          (skip-file ()))))
-    (append-failures)))
+          (skip-file ())))
+      (append-failures))))
 
 (defun run-in-child-sbcl (load-forms forms)
   ;; We used to fork() for POSIX platforms, and use this for Windows.
@@ -121,7 +118,14 @@
       :output sb-sys:*stdout*
       :input #-win32 devnull #+win32 sb-sys:*stdin*))))
 
+(defun clear-test-status ()
+  (with-open-file (stream "test-status.lisp-expr"
+                          :direction :output
+                          :if-exists :supersede)
+    (write-line "NIL" stream)))
+
 (defun run-impure-in-child-sbcl (test-file test-code)
+  (clear-test-status)
   (run-in-child-sbcl
     `((load "test-util")
       (load "assertoid")
@@ -157,11 +161,11 @@
         (sb-ext:exit :code 104)))))
 
 (defun impure-runner (files test-fun)
-  (format t "// Running impure tests (~a)~%" test-fun)
-  (let ((*package* (find-package :cl-user)))
-    (setup-cl-user)
-    (dolist (file files)
-      (when (accept-test-file file)
+  (when files
+    (format t "// Running impure tests (~a)~%" test-fun)
+    (let ((*package* (find-package :cl-user)))
+      (setup-cl-user)
+      (dolist (file files)
         (force-output)
         (let ((exit-code (run-impure-in-child-sbcl file
                                                    (funcall test-fun file))))
@@ -200,7 +204,19 @@
   (use-package :assertoid))
 
 (defun load-test (file)
-  `(load ,file))
+  ;; KLUDGE: while it may be the case that all test files should be opened
+  ;; as UTF-8, the 'reader' test file is particularly strange because it
+  ;; contains non-UTF-8 bytes, but the character decoding warning was not
+  ;; an intended test. It was happenstance that makes one think
+  ;;  "great! there _is_ a test for character decoding errors
+  ;;   in the file I would expect to find such a test in"
+  ;; except it isn't. A true test would assert something useful,
+  ;; AND not make scary meta-noise, or at least preface it with
+  ;;  ";; Expect warnings from the following test"
+  `(load ,file
+         ,@(if (search "reader.impure" (namestring file))
+               '(:external-format :latin-1))))
+
 
 (defun cload-test (file)
   `(let ((compile-name (compile-file-pathname ,file)))
@@ -213,6 +229,7 @@
 
 (defun sh-test (file)
   ;; What? No SB-POSIX:EXECV?
+  (clear-test-status)
   `(let ((process (sb-ext:run-program "/bin/sh"
                                       (list (native-namestring ,file))
                                       :output *error-output*)))
@@ -220,22 +237,24 @@
        (test-util:report-test-status))
      (sb-ext:exit :code (process-exit-code process))))
 
-(defun accept-test-file (file)
-  (if *accept-files*
-      (find (truename file) *accept-files* :test #'equalp)
-      t))
+(defun filter-test-files (wild-mask)
+  (if *explicit-test-files*
+      (loop for file in *explicit-test-files*
+            when (pathname-match-p file wild-mask)
+            collect file)
+      (directory wild-mask)))
 
 (defun pure-load-files ()
-  (directory "*.pure.lisp"))
+  (filter-test-files "*.pure.lisp"))
 
 (defun pure-cload-files ()
-  (directory "*.pure-cload.lisp"))
+  (filter-test-files "*.pure-cload.lisp"))
 
 (defun impure-load-files ()
-  (directory "*.impure.lisp"))
+  (filter-test-files "*.impure.lisp"))
 
 (defun impure-cload-files ()
-  (directory "*.impure-cload.lisp"))
+  (filter-test-files "*.impure-cload.lisp"))
 
 (defun sh-files ()
-  (directory "*.test.sh"))
+  (filter-test-files "*.test.sh"))

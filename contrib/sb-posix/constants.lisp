@@ -20,8 +20,8 @@
  #-win32 "netdb.h"
  "errno.h"
  "dirent.h" "signal.h"
- #-win32 "pwd.h"
- #-win32 "grp.h"
+ #-(or win32 android) "pwd.h"
+ #-(or win32 android) "grp.h"
  "unistd.h"
  #-win32 "termios.h"
  #-win32 "syslog.h")
@@ -271,14 +271,15 @@
  (:structure dirent
              (#+(and linux largefile) "struct dirent64"
               #-(and linux largefile) "struct dirent"
-              #-win32 (:ino-t ino "ino_t" "d_ino")
+              #-(or win32 android) (:ino-t ino "ino_t" "d_ino")
+              #+android ((unsigned 64) ino "unsigned long long" "d_ino")
               (:c-string name "char *" "d_name"
                          ;; FIXME: sunos should really have :distrust-length
                          ;; t, but this is currently broken. -- Jim Wise 2010-08-31
                          :distrust-length nil)) t)
 
  ;; password database
- #-win32
+ #-(or android win32)
  (:structure alien-passwd
              ("struct passwd"
               (c-string-pointer name "char *" "pw_name")
@@ -300,7 +301,7 @@
               (:integer fields "int" "pw_fields")))
 
  ;; group database
- #-win32
+ #-(or android win32)
  (:structure alien-group
              ("struct group"
               (c-string-pointer name "char *" "gr_name")
@@ -310,18 +311,31 @@
  (:structure alien-stat
              ("struct stat"
               (mode-t mode "mode_t" "st_mode")
+              #-android
               (ino-t ino "ino_t" "st_ino")
+              #+android
+              ((unsigned 64) ino "unsigned long long" "st_ino")
               ;; Linux/MIPS uses unsigned long instead of dev_t here.
-              #-mips
+              #-(or mips android)
               (dev-t dev "dev_t" "st_dev")
               #+mips
               ((unsigned 32) dev "dev_t" "st_dev")
+              #+android
+              ((unsigned 64) dev "unsigned long long" "st_dev")
               (nlink-t nlink "nlink_t" "st_nlink")
               (uid-t uid "uid_t" "st_uid")
-              #-mips
+              ;; Linux/MIPS uses unsigned long instead of dev_t here.
+              #-(or mips android)
               (dev-t rdev "dev_t" "st_rdev")
+              #+mips
+              ((unsigned 32) rdev "dev_t" "st_rdev")
+              #+android
+              ((unsigned 64) rdev "unsigned long long"  "st_rdev")
               (gid-t gid "gid_t" "st_gid")
+              #-android
               (off-t size "off_t" "st_size")
+              #+android
+              ((signed 64) size "long long" "st_size")
               (time-t atime "time_t" "st_atime")
               (time-t mtime "time_t" "st_mtime")
               (time-t ctime "time_t" "st_ctime")))
@@ -646,6 +660,4 @@
   log-info "LOG_INFO" "Log severity level denoting informational messages." t)
  #-win32
  (:integer
-  log-debug "LOG_DEBUG" "Log severity level denoting debugging information ." t)
-
-)
+  log-debug "LOG_DEBUG" "Log severity level denoting debugging information ." t))

@@ -134,7 +134,7 @@
     (1 `(cons ,(first args) nil))
     (t (values nil t))))
 
-(defoptimizer (list derive-type) ((&rest args) node)
+(defoptimizer (list derive-type) ((&rest args))
   (if args
       (specifier-type 'cons)
       (specifier-type 'null)))
@@ -242,7 +242,7 @@
    (t (values nil t))))
 (define-source-transform get (&rest args)
   (case (length args)
-   (2 `(sb!impl::get2 ,@args))
+   (2 `(sb!impl::get3 ,@args nil))
    (3 `(sb!impl::get3 ,@args))
    (t (values nil t))))
 
@@ -320,9 +320,16 @@
 (deftransform logbitp
     ((index integer) (unsigned-byte (or (signed-byte #.sb!vm:n-word-bits)
                                         (unsigned-byte #.sb!vm:n-word-bits))))
-  `(if (>= index #.sb!vm:n-word-bits)
-       (minusp integer)
-       (not (zerop (logand integer (ash 1 index))))))
+  (flet ((general-case ()
+           `(if (>= index #.sb!vm:n-word-bits)
+                (minusp integer)
+                (not (zerop (logand integer (ash 1 index)))))))
+    (if (constant-lvar-p integer)
+        (let ((val (lvar-value integer)))
+          (cond ((eql val 0) nil)
+                ((eql val -1) t)
+                (t (general-case))))
+        (general-case))))
 
 (define-source-transform byte (size position)
   `(cons ,size ,position))
@@ -2439,6 +2446,7 @@
 
 #+sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
 (defoptimizer (random derive-type) ((bound &optional state))
+  (declare (ignore state))
   (let ((type (lvar-type bound)))
     (when (numeric-type-p type)
       (let ((class (numeric-type-class type))
@@ -2469,6 +2477,7 @@
 
 #-sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
 (defoptimizer (random derive-type) ((bound &optional state))
+  (declare (ignore state))
   (one-arg-derive-type bound #'random-derive-type-aux nil))
 
 ;;;; miscellaneous derive-type methods
@@ -2640,6 +2649,7 @@
       `(%deposit-field ,newbyte ,size ,pos ,int))))
 
 (defoptimizer (%ldb derive-type) ((size posn num))
+  (declare (ignore posn num))
   (let ((size (lvar-type size)))
     (if (and (numeric-type-p size)
              (csubtypep size (specifier-type 'integer)))
@@ -2650,6 +2660,7 @@
         *universal-type*)))
 
 (defoptimizer (%mask-field derive-type) ((size posn num))
+  (declare (ignore num))
   (let ((size (lvar-type size))
         (posn (lvar-type posn)))
     (if (and (numeric-type-p size)
@@ -2696,9 +2707,11 @@
                  `(unsigned-byte* ,raw-bit-count)))))))))
 
 (defoptimizer (%dpb derive-type) ((newbyte size posn int))
+  (declare (ignore newbyte))
   (%deposit-field-derive-type-aux size posn int))
 
 (defoptimizer (%deposit-field derive-type) ((newbyte size posn int))
+  (declare (ignore newbyte))
   (%deposit-field-derive-type-aux size posn int))
 
 (deftransform %ldb ((size posn int)
@@ -2757,6 +2770,7 @@
              (logand int (lognot mask)))))
 
 (defoptimizer (mask-signed-field derive-type) ((size x))
+  (declare (ignore x))
   (let ((size (lvar-type size)))
     (if (numeric-type-p size)
         (let ((size-high (numeric-type-high size)))
@@ -2955,7 +2969,7 @@
                  (setf (block-reoptimize (node-block node)) t)
                  (reoptimize-component (node-component node) :maybe))
                t)
-             (cut-node (node &aux did-something over-wide)
+             (cut-node (node)
                "Try to cut a node to width. The primary return value is
                 whether we managed to cut (cleverly), and the second whether
                 anything was changed.  The third return value tells whether
@@ -2967,9 +2981,13 @@
                   (typecase (ref-leaf node)
                     (constant
                      (let* ((constant-value (constant-value (ref-leaf node)))
-                            (new-value (if signedp
-                                           (mask-signed-field width constant-value)
-                                           (ldb (byte width 0) constant-value))))
+                            (new-value
+                              (cond ((not (integerp constant-value))
+                                     (return-from cut-node (values t nil)))
+                                    (signedp
+                                     (mask-signed-field width constant-value))
+                                    (t
+                                     (ldb (byte width 0) constant-value)))))
                        (cond ((= constant-value new-value)
                               (values t nil)) ; we knew what to do and did nothing
                              (t
@@ -3014,7 +3032,9 @@
                                                  (modular-fun-info-name modular-fun))
                                                 (function
                                                  (funcall modular-fun node width)))
-                                              :exit-if-null))
+                                              :exit-if-null)
+                                        (did-something nil)
+                                        (over-wide nil))
                                (unless (eql modular-fun :good)
                                  (setq did-something t
                                        over-wide t)
@@ -3142,6 +3162,7 @@
               )))))))
 
 (defoptimizer (mask-signed-field optimizer) ((width x) node)
+  (declare (ignore width))
   (let ((result-type (single-value-type (node-derived-type node))))
     (multiple-value-bind (low high)
         (integer-type-numeric-bounds result-type)
@@ -3174,21 +3195,6 @@
                 nil) ; After fixing above, replace with T
               )))))))
 
-;;; miscellanous numeric transforms
-
-;;; If a constant appears as the first arg, swap the args.
-(deftransform commutative-arg-swap ((x y) * * :defun-only t :node node)
-  (if (and (constant-lvar-p x)
-           (not (constant-lvar-p y)))
-      `(,(lvar-fun-name (basic-combination-fun node))
-        (truly-the ,(lvar-type y) y)
-        ,(lvar-value x))
-      (give-up-ir1-transform)))
-
-(dolist (x '(= char= two-arg-char-equal + * logior logand logxor logtest))
-  (%deftransform x '(function * *) #'commutative-arg-swap
-                 "place constant arg last"))
-
 ;;; Handle the case of a constant BOOLE-CODE.
 (deftransform boole ((op x y) * *)
   "convert to inline logical operations"
@@ -3233,13 +3239,36 @@
         `(ash x ,len))))
 
 ;;; These must come before the ones below, so that they are tried
-;;; first. Since %FLOOR and %CEILING are inlined, this allows
-;;; the general case to be handled by TRUNCATE transforms.
-(deftransform floor ((x y))
-  `(%floor x y))
+;;; first.
+(deftransform floor ((number divisor))
+  `(multiple-value-bind (tru rem) (truncate number divisor)
+     (if (and (not (zerop rem))
+              (if (minusp divisor)
+                  (plusp number)
+                  (minusp number)))
+         (values (1- tru) (+ rem divisor))
+         (values tru rem))))
 
-(deftransform ceiling ((x y))
-  `(%ceiling x y))
+(deftransform ceiling ((number divisor))
+  `(multiple-value-bind (tru rem) (truncate number divisor)
+     (if (and (not (zerop rem))
+              (if (minusp divisor)
+                  (minusp number)
+                  (plusp number)))
+         (values (+ tru 1) (- rem divisor))
+         (values tru rem))))
+
+(deftransform rem ((number divisor))
+  `(nth-value 1 (truncate number divisor)))
+
+(deftransform mod ((number divisor))
+  `(let ((rem (rem number divisor)))
+     (if (and (not (zerop rem))
+              (if (minusp divisor)
+                  (plusp number)
+                  (minusp number)))
+         (+ rem divisor)
+         rem)))
 
 ;;; If arg is a constant power of two, turn FLOOR into a shift and
 ;;; mask. If CEILING, add in (1- (ABS Y)), do FLOOR and correct a
@@ -3779,13 +3808,14 @@
   (cond
     ((same-leaf-ref-p x y) t)
     ((not (types-equal-or-intersect (lvar-type x) (lvar-type y)))
-         nil)
+     nil)
     (t (give-up-ir1-transform))))
 
 (macrolet ((def (x)
              `(%deftransform ',x '(function * *) #'simple-equality-transform)))
   (def eq)
-  (def char=))
+  (def char=)
+  (def two-arg-char-equal))
 
 ;;; This is similar to SIMPLE-EQUALITY-TRANSFORM, except that we also
 ;;; try to convert to a type-specific predicate or EQ:
@@ -3807,26 +3837,17 @@
   (let ((x-type (lvar-type x))
         (y-type (lvar-type y))
         (char-type (specifier-type 'character)))
-    (flet ((fixnum-type-p (type)
-             (csubtypep type (specifier-type 'fixnum))))
-      (cond
-        ((same-leaf-ref-p x y) t)
-        ((not (types-equal-or-intersect x-type y-type))
-         nil)
-        ((and (csubtypep x-type char-type)
-              (csubtypep y-type char-type))
-         '(char= x y))
-        ((or (eq-comparable-type-p x-type) (eq-comparable-type-p y-type))
-         (if (and (constant-lvar-p x) (not (constant-lvar-p y)))
-             '(eq y x)
-             '(eq x y)))
-        ((and (not (constant-lvar-p y))
-              (or (constant-lvar-p x)
-                  (and (csubtypep x-type y-type)
-                       (not (csubtypep y-type x-type)))))
-         '(eql y x))
-        (t
-         (give-up-ir1-transform))))))
+    (cond
+      ((same-leaf-ref-p x y) t)
+      ((not (types-equal-or-intersect x-type y-type))
+       nil)
+      ((and (csubtypep x-type char-type)
+            (csubtypep y-type char-type))
+       '(char= x y))
+      ((or (eq-comparable-type-p x-type) (eq-comparable-type-p y-type))
+       '(eq y x))
+      (t
+       (give-up-ir1-transform)))))
 
 ;;; similarly to the EQL transform above, we attempt to constant-fold
 ;;; or convert to a simpler predicate: mostly we have to be careful
@@ -3843,6 +3864,14 @@
                     (csubtypep y-type ctype)))))
       (cond
         ((same-leaf-ref-p x y) t)
+        ((and (constant-lvar-p x)
+              (equal (lvar-value x) ""))
+         `(and (stringp y)
+               (zerop (length y))))
+        ((and (constant-lvar-p y)
+              (equal (lvar-value y) ""))
+         `(and (stringp x)
+               (zerop (length x))))
         ((both-csubtypep 'string)
          '(string= x y))
         ((both-csubtypep 'bit-vector)
@@ -3882,6 +3911,14 @@
                     (csubtypep y-type ctype)))))
       (cond
         ((same-leaf-ref-p x y) t)
+        ((and (constant-lvar-p x)
+              (equal (lvar-value x) ""))
+         `(and (stringp y)
+               (zerop (length y))))
+        ((and (constant-lvar-p y)
+              (equal (lvar-value y) ""))
+         `(and (stringp x)
+               (zerop (length x))))
         ((both-csubtypep 'string)
          '(string-equal x y))
         ((both-csubtypep 'bit-vector)
@@ -4183,25 +4220,31 @@
         (associate-args fun `(,fun ,first-arg ,arg) next identity))))
 
 ;;; Reduce constants in ARGS list.
-(declaim (ftype (sfunction (symbol list t symbol) list) reduce-constants))
-(defun reduce-constants (fun args identity one-arg-result-type)
+(declaim (ftype (sfunction (symbol list symbol) list) reduce-constants))
+(defun reduce-constants (fun args one-arg-result-type)
   (let ((one-arg-constant-p (ecase one-arg-result-type
                               (number #'numberp)
                               (integer #'integerp)))
-        (reduced-value identity)
+        (reduced-value)
         (reduced-p nil))
     (collect ((not-constants))
       (dolist (arg args)
-        (if (funcall one-arg-constant-p arg)
-            (setf reduced-value (funcall fun reduced-value arg)
-                  reduced-p t)
-            (not-constants arg)))
+        (let ((value (if (constantp arg)
+                         (constant-form-value arg)
+                         arg)))
+          (cond ((not (funcall one-arg-constant-p value))
+                 (not-constants arg))
+                (reduced-value
+                 (setf reduced-value (funcall fun reduced-value value)
+                       reduced-p t))
+                (t
+                 (setf reduced-value value)))))
       ;; It is tempting to drop constants reduced to identity here,
       ;; but if X is SNaN in (* X 1), we cannot drop the 1.
       (if (not-constants)
           (if reduced-p
               `(,reduced-value ,@(not-constants))
-              (not-constants))
+              args)
           `(,reduced-value)))))
 
 ;;; Do source transformations for transitive functions such as +.
@@ -4218,8 +4261,9 @@
     (0 identity)
     (1 `(,@one-arg-prefixes (the ,one-arg-result-type ,(first args))))
     (2 (values nil t))
-    (t (let ((reduced-args (reduce-constants fun args identity one-arg-result-type)))
-         (associate-args fun (first reduced-args) (rest reduced-args) identity)))))
+    (t
+     (let ((reduced-args (reduce-constants fun args one-arg-result-type)))
+       (associate-args fun (first reduced-args) (rest reduced-args) identity)))))
 
 (define-source-transform + (&rest args)
   (source-transform-transitive '+ args 0))
@@ -4249,9 +4293,10 @@
   (case (length args)
     ((0 2) (values nil t))
     (1 `(,@one-arg-prefixes (the ,one-arg-result-type ,(first args))))
-    (t (let ((reduced-args
-              (reduce-constants fun* (rest args) identity one-arg-result-type)))
-         (associate-args fun (first args) reduced-args identity)))))
+    (t
+     (let ((reduced-args
+             (reduce-constants fun* (rest args) one-arg-result-type)))
+       (associate-args fun (first args) reduced-args identity)))))
 
 (define-source-transform - (&rest args)
   (source-transform-intransitive '- '+ args 0 '(%negate)))
@@ -4466,6 +4511,7 @@
                  :format-arguments (list nargs fun string max))))))))
 
 (defoptimizer (format optimizer) ((dest control &rest args))
+  (declare (ignore dest))
   (when (constant-lvar-p control)
     (let ((x (lvar-value control)))
       (when (stringp x)
@@ -4719,6 +4765,7 @@
                 *universal-type*)))))))
 
 (defoptimizer (compile derive-type) ((nameoid function))
+  (declare (ignore function))
   (when (csubtypep (lvar-type nameoid)
                    (specifier-type 'null))
     (values-specifier-type '(values function boolean boolean))))
@@ -4831,6 +4878,28 @@
         (locally
           (declare (optimize (speed 2) (space 2) (inhibit-warnings 3)))
           (%sort-vector (or ,key #'identity))))))
+
+(deftransform sort ((list predicate &key key)
+                    (list * &rest t) *)
+  `(sb!impl::stable-sort-list list
+                              (%coerce-callable-to-fun predicate)
+                              (if key (%coerce-callable-to-fun key) #'identity)))
+
+(deftransform stable-sort ((sequence predicate &key key)
+                           ((or vector list) *))
+  (let ((sequence-type (lvar-type sequence)))
+    (cond ((csubtypep sequence-type (specifier-type 'list))
+           `(sb!impl::stable-sort-list sequence
+                                       (%coerce-callable-to-fun predicate)
+                                       (if key (%coerce-callable-to-fun key) #'identity)))
+          ((csubtypep sequence-type (specifier-type 'simple-vector))
+           `(sb!impl::stable-sort-simple-vector sequence
+                                                (%coerce-callable-to-fun predicate)
+                                                (and key (%coerce-callable-to-fun key))))
+          (t
+           `(sb!impl::stable-sort-vector sequence
+                                         (%coerce-callable-to-fun predicate)
+                                         (and key (%coerce-callable-to-fun key)))))))
 
 ;;;; debuggers' little helpers
 
@@ -4864,6 +4933,15 @@
 
 
 ;;;; Transforms for internal compiler utilities
+
+(defknown set-info-value (t type-number t) t)
+
+;; An optimizer to derive that SET-INFO-VALUE always returns NEWVAL's type.
+;; Using `(TRULY-THE (VALUES ,(TYPE-INFO-TYPE ...))) in the compiler-macro
+;; for (SETF INFO) would achieve a similar effect, but this is even better.
+(defoptimizer (set-info-value derive-type) ((name type-number newval))
+  (declare (ignore name type-number))
+  (lvar-type newval))
 
 ;;; If QUALITY-NAME is constant and a valid name, don't bother
 ;;; checking that it's still valid at run-time.

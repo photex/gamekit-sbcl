@@ -91,7 +91,49 @@ clear_pseudo_atomic_interrupted(struct thread *thread)
          : "memory");
 }
 
-#undef LISPOBJ_SUFFIX
+#undef LISPOBJ_ASM_SUFFIX
+
+#elif defined(LISP_FEATURE_ARM)
+static inline int
+get_pseudo_atomic_atomic(struct thread *thread)
+{
+    return SymbolValue(PSEUDO_ATOMIC_ATOMIC, thread) != NIL;
+}
+
+static inline void
+set_pseudo_atomic_atomic(struct thread *thread)
+{
+    SetSymbolValue(PSEUDO_ATOMIC_ATOMIC, PSEUDO_ATOMIC_ATOMIC, thread);
+}
+
+static inline void
+clear_pseudo_atomic_atomic(struct thread *thread)
+{
+    SetSymbolValue(PSEUDO_ATOMIC_ATOMIC, NIL, thread);
+}
+
+static inline int
+get_pseudo_atomic_interrupted(struct thread *thread)
+{
+    return SymbolValue(PSEUDO_ATOMIC_INTERRUPTED, thread) != NIL;
+}
+
+static inline void
+set_pseudo_atomic_interrupted(struct thread *thread)
+{
+    SetSymbolValue(PSEUDO_ATOMIC_INTERRUPTED, MAKE_FIXNUM(0x000f0001), thread);
+}
+
+static inline void
+clear_pseudo_atomic_interrupted(struct thread *thread)
+{
+    SetSymbolValue(PSEUDO_ATOMIC_INTERRUPTED, NIL, 0);
+}
+
+#define set_alloc_pointer(value)                \
+    SetSymbolValue(ALLOCATION_POINTER, value, 0)
+#define get_alloc_pointer()                     \
+    SymbolValue(ALLOCATION_POINTER, 0)
 
 #elif defined(LISP_FEATURE_GENCGC)
 
@@ -140,4 +182,3 @@ clear_pseudo_atomic_interrupted(struct thread *thread)
 #endif
 
 #endif /* PSEUDO_ATOMIC_H */
-

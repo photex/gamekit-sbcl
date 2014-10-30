@@ -26,14 +26,14 @@ set -u
 set -a # export all variables at assignment-time.
 # Note: any script that uses the variables that name files should
 # quote them (with double quotes), to contend with whitespace.
-SBCL_HOME="${TEST_SBCL_HOME:-$SBCL_PWD/../contrib}"
+SBCL_HOME="${TEST_SBCL_HOME:-$SBCL_PWD/../obj/sbcl-home}"
 SBCL_CORE="${TEST_SBCL_CORE:-$SBCL_PWD/../output/sbcl.core}"
 SBCL_RUNTIME="${TEST_SBCL_RUNTIME:-$SBCL_PWD/../src/runtime/sbcl}"
 SBCL_ARGS="${TEST_SBCL_ARGS:---noinform --no-sysinit --no-userinit --noprint --disable-debugger}"
 
 # Scripts that use these variables should quote them.
-TEST_BASENAME="`basename $0`"
-TEST_FILESTEM="$(basename "${TEST_BASENAME}" | sed -e 's/\.sh$//' -e 's/\./-/g')"
+TEST_BASENAME=`basename $0`
+TEST_FILESTEM=`basename "${TEST_BASENAME}" | sed -e 's/\.sh$//' -e 's/\./-/g'`
 : ${TEST_BASEDIR:="$SBCL_PWD"}
 TEST_DIRECTORY="${TEST_BASEDIR}/${TEST_FILESTEM}-$$"
 export TEST_DIRECTORY

@@ -39,17 +39,17 @@
 
 ;;;; Additional accessors and setters for the array header.
 (define-vop (%array-dimension word-index-ref)
-  (:translate sb!kernel:%array-dimension)
+  (:translate %array-dimension)
   (:policy :fast-safe)
   (:variant array-dimensions-offset other-pointer-lowtag))
 
 (define-vop (%set-array-dimension word-index-set)
-  (:translate sb!kernel:%set-array-dimension)
+  (:translate %set-array-dimension)
   (:policy :fast-safe)
   (:variant array-dimensions-offset other-pointer-lowtag))
 
 (define-vop (array-rank-vop)
-  (:translate sb!kernel:%array-rank)
+  (:translate %array-rank)
   (:policy :fast-safe)
   (:args (x :scs (descriptor-reg)))
   (:temporary (:scs (non-descriptor-reg)) temp)
@@ -71,7 +71,7 @@
   (:vop-var vop)
   (:save-p :compute-only)
   (:generator 5
-    (let ((error (generate-error-code vop invalid-array-index-error
+    (let ((error (generate-error-code vop 'invalid-array-index-error
                                       array bound index)))
       (inst cmp index bound)
       (inst b :geu error)
@@ -398,21 +398,6 @@
     (store-long-reg value object offset nil)
     (unless (location= result value)
       (move-long-reg result value))))
-
-
-;;;; Misc. Array VOPs.
-
-
-#+nil
-(define-vop (vector-word-length)
-  (:args (vec :scs (descriptor-reg)))
-  (:results (res :scs (any-reg descriptor-reg)))
-  (:generator 6
-    (loadw res vec clc::g-vector-header-words)
-    (inst niuo res res clc::g-vector-words-mask-16)))
-
-(define-vop (get-vector-subtype get-header-data))
-(define-vop (set-vector-subtype set-header-data))
 
 
 ;;; XXX FIXME: Don't we have these above, in DEF-DATA-VECTOR-FROBS?

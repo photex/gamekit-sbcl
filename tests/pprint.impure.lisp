@@ -13,6 +13,19 @@
 
 (in-package :cl-user)
 
+;;;; Assert that entries inserted into a dispatch table with equal priority
+;;;; are order-preserving - unless they are of the form (CONS (EQL x)).
+;;;; This is not a requirement in general, but is quite reasonable.
+(with-test (:name :pprint-dispatch-order-preserving)
+  (let ((tbl (sb-pretty::make-pprint-dispatch-table)))
+    (handler-bind ((style-warning #'muffle-warning)) ; nonexistent types
+      (set-pprint-dispatch 'foo1 #'pprint-fill 5 tbl)
+      (set-pprint-dispatch 'fool #'pprint-fill 0 tbl)
+      (set-pprint-dispatch 'foo2 #'pprint-fill 5 tbl))
+    (let ((entries (sb-pretty::pprint-dispatch-table-entries tbl)))
+      (assert (equal (mapcar #'sb-pretty::pprint-dispatch-entry-type entries)
+                     '(foo1 foo2 fool))))))
+
 ;;;; tests for former BUG 99, where pretty-printing was pretty messed
 ;;;; up, e.g. PPRINT-LOGICAL-BLOCK - because of CHECK-FOR-CIRCULARITY
 ;;;; - didn't really work:
@@ -122,7 +135,6 @@
            (with-output-to-string (s)
              (write '`(foo ,@x) :stream s :pretty t :readably t))
            "`(FOO ,@X)"))
-  #+nil                       ; '`(foo ,.x) => '`(foo ,@x) apparently.
   (assert (equal
            (with-output-to-string (s)
              (write '`(foo ,.x) :stream s :pretty t :readably t))
@@ -135,7 +147,6 @@
            (with-output-to-string (s)
              (write '`(lambda ,@x) :stream s :pretty t :readably t))
            "`(LAMBDA ,@X)"))
-  #+nil                                 ; see above
   (assert (equal
            (with-output-to-string (s)
              (write '`(lambda ,.x) :stream s :pretty t :readably t))
@@ -146,25 +157,33 @@
            "`(LAMBDA (,X))")))
 
 ;;; more backquote printing brokenness, fixed quasi-randomly by CSR.
-;;; NOTE KLUDGE FIXME: because our backquote optimizes at read-time,
-;;; these assertions, like the ones above, are fragile.  Likewise, it
-;;; is very possible that at some point READABLY printing backquote
-;;; expressions will have to change to printing the low-level conses,
-;;; since the magical symbols are accessible though (car '`(,foo)) and
-;;; friends.  HATE HATE HATE.  -- CSR, 2004-06-10
+;;; and fixed a little more by DPK.
 (with-test (:name :pprint-more-backquote-brokeness)
-  (assert (equal
-           (with-output-to-string (s)
-             (write '``(foo ,@',@bar) :stream s :pretty t))
-           "``(FOO ,@',@BAR)"))
-  (assert (equal
-           (with-output-to-string (s)
-             (write '``(,,foo ,',foo foo) :stream s :pretty t))
-           "``(,,FOO ,',FOO FOO)"))
-  (assert (equal
-           (with-output-to-string (s)
-             (write '``(((,,foo) ,',foo) foo) :stream s :pretty t))
-           "``(((,,FOO) ,',FOO) FOO)")))
+  (flet ((try (input expect)
+           (assert (equalp (read-from-string expect) input))
+           (let ((actual (write-to-string input :pretty t)))
+             (unless (equal actual expect)
+             (error "Failed test for ~S. Got ~S~%"
+                    expect actual)))))
+    (try '``(foo ,@',@bar) "``(FOO ,@',@BAR)")
+    (try '``(,,foo ,',foo foo) "``(,,FOO ,',FOO FOO)")
+    (try '``(((,,foo) ,',foo) foo) "``(((,,FOO) ,',FOO) FOO)")
+    (try '`#() "`#()")
+    (try '`#(,bar) "`#(,BAR)")
+    (try '`#(,(bar)) "`#(,(BAR))")
+    (try '`#(,@bar) "`#(,@BAR)")
+    (try '`#(,@(bar)) "`#(,@(BAR))")
+    (try '`#(a ,b c) "`#(A ,B C)")
+    (try '`#(,@A ,b c) "`#(,@A ,B C)")
+    (try '`(,a . #(foo #() #(,bar) ,bar)) "`(,A . #(FOO #() #(,BAR) ,BAR))")
+    (try '(let ((foo (x))) `(let (,foo) (setq ,foo (y)) (baz ,foo)))
+           ;; PPRINT-LET emits a mandatory newline after the bindings,
+           ;; otherwise this'd fit on one line given an adequate right margin.
+           "(LET ((FOO (X)))
+  `(LET (,FOO)
+     (SETQ ,FOO (Y))
+     (BAZ ,FOO)))")))
+
 
 ;;; SET-PPRINT-DISPATCH should accept function name arguments, and not
 ;;; rush to coerce them to functions.
@@ -289,7 +308,7 @@
                        when (nth-value 1 (ignore-errors (pprint list stream)))
                        collect (format nil "(~{~a ~}~a . 10)" (butlast list) symbol)))))
     (when errors
-      (error "Can't PPRINT imporper lists: ~a" errors))))
+      (error "Can't PPRINT improper lists: ~a" errors))))
 
 (with-test (:name :pprint-circular-backq-comma)
   ;; LP 1161218 reported by James M. Lawrence
@@ -303,5 +322,8 @@
     (equal (format nil "~a" '(setf . a))
            "(SETF . A)")))
 
+(with-test (:name :literal-fun-nested-lists)
+  (assert (search "EQUALP" (format nil "~:w" `((((((,#'equalp)))))))
+                  :test #'char-equal)))
 
 ;;; success

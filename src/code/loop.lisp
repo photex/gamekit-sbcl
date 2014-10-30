@@ -417,9 +417,12 @@ code to be loaded.
 ;;; *LOOP-VARS*.
 (defvar *loop-declarations*)
 
+;;; Declarations for destructuring bindings
+(defvar *loop-desetq-declarations*)
+
 ;;; This is used by LOOP for destructuring binding, if it is doing
 ;;; that itself. See LOOP-MAKE-VAR.
-(defvar *loop-desetq-crocks*)
+(defvar *loop-desetq*)
 
 ;;; list of wrapping forms, innermost first, which go immediately
 ;;; inside the current set of parallel bindings being accumulated in
@@ -567,7 +570,7 @@ code to be loaded.
   (let ((*ignores* nil))
     (declare (special *ignores*))
     (let ((d-var-lambda-list (subst-gensyms-for-nil lambda-list)))
-      `(destructuring-bind ,d-var-lambda-list
+      `(destructuring-bind (&optional ,@d-var-lambda-list)
            ,arg-list
          (declare (ignore ,@*ignores*))
          ,@body))))
@@ -586,7 +589,8 @@ code to be loaded.
         (*loop-vars* nil)
         (*loop-named-vars* nil)
         (*loop-declarations* nil)
-        (*loop-desetq-crocks* nil)
+        (*loop-desetq-declarations* nil)
+        (*loop-desetq* nil)
         (*loop-bind-stack* nil)
         (*loop-prologue* nil)
         (*loop-wrappers* nil)
@@ -612,19 +616,17 @@ code to be loaded.
                      ,(nreconc *loop-epilogue*
                                (nreverse *loop-after-epilogue*)))))
       (dolist (entry *loop-bind-stack*)
-        (let ((vars (first entry))
-              (dcls (second entry))
-              (crocks (third entry))
-              (wrappers (fourth entry)))
+        (destructuring-bind (vars dcls desetq desetq-decls wrappers) entry
           (dolist (w wrappers)
             (setq answer (append w (list answer))))
-          (when (or vars dcls crocks)
+          (when (or vars dcls desetq)
             (let ((forms (list answer)))
-              ;;(when crocks (push crocks forms))
-              (when dcls (push `(declare ,@dcls) forms))
+              (when desetq-decls
+                (push `(declare ,@desetq-decls) forms))
               (setq answer `(,(if vars 'let 'locally)
                              ,vars
-                             ,@(loop-build-destructuring-bindings crocks
+                             (declare ,@dcls)
+                             ,@(loop-build-destructuring-bindings desetq
                                                                   forms)))))))
       (do () (nil)
         (setq answer `(block ,(pop *loop-names*) ,answer))
@@ -715,35 +717,42 @@ code to be loaded.
 ;;;; loop types
 
 (defun loop-typed-init (data-type &optional step-var-p)
-  (cond ((null data-type)
-         nil)
-        ((sb!xc:subtypep data-type 'number)
-         (let ((init (if step-var-p 1 0)))
-           (flet ((like (&rest types)
-                    (coerce init (find-if (lambda (type)
-                                            (sb!xc:subtypep data-type type))
-                                          types))))
-             (cond ((sb!xc:subtypep data-type 'float)
-                    (like 'single-float 'double-float
-                          'short-float 'long-float 'float))
-                   ((sb!xc:subtypep data-type '(complex float))
-                    (like '(complex single-float)
-                          '(complex double-float)
-                          '(complex short-float)
-                          '(complex long-float)
-                          '(complex float)))
-                   (t
-                    init)))))
-        ((sb!xc:subtypep data-type 'vector)
-         (let ((ctype (sb!kernel:specifier-type data-type)))
-           (when (sb!kernel:array-type-p ctype)
-             (let ((etype (sb!kernel:type-*-to-t
-                           (sb!kernel:array-type-specialized-element-type ctype))))
-               (make-array 0 :element-type (sb!kernel:type-specifier etype))))))
-        ((sb!xc:typep #\x data-type)
-         #\x)
-        (t
-         nil)))
+  ;; FIXME: can't tell if unsupplied or NIL, but it has to be rare.
+  (when data-type
+   (let ((ctype (sb!kernel:specifier-type data-type)))
+     ;; FIXME: use the ctype for the rest of the type operations, now
+     ;; that it's parsed.
+     (cond ((eql ctype sb!kernel:*empty-type*)
+            (values nil t))
+           ((sb!xc:subtypep data-type 'number)
+            (let ((init (if step-var-p 1 0)))
+              (flet ((like (&rest types)
+                       (coerce init (find-if (lambda (type)
+                                               (sb!xc:subtypep data-type type))
+                                             types))))
+                (cond ((sb!xc:subtypep data-type 'float)
+                       (like 'single-float 'double-float
+                             'short-float 'long-float 'float))
+                      ((sb!xc:subtypep data-type '(complex float))
+                       (like '(complex single-float)
+                             '(complex double-float)
+                             '(complex short-float)
+                             '(complex long-float)
+                             '(complex float)))
+                      (t
+                       init)))))
+           ((sb!xc:subtypep data-type 'vector)
+            (when (sb!kernel:array-type-p ctype)
+              (let ((etype (sb!kernel:type-*-to-t
+                            (sb!kernel:array-type-specialized-element-type ctype))))
+                (make-array 0 :element-type (sb!kernel:type-specifier etype)))))
+           #!+sb-unicode
+           ((sb!xc:subtypep data-type 'extended-char)
+            (code-char sb!int:base-char-code-limit))
+           ((sb!xc:subtypep data-type 'character)
+            #\x)
+           (t
+            nil)))))
 
 (defun loop-optional-type (&optional variable)
   ;; No variable specified implies that no destructuring is permissible.
@@ -816,74 +825,136 @@ code to be loaded.
 ;;;; loop variables
 
 (defun loop-bind-block ()
-  (when (or *loop-vars* *loop-declarations* *loop-wrappers*)
+  (when (or *loop-vars* *loop-declarations* *loop-wrappers*
+            *loop-desetq*)
     (push (list (nreverse *loop-vars*)
                 *loop-declarations*
-                *loop-desetq-crocks*
+                *loop-desetq*
+                *loop-desetq-declarations*
                 *loop-wrappers*)
           *loop-bind-stack*)
     (setq *loop-vars* nil
           *loop-declarations* nil
-          *loop-desetq-crocks* nil
+          *loop-desetq* nil
+          *loop-desetq-declarations* nil
           *loop-wrappers* nil)))
 
-(defun loop-var-p (name)
-  (do ((entry *loop-bind-stack* (cdr entry)))
-      (nil)
-    (cond
-      ((null entry) (return nil))
-      ((assoc name (caar entry) :test #'eq) (return t)))))
+(defun check-var-name (name &optional (context ""))
+  (labels ((map-name (function name)
+             (do ((x (pop name) (pop name)))
+                 (())
+               (typecase x
+                 (null)
+                 (cons (map-name function x))
+                 (symbol (funcall function x))
+                 (t
+                  (loop-error "Bad variable ~s~a" x context)))
+               (typecase name
+                 (cons)
+                 (null
+                  (return))
+                 (symbol
+                  (funcall function name)
+                  (return))
+                 (t
+                  (loop-error "Bad variable ~s~a" name context)))))
+           (duplicate (x)
+             (loop-error "Duplicated variable ~s~a" x context))
+           (find-in-desetq (name desetqs)
+             (do* ((desetq desetqs (cddr desetq))
+                   (var (car desetq) (car desetq)))
+                  ((null desetq))
+               (map-name (lambda (x)
+                           (when (eql name x)
+                             (duplicate name)))
+                         var))))
+    (cond ((consp name)
+           (map-name (lambda (x) (check-var-name x context)) name))
+          ((assoc name *loop-vars*)
+           (duplicate name))
+          ((find-in-desetq name *loop-desetq*))
+          (t
+           (do ((entry *loop-bind-stack* (cdr entry)))
+               (nil)
+             (cond
+               ((null entry) (return nil))
+               ((assoc name (caar entry) :test #'eq)
+                (duplicate name))
+               (t
+                (find-in-desetq name (caddar entry)))))))))
 
 (defun loop-make-var (name initialization dtype &optional step-var-p)
   (cond ((null name)
          (setq name (gensym "LOOP-IGNORE-"))
-         (push (list name initialization) *loop-vars*)
+         (push (list name (or initialization (loop-typed-init dtype step-var-p)))
+               *loop-vars*)
          (push `(ignore ,name) *loop-declarations*)
          (loop-declare-var name dtype))
         ((atom name)
-         (when (or (assoc name *loop-vars*)
-                   (loop-var-p name))
-           (loop-error "duplicated variable ~S in a LOOP binding" name))
-         (unless (symbolp name)
-           (loop-error "bad variable ~S somewhere in LOOP" name))
-         (loop-declare-var name dtype step-var-p initialization)
+         (check-var-name name)
+         (loop-declare-var name dtype :step-var-p step-var-p
+                                      :initialization initialization)
          ;; We use ASSOC on this list to check for duplications (above),
          ;; so don't optimize out this list:
          (push (list name (or initialization (loop-typed-init dtype step-var-p)))
                *loop-vars*))
         (initialization
+         (check-var-name name)
          (let ((newvar (gensym "LOOP-DESTRUCTURE-")))
-           (loop-declare-var name dtype)
+           (loop-declare-var name dtype :desetq t)
            (push (list newvar initialization) *loop-vars*)
-           ;; *LOOP-DESETQ-CROCKS* gathered in reverse order.
-           (setq *loop-desetq-crocks*
-                 (list* name newvar *loop-desetq-crocks*))))
-        (t (let ((tcar nil) (tcdr nil))
-             (if (atom dtype) (setq tcar (setq tcdr dtype))
-                 (setq tcar (car dtype) tcdr (cdr dtype)))
-             (loop-make-var (car name) nil tcar)
-             (loop-make-var (cdr name) nil tcdr))))
+           ;; *LOOP-DESETQ* gathered in reverse order.
+           (setq *loop-desetq*
+                 (list* name newvar *loop-desetq*))))
+        (t
+         (let ((tcar nil) (tcdr nil))
+           (if (atom dtype) (setq tcar (setq tcdr dtype))
+               (setq tcar (car dtype) tcdr (cdr dtype)))
+           (loop-make-var (car name) nil tcar)
+           (when (cdr name)
+             (loop-make-var (cdr name) nil tcdr)))))
   name)
 
-(defun loop-declare-var (name dtype &optional step-var-p initialization)
+;;; Find a suitable type for  default initialization
+(defun type-for-default-init (type &optional step-var-p)
+  (multiple-value-bind (init empty-type)
+      (loop-typed-init type step-var-p)
+    (values
+     (cond (empty-type
+            ;; Don't wrap empty types `(or ...), otherwise the will no
+            ;; longer be empty and the compiler won't produce
+            ;; warnings.
+            type)
+           ((sb!xc:typep init type)
+            type)
+           (t
+            `(or ,(type-of init) ,type)))
+     init)))
+
+(defun loop-declare-var (name dtype &key step-var-p initialization
+                                         desetq)
   (cond ((or (null name) (null dtype) (eq dtype t)) nil)
         ((symbolp name)
          (unless (or (sb!xc:subtypep t dtype)
                      (and (eq (find-package :cl) (symbol-package name))
                           (eq :special (sb!int:info :variable :kind name))))
-           (let ((dtype (if initialization
-                            dtype
-                            (let ((init (loop-typed-init dtype step-var-p)))
-                              (if (sb!xc:typep init dtype)
-                                  dtype
-                                  `(or ,(type-of init) ,dtype))))))
-             (push `(type ,dtype ,name) *loop-declarations*))))
+           (let ((dtype `(type ,(if initialization
+                                    dtype
+                                    (type-for-default-init dtype step-var-p))
+                               ,name)))
+             (if desetq
+                 (push dtype *loop-desetq-declarations*)
+                 (push dtype *loop-declarations*)))))
         ((consp name)
          (cond ((consp dtype)
-                (loop-declare-var (car name) (car dtype))
-                (loop-declare-var (cdr name) (cdr dtype)))
-               (t (loop-declare-var (car name) dtype)
-                  (loop-declare-var (cdr name) dtype))))
+                (loop-declare-var (car name) (car dtype)
+                                  :desetq desetq)
+                (loop-declare-var (cdr name) (cdr dtype)
+                                  :desetq desetq))
+               (t (loop-declare-var (car name) dtype
+                                    :desetq desetq)
+                  (loop-declare-var (cdr name) dtype
+                                    :desetq desetq))))
         (t (error "invalid LOOP variable passed in: ~S" name))))
 
 (defun loop-maybe-bind-form (form data-type)
@@ -973,8 +1044,18 @@ code to be loaded.
   class
   (history nil)
   (tempvars nil)
+  specified-type
   dtype
   (data nil)) ;collector-specific data
+
+(sb!int:defmacro-mundanely with-sum-count (lc &body body)
+  (let* ((type (loop-collector-dtype lc))
+         (temp-var (car (loop-collector-tempvars lc))))
+    (multiple-value-bind (type init)
+        (type-for-default-init type)
+      `(let ((,temp-var ,init))
+         (declare (type ,type ,temp-var))
+         ,@body))))
 
 (defun loop-get-collection-info (collector class default-type)
   (let ((form (loop-get-form))
@@ -985,28 +1066,41 @@ code to be loaded.
       (loop-error "The value accumulation recipient name, ~S, is not a symbol." name))
     (unless name
       (loop-disallow-aggregate-booleans))
-    (let ((dtype (or (loop-optional-type) default-type))
-          (cruft (find (the symbol name) *loop-collection-cruft*
-                       :key #'loop-collector-name)))
+    (let* ((specified-type (loop-optional-type))
+           (dtype (or specified-type default-type))
+           (cruft (find (the symbol name) *loop-collection-cruft*
+                        :key #'loop-collector-name)))
       (cond ((not cruft)
-             (when (and name (loop-var-p name))
-               (loop-error "Variable ~S in INTO clause is a duplicate" name))
+             (check-var-name name " in INTO clause")
              (push (setq cruft (make-loop-collector
-                                 :name name :class class
-                                 :history (list collector) :dtype dtype))
+                                :name name :class class
+                                :history (list collector)
+                                :specified-type specified-type
+                                :dtype dtype))
                    *loop-collection-cruft*))
             (t (unless (eq (loop-collector-class cruft) class)
                  (loop-error
-                   "incompatible kinds of LOOP value accumulation specified for collecting~@
+                  "incompatible kinds of LOOP value accumulation specified for collecting~@
                     ~:[as the value of the LOOP~;~:*INTO ~S~]: ~S and ~S"
-                   name (car (loop-collector-history cruft)) collector))
-               (unless (equal dtype (loop-collector-dtype cruft))
-                 (loop-warn
-                   "unequal datatypes specified in different LOOP value accumulations~@
-                   into ~S: ~S and ~S"
-                   name dtype (loop-collector-dtype cruft))
-                 (when (eq (loop-collector-dtype cruft) t)
-                   (setf (loop-collector-dtype cruft) dtype)))
+                  name (car (loop-collector-history cruft)) collector))
+               (cond ((equal dtype (loop-collector-dtype cruft)))
+                     ((and (null specified-type)
+                           (null (loop-collector-specified-type cruft)))
+                      ;; Unionize types only for default types, most
+                      ;; likely, SUM and COUNT which have number and
+                      ;; fixnum respectively.
+                      (setf (loop-collector-dtype cruft)
+                            (sb!kernel:type-specifier
+                             (sb!kernel:type-union
+                              (sb!kernel:specifier-type dtype)
+                              (sb!kernel:specifier-type (loop-collector-dtype cruft))))))
+                     (t
+                      (loop-warn
+                       "unequal datatypes specified in different LOOP value accumulations~@
+                        into ~S: ~S and ~S"
+                       name dtype (loop-collector-dtype cruft))
+                      (when (eq (loop-collector-dtype cruft) t)
+                        (setf (loop-collector-dtype cruft) dtype))))
                (push collector (loop-collector-history cruft))))
       (values cruft form))))
 
@@ -1040,12 +1134,11 @@ code to be loaded.
     (let ((tempvars (loop-collector-tempvars lc)))
       (unless tempvars
         (setf (loop-collector-tempvars lc)
-              (setq tempvars (list (loop-make-var
-                                     (or (loop-collector-name lc)
-                                         (gensym "LOOP-SUM-"))
-                                     nil (loop-collector-dtype lc)))))
+              (setq tempvars (list (or (loop-collector-name lc)
+                                  (gensym "LOOP-SUM-")))))
         (unless (loop-collector-name lc)
-          (loop-emit-final-value (car (loop-collector-tempvars lc)))))
+          (loop-emit-final-value (car (loop-collector-tempvars lc))))
+        (push `(with-sum-count ,lc) *loop-wrappers*))
       (loop-emit-body
         (if (eq specifically 'count)
             `(when ,form
@@ -1063,13 +1156,13 @@ code to be loaded.
       (unless data
         (setf (loop-collector-data lc)
               (setq data (make-loop-minimax
-                           (or (loop-collector-name lc)
-                               (gensym "LOOP-MAXMIN-"))
-                           (loop-collector-dtype lc))))
+                          (or (loop-collector-name lc)
+                              (gensym "LOOP-MAXMIN-"))
+                          (loop-collector-dtype lc))))
         (unless (loop-collector-name lc)
-          (loop-emit-final-value (loop-minimax-answer-variable data))))
+          (loop-emit-final-value (loop-minimax-answer-variable data)))
+        (push `(with-minimax-value ,data) *loop-wrappers*))
       (loop-note-minimax-operation specifically data)
-      (push `(with-minimax-value ,data) *loop-wrappers*)
       (loop-emit-body `(loop-accumulate-minimax-value ,data
                                                       ,specifically
                                                       ,form)))))
@@ -1103,8 +1196,15 @@ code to be loaded.
 
 (defun loop-do-repeat ()
   (loop-disallow-conditional :repeat)
-  (let ((form (loop-get-form))
-        (type 'integer))
+  (let* ((form (loop-get-form))
+         (count (and (constantp form) ; FIXME: lexical environment constants
+                     (sb!int:constant-form-value form)))
+         (type (cond ((not (realp count))
+                      'integer)
+                     ((plusp count)
+                      `(mod ,(1+ (ceiling count))))
+                     (t
+                      `(integer ,(ceiling count))))))
     (let ((var (loop-make-var (gensym "LOOP-REPEAT-") `(ceiling ,form) type)))
       (push `(if (<= ,var 0) (go end-loop) (decf ,var)) *loop-before-loop*)
       (push `(if (<= ,var 0) (go end-loop) (decf ,var)) *loop-after-body*)
@@ -1127,8 +1227,6 @@ code to be loaded.
                      (loop-pop-source)
                      (loop-get-form))
                     (t nil)))
-    (when (and var (loop-var-p var))
-      (loop-error "Variable ~S has already been used" var))
     (loop-make-var var val dtype)
     (if (loop-tequal (car *loop-source-code*) :and)
         (loop-pop-source)
@@ -1494,8 +1592,7 @@ code to be loaded.
          (start-constantp nil)
          (limit-given nil) ; T when prep phrase has specified end
          (limit-constantp nil)
-         (limit-value nil)
-         )
+         (limit-value nil))
      (flet ((assert-index-for-arithmetic (index)
               (unless (atom index)
                 (loop-error "Arithmetic index must be an atom."))))
@@ -1553,34 +1650,33 @@ code to be loaded.
        (when (and sequence-variable (not sequencep))
          (loop-error "missing OF or IN phrase in sequence path"))
        ;; Now fill in the defaults.
-       (if start-given
-           (when limit-given
-             ;; if both start and limit are given, they had better both
-             ;; be REAL.  We already enforce the REALness of LIMIT,
-             ;; above; here's the KLUDGE to enforce the type of START.
-             (flet ((type-declaration-of (x)
-                      (and (eq (car x) 'type) (caddr x))))
-               (let ((decl (find indexv *loop-declarations*
-                                 :key #'type-declaration-of))
-                     (%decl (find indexv *loop-declarations*
-                                  :key #'type-declaration-of
-                                  :from-end t)))
-                 (sb!int:aver (eq decl %decl))
-                 (when decl
-                   (setf (cadr decl)
-                         `(and real ,(cadr decl)))))))
-           ;; default start
-           ;; DUPLICATE KLUDGE: loop-make-var generates a temporary
-           ;; symbol for indexv if it is NIL. See also the comment in
-           ;; the (:from :downfrom :upfrom) case
-           (progn
-             (assert-index-for-arithmetic indexv)
-             (setq indexv
-                   (loop-make-var
-                      indexv
-                      (setq start-constantp t
-                            start-value (or (loop-typed-init indexv-type) 0))
-                      `(and ,indexv-type real)))))
+       (cond ((not start-given)
+              ;; default start
+              ;; DUPLICATE KLUDGE: loop-make-var generates a temporary
+              ;; symbol for indexv if it is NIL. See also the comment in
+              ;; the (:from :downfrom :upfrom) case
+              (assert-index-for-arithmetic indexv)
+              (setq indexv
+                    (loop-make-var
+                     indexv
+                     (setq start-constantp t
+                           start-value (or (loop-typed-init indexv-type) 0))
+                     `(and ,indexv-type real))))
+             (limit-given
+              ;; if both start and limit are given, they had better both
+              ;; be REAL.  We already enforce the REALness of LIMIT,
+              ;; above; here's the KLUDGE to enforce the type of START.
+              (flet ((type-declaration-of (x)
+                       (and (eq (car x) 'type) (caddr x))))
+                (let ((decl (find indexv *loop-declarations*
+                                  :key #'type-declaration-of))
+                      (%decl (find indexv *loop-declarations*
+                                   :key #'type-declaration-of
+                                   :from-end t)))
+                  (sb!int:aver (eq decl %decl))
+                  (when decl
+                    (setf (cadr decl)
+                          `(and real ,(cadr decl))))))))
        (cond ((member dir '(nil :up))
               (when (or limit-given default-top)
                 (unless limit-given
@@ -1750,10 +1846,13 @@ code to be loaded.
                          (nconc (loop-list-collection nconc))
                          (nconcing (loop-list-collection nconc))
                          (count (loop-sum-collection count
-                                                     real
-                                                     fixnum))
+                                 ;; This could be REAL, but when
+                                 ;; combined with SUM, it has to be
+                                 ;; NUMBER.
+                                 number
+                                 fixnum))
                          (counting (loop-sum-collection count
-                                                        real
+                                                        number
                                                         fixnum))
                          (sum (loop-sum-collection sum number number))
                          (summing (loop-sum-collection sum number number))

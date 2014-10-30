@@ -30,16 +30,15 @@
 ;;;   the entry is unused. If it is one, then it is deleted.
 ;;;   Double-hashing is used for collision resolution.
 
+;; FIXME: too vaguely named. Should be PACKAGE-HASH-VECTOR.
 (def!type hash-vector () '(simple-array (unsigned-byte 8) (*)))
 
 (def!struct (package-hashtable
              (:constructor %make-package-hashtable
-                           (table hash size &aux (free size)))
+                           (table size &aux (free size)))
              (:copier nil))
-  ;; The g-vector of symbols.
+  ;; The general-vector of symbols, with a hash-vector in its last cell.
   (table (missing-arg) :type simple-vector)
-  ;; The i-vector of pname hash values.
-  (hash (missing-arg) :type hash-vector)
   ;; The total number of entries allowed before resizing.
   ;;
   ;; FIXME: CAPACITY would be a more descriptive name. (This is
@@ -53,6 +52,9 @@
 
 ;;;; the PACKAGE structure
 
+;;; Meta: IN-PACKAGE references a string constant, not a package.
+;;; But we need this to be a DEF!STRUCT to emit 'package.h'
+;;; during first genesis.
 ;;; KLUDGE: We use DEF!STRUCT to define this not because we need to
 ;;; manipulate target package objects on the cross-compilation host,
 ;;; but only because its MAKE-LOAD-FORM function needs to be hooked
@@ -78,25 +80,20 @@
   (%nicknames () :type list)
   ;; packages used by this package
   (%use-list () :type list)
-  ;; a list of all the hashtables for inherited symbols. This is
-  ;; derived from %USE-LIST, but maintained separately from %USE-LIST
-  ;; for some reason. (Perhaps the reason is that when FIND-SYMBOL*
-  ;; hits an inherited symbol, it pulls it to the head of the list.)
-  ;;
-  ;; FIXME: This needs a more-descriptive name
-  ;; (USED-PACKAGE-HASH-TABLES?). It also needs an explanation of why
-  ;; the last entry is NIL. Perhaps it should even just go away and
-  ;; let us do indirection on the fly through %USE-LIST. (If so,
-  ;; benchmark to make sure that performance doesn't get stomped..)
-  ;; (If benchmark performance is important, this should prob'ly
-  ;; become a vector instead of a list.)
-  (tables (list nil) :type list)
+  ;; a simple-vector of the external symbol hashtables for used packages.
+  ;; Derived from %USE-LIST, but maintained separately.
+  (tables #() :type simple-vector)
+  ;; index into TABLES of the table in which an inherited symbol was most
+  ;; recently found. On the next FIND-SYMBOL* operation, the indexed table
+  ;; is tested first.
+  (mru-table-index 0 :type index)
   ;; packages that use this package
   (%used-by-list () :type list)
   ;; PACKAGE-HASHTABLEs of internal & external symbols
   (internal-symbols (missing-arg) :type package-hashtable)
   (external-symbols (missing-arg) :type package-hashtable)
   ;; shadowing symbols
+  ;; Todo: dynamically changeover to a PACKAGE-HASHTABLE if list gets long
   (%shadowing-symbols () :type list)
   ;; documentation string for this package
   (doc-string nil :type (or simple-string null))
@@ -113,6 +110,22 @@
 
 ;;;; iteration macros
 
+(flet ((expand-iterator (range var body result-form)
+         (multiple-value-bind (forms decls)
+             (parse-body body :doc-string-allowed nil)
+           (with-unique-names (iterator winp next)
+             `(block nil
+                (with-package-iterator (,iterator ,@range)
+                 (tagbody
+                  ,next
+                  (multiple-value-bind (,winp ,var) (,iterator)
+                    ;; I don't think this VAR is automatically ignorable.
+                    ;; The user should use it, or declare IGNORE/IGNORABLE.
+                    ,@decls
+                    (if ,winp
+                        (tagbody ,@forms (go ,next))
+                        (return ,result-form))))))))))
+
 (defmacro-mundanely do-symbols ((var &optional
                                      (package '*package*)
                                      result-form)
@@ -121,33 +134,9 @@
   "DO-SYMBOLS (VAR [PACKAGE [RESULT-FORM]]) {DECLARATION}* {TAG | FORM}*
    Executes the FORMs at least once for each symbol accessible in the given
    PACKAGE with VAR bound to the current symbol."
-  (multiple-value-bind (body decls)
-      (parse-body body-decls :doc-string-allowed nil)
-    (let ((flet-name (sb!xc:gensym "DO-SYMBOLS-")))
-      `(block nil
-         (flet ((,flet-name (,var)
-                  ,@decls
-                  (tagbody ,@body)))
-           (let* ((package (find-undeleted-package-or-lose ,package))
-                  (shadows (package-%shadowing-symbols package)))
-             (flet ((iterate-over-hash-table (table ignore)
-                      (let ((hash-vec (package-hashtable-hash table))
-                            (sym-vec (package-hashtable-table table)))
-                        (dotimes (i (length sym-vec))
-                          (when (>= (aref hash-vec i) 2)
-                            (let ((sym (aref sym-vec i)))
-                              (declare (inline member))
-                              (unless (member sym ignore :test #'string=)
-                                (,flet-name sym))))))))
-               (iterate-over-hash-table (package-internal-symbols package) nil)
-               (iterate-over-hash-table (package-external-symbols package) nil)
-               (dolist (use (package-%use-list package))
-                 (iterate-over-hash-table (package-external-symbols use)
-                                          shadows)))))
-         (let ((,var nil))
-           (declare (ignorable ,var))
-           ,@decls
-           ,result-form)))))
+  (expand-iterator `((find-undeleted-package-or-lose ,package)
+                     :internal :external :inherited)
+                   var body-decls result-form))
 
 (defmacro-mundanely do-external-symbols ((var &optional
                                               (package '*package*)
@@ -157,24 +146,8 @@
   "DO-EXTERNAL-SYMBOLS (VAR [PACKAGE [RESULT-FORM]]) {DECL}* {TAG | FORM}*
    Executes the FORMs once for each external symbol in the given PACKAGE with
    VAR bound to the current symbol."
-  (multiple-value-bind (body decls)
-      (parse-body body-decls :doc-string-allowed nil)
-    (let ((flet-name (sb!xc:gensym "DO-SYMBOLS-")))
-      `(block nil
-         (flet ((,flet-name (,var)
-                  ,@decls
-                  (tagbody ,@body)))
-           (let* ((package (find-undeleted-package-or-lose ,package))
-                  (table (package-external-symbols package))
-                  (hash-vec (package-hashtable-hash table))
-                  (sym-vec (package-hashtable-table table)))
-             (dotimes (i (length sym-vec))
-               (when (>= (aref hash-vec i) 2)
-                 (,flet-name (aref sym-vec i))))))
-         (let ((,var nil))
-           (declare (ignorable ,var))
-           ,@decls
-           ,result-form)))))
+  (expand-iterator `((find-undeleted-package-or-lose ,package) :external)
+                   var body-decls result-form))
 
 (defmacro-mundanely do-all-symbols ((var &optional
                                          result-form)
@@ -183,28 +156,93 @@
   "DO-ALL-SYMBOLS (VAR [RESULT-FORM]) {DECLARATION}* {TAG | FORM}*
    Executes the FORMs once for each symbol in every package with VAR bound
    to the current symbol."
-  (multiple-value-bind (body decls)
-      (parse-body body-decls :doc-string-allowed nil)
-    (let ((flet-name (sb!xc:gensym "DO-SYMBOLS-")))
-      `(block nil
-         (flet ((,flet-name (,var)
-                  ,@decls
-                  (tagbody ,@body)))
-           (dolist (package (list-all-packages))
-             (flet ((iterate-over-hash-table (table)
-                      (let ((hash-vec (package-hashtable-hash table))
-                            (sym-vec (package-hashtable-table table)))
-                        (dotimes (i (length sym-vec))
-                          (when (>= (aref hash-vec i) 2)
-                            (,flet-name (aref sym-vec i)))))))
-               (iterate-over-hash-table (package-internal-symbols package))
-               (iterate-over-hash-table (package-external-symbols package)))))
-         (let ((,var nil))
-           (declare (ignorable ,var))
-           ,@decls
-           ,result-form)))))
+  (expand-iterator '((list-all-packages) :internal :external)
+                   var body-decls result-form)))
+
 
 ;;;; WITH-PACKAGE-ITERATOR
+
+(defun package-iter-init (access-types pkg-designator-list)
+  (declare (type (integer 1 7) access-types)) ; a nonzero bitmask over types
+  (values (logior (ash access-types 3) #b11) 0 #()
+          (package-listify pkg-designator-list)))
+
+;; The STATE parameter is comprised of 4 packed fields
+;;  [0:1] = substate {0=internal,1=external,2=inherited,3=initial}
+;;  [2]   = package with inherited symbols has shadowing symbols
+;;  [3:5] = enabling bits for {internal,external,inherited}
+;;  [6:]  = index into 'package-tables'
+;;
+(defconstant +package-iter-check-shadows+  #b000100)
+
+(defun package-iter-step (start-state index sym-vec pkglist)
+  ;; the defknown isn't enough
+  (declare (type fixnum start-state) (type index index)
+           (type simple-vector sym-vec) (type list pkglist))
+  (declare (optimize speed))
+  (labels
+      ((advance (state) ; STATE is the one just completed
+         (case (logand state #b11)
+           ;; Test :INHERITED first because the state repeats for a package
+           ;; as many times as there are packages it uses. There are enough
+           ;; bits to count up to 2^23 packages if fixnums are 30 bits.
+           (2
+            (when (desired-state-p 2)
+              (let* ((tables (package-tables (this-package)))
+                     (next-state (the fixnum (+ state (ash 1 6))))
+                     (table-idx (ash next-state -6)))
+              (when (< table-idx (length tables))
+                (return-from advance ; remain in state 2
+                  (start next-state (svref tables table-idx))))))
+            (pop pkglist)
+            (advance 3)) ; start on next package
+           (1 ; finished externals, switch to inherited if desired
+            (when (desired-state-p 2)
+              (let ((tables (package-tables (this-package))))
+                (when (plusp (length tables)) ; inherited symbols
+                  (return-from advance ; enter state 2
+                    (start (if (package-%shadowing-symbols (this-package))
+                               (logior 2 +package-iter-check-shadows+) 2)
+                           (svref tables 0))))))
+            (advance 2)) ; skip state 2
+           (0 ; finished internals, switch to externals if desired
+            (if (desired-state-p 1) ; enter state 1
+                (start 1 (package-external-symbols (this-package)))
+                (advance 1))) ; skip state 1
+           (t ; initial state
+            (cond ((endp pkglist) ; latch into returning NIL forever more
+                   (values 0 0 #() '() nil nil))
+                  ((desired-state-p 0) ; enter state 0
+                   (start 0 (package-internal-symbols (this-package))))
+                  (t (advance 0)))))) ; skip state 0
+       (desired-state-p (target-state)
+         (logtest start-state (ash 1 (+ target-state 3))))
+       (this-package ()
+         (truly-the sb!xc:package (car pkglist)))
+       (start (next-state new-table)
+         (let ((symbols (package-hashtable-table new-table)))
+           (package-iter-step (logior (mask-field (byte 3 3) start-state)
+                                      next-state)
+                              ;; assert that physical length was nonzero
+                              (the index (1- (length symbols)))
+                              symbols pkglist))))
+    (declare (inline desired-state-p this-package))
+    (if (zerop index)
+        (advance start-state)
+        (macrolet ((scan (&optional (guard t))
+                   `(loop
+                     (let ((sym (aref sym-vec (decf index))))
+                       (when (and (not (eql sym 0)) ,guard)
+                         (return (values start-state index sym-vec pkglist sym
+                                         (aref #(:internal :external :inherited)
+                                               (logand start-state 3))))))
+                     (when (zerop index)
+                       (return (advance start-state))))))
+          (declare #-sb-xc-host(optimize (sb!c::insert-array-bounds-checks 0)))
+          (if (logtest start-state +package-iter-check-shadows+)
+              (let ((shadows (package-%shadowing-symbols (this-package))))
+                (scan (not (member sym shadows :test #'string=))))
+              (scan))))))
 
 (defmacro-mundanely with-package-iterator ((mname package-list
                                                   &rest symbol-types)
@@ -214,164 +252,32 @@
 such that successive invocations of (MNAME) will return the symbols, one by
 one, from the packages in PACKAGE-LIST. SYMBOL-TYPES may be any
 of :INHERITED :EXTERNAL :INTERNAL."
-  (with-unique-names (packages these-packages counter kind hash-vector vector
-                      package-use-list init-macro end-test-macro real-symbol-p
-                      inherited-symbol-p BLOCK)
-    (let ((ordered-types (let ((res nil))
-                           (dolist (kind '(:inherited :external :internal) res)
-                             (when (member kind symbol-types)
-                               (push kind res))))))  ; Order SYMBOL-TYPES.
-      `(let* ((,these-packages ,package-list)
-              (,packages `,(mapcar (lambda (package)
-                                     (if (packagep package)
-                                         package
-                                         ;; Maybe FIND-PACKAGE-OR-DIE?
-                                         (or (find-package package)
-                                             (error 'simple-package-error
-                                                    ;; could be a character
-                                                    :package (string package)
-                                                    :format-control "~@<~S does not name a package ~:>"
-                                                    :format-arguments (list package)))))
-                                   (if (consp ,these-packages)
-                                       ,these-packages
-                                       (list ,these-packages))))
-              (,counter nil)
-              (,kind (car ,packages))
-              (,hash-vector nil)
-              (,vector nil)
-              (,package-use-list nil))
-        ,(if (member :inherited ordered-types)
-             `(setf ,package-use-list (package-%use-list (car ,packages)))
-             `(declare (ignore ,package-use-list)))
-        (macrolet ((,init-macro (next-kind)
-                     (declare (optimize (inhibit-warnings 3)))
-                     (let ((symbols (gensym)))
-                       `(progn
-                         (setf ,',kind ,next-kind)
-                         (setf ,',counter nil)
-                         ,(case next-kind
-                                (:internal
-                                 `(let ((,symbols (package-internal-symbols
-                                                   (car ,',packages))))
-                                   (when ,symbols
-                                     (setf ,',vector (package-hashtable-table ,symbols))
-                                     (setf ,',hash-vector
-                                           (package-hashtable-hash ,symbols)))))
-                                (:external
-                                 `(let ((,symbols (package-external-symbols
-                                                   (car ,',packages))))
-                                   (when ,symbols
-                                     (setf ,',vector (package-hashtable-table ,symbols))
-                                     (setf ,',hash-vector
-                                           (package-hashtable-hash ,symbols)))))
-                                (:inherited
-                                 `(let ((,symbols (and ,',package-use-list
-                                                       (package-external-symbols
-                                                        (car ,',package-use-list)))))
-                                   (when ,symbols
-                                     (setf ,',vector (package-hashtable-table ,symbols))
-                                     (setf ,',hash-vector
-                                           (package-hashtable-hash ,symbols)))))))))
-                   (,end-test-macro (this-kind)
-                     `,(let ((next-kind (cadr (member this-kind
-                                                      ',ordered-types))))
-                            (if next-kind
-                                `(,',init-macro ,next-kind)
-                                `(if (endp (setf ,',packages (cdr ,',packages)))
-                                  (return-from ,',BLOCK)
-                                  (,',init-macro ,(car ',ordered-types)))))))
-          (when ,packages
-            ,(when (null symbol-types)
-                   (error 'simple-program-error
-                          :format-control
-                          "At least one of :INTERNAL, :EXTERNAL, or ~
-                      :INHERITED must be supplied."))
-            ,(dolist (symbol symbol-types)
-                     (unless (member symbol '(:internal :external :inherited))
-                       (error 'simple-program-error
-                              :format-control
-                              "~S is not one of :INTERNAL, :EXTERNAL, or :INHERITED."
-                              :format-arguments (list symbol))))
-            (,init-macro ,(car ordered-types))
-            (flet ((,real-symbol-p (number)
-                     (> number 1)))
-              (macrolet ((,mname ()
-                           (declare (optimize (inhibit-warnings 3)))
-                           `(block ,',BLOCK
-                             (loop
-                              (case ,',kind
-                                ,@(when (member :internal ',ordered-types)
-                                        `((:internal
-                                           (setf ,',counter
-                                            (position-if #',',real-symbol-p
-                                                         (the hash-vector ,',hash-vector)
-                                                         :start (if ,',counter
-                                                                    (1+ ,',counter)
-                                                                    0)))
-                                           (if ,',counter
-                                               (return-from ,',BLOCK
-                                                 (values t (svref ,',vector ,',counter)
-                                                         ,',kind (car ,',packages)))
-                                               (,',end-test-macro :internal)))))
-                                ,@(when (member :external ',ordered-types)
-                                        `((:external
-                                           (setf ,',counter
-                                            (position-if #',',real-symbol-p
-                                                         (the hash-vector ,',hash-vector)
-                                                         :start (if ,',counter
-                                                                    (1+ ,',counter)
-                                                                    0)))
-                                           (if ,',counter
-                                               (return-from ,',BLOCK
-                                                 (values t (svref ,',vector ,',counter)
-                                                         ,',kind (car ,',packages)))
-                                               (,',end-test-macro :external)))))
-                                ,@(when (member :inherited ',ordered-types)
-                                        `((:inherited
-                                           (flet ((,',inherited-symbol-p (number)
-                                                    (when (,',real-symbol-p number)
-                                                      (let* ((p (position
-                                                                 number
-                                                                 (the hash-vector
-                                                                   ,',hash-vector)
-                                                                 :start (if ,',counter
-                                                                            (1+ ,',counter)
-                                                                            0)))
-                                                             (s (svref ,',vector p)))
-                                                        (eql (nth-value
-                                                              1 (find-symbol
-                                                                 (symbol-name s)
-                                                                 (car ,',packages)))
-                                                             :inherited)))))
-                                             (setf ,',counter
-                                                   (when ,',hash-vector
-                                                     (position-if #',',inherited-symbol-p
-                                                                  (the hash-vector
-                                                                    ,',hash-vector)
-                                                                  :start (if ,',counter
-                                                                             (1+ ,',counter)
-                                                                             0)))))
-                                           (cond (,',counter
-                                                  (return-from
-                                                   ,',BLOCK
-                                                    (values t (svref ,',vector ,',counter)
-                                                            ,',kind (car ,',packages))
-                                                    ))
-                                                 (t
-                                                  (setf ,',package-use-list
-                                                        (cdr ,',package-use-list))
-                                                  (cond ((endp ,',package-use-list)
-                                                         (setf ,',packages (cdr ,',packages))
-                                                         (when (endp ,',packages)
-                                                           (return-from ,',BLOCK))
-                                                         (setf ,',package-use-list
-                                                               (package-%use-list
-                                                                (car ,',packages)))
-                                                         (,',init-macro ,(car
-                                                                          ',ordered-types)))
-                                                        (t (,',init-macro :inherited)
-                                                           (setf ,',counter nil)))))))))))))
-                ,@body))))))))
+  ;; SYMBOL-TYPES should really be named ACCESSIBILITY-TYPES.
+  (when (null symbol-types)
+    (error 'simple-program-error
+           :format-control
+           "At least one of :INTERNAL, :EXTERNAL, or :INHERITED must be supplied."))
+  (dolist (symbol symbol-types)
+    (unless (member symbol '(:internal :external :inherited))
+      (error 'simple-program-error
+             :format-control
+             "~S is not one of :INTERNAL, :EXTERNAL, or :INHERITED."
+             :format-arguments (list symbol))))
+  (with-unique-names (bits index sym-vec pkglist symbol kind)
+    (let ((state (list bits index sym-vec pkglist))
+          (select (logior (if (member :internal  symbol-types) 1 0)
+                          (if (member :external  symbol-types) 2 0)
+                          (if (member :inherited symbol-types) 4 0))))
+      `(multiple-value-bind ,state (package-iter-init ,select ,package-list)
+         (let (,symbol ,kind)
+           (macrolet
+               ((,mname ()
+                   '(if (eql 0 (multiple-value-setq (,@state ,symbol ,kind)
+                                 (package-iter-step ,@state)))
+                        nil
+                        (values t ,symbol ,kind
+                                (car (truly-the list ,pkglist))))))
+             ,@body))))))
 
 (defmacro-mundanely with-package-graph ((&key) &body forms)
   `(flet ((thunk () ,@forms))

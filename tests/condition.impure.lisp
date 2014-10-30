@@ -51,27 +51,42 @@
                '(and condition counted-condition)))
 
 (define-condition picky-condition () ())
-(restart-case
-    (handler-case
-        (error 'picky-condition)
-      (picky-condition (c)
-        (assert (eq (car (compute-restarts)) (car (compute-restarts c))))))
-  (picky-restart ()
-    :report "Do nothing."
-    :test (lambda (c)
-            (typep c '(or null picky-condition)))
-    'ok))
+
+(with-test (:name (:picky-condition compute-restarts))
+  (restart-case
+      (handler-case
+          (error 'picky-condition)
+        (picky-condition (c)
+          ;; The PICKY-RESTART should be applicable for the
+          ;; PICKY-CONDITION and all other cases.
+          (assert (eq (restart-name (first (compute-restarts))) 'picky-restart))
+          (assert (eq (restart-name (first (compute-restarts c))) 'picky-restart))
+          (assert (eq (car (compute-restarts)) (car (compute-restarts c))))
+          ;; ANOTHER-PICKY-RESTART should not be applicable for the
+          ;; PICKY-CONDITION, but all other cases.
+          (assert (not (find 'another-picky-restart (compute-restarts c)
+                             :key #'restart-name)))
+          (assert (find 'another-picky-restart (compute-restarts)
+                        :key #'restart-name))
+          :ok))
+    (picky-restart ()
+      :report "Do nothing."
+      :test (lambda (c) (typep c '(or null picky-condition))))
+    (another-picky-restart ()
+      :report "Do nothing as well"
+      :test (lambda (c) (typep c '(not picky-condition))))))
 
 ;;; adapted from Helmut Eller on cmucl-imp
-(assert (eq 'it
-            (restart-case
-                (handler-case
-                    (error 'picky-condition)
-                  (picky-condition (c)
-                    (invoke-restart (find-restart 'give-it c))))
-              (give-it ()
-                :test (lambda (c) (typep c 'picky-condition))
-                'it))))
+(with-test (:name (:picky-condition invoke-restart))
+  (assert (eq 'it
+              (restart-case
+                  (handler-case
+                      (error 'picky-condition)
+                    (picky-condition (c)
+                      (invoke-restart (find-restart 'give-it c))))
+                (give-it ()
+                  :test (lambda (c) (typep c 'picky-condition))
+                  'it)))))
 
 ;;; In sbcl-1.0.9, a condition derived from CL:STREAM-ERROR (or
 ;;; CL:READER-ERROR or or CL:PARSE-ERROR) didn't inherit a usable
@@ -291,4 +306,105 @@
     (test ((a t)) (not a) "The assertion (NOT A) failed with A = T.")
     (test () (not t) "The assertion (NOT T) failed.")
     (test ((a -1)) (plusp (signum a))
-          "The assertion (PLUSP (SIGNUM A)) failed with (SIGNUM A) = -1.")))
+          "The assertion (PLUSP (SIGNUM A)) failed with (SIGNUM A) = -1.")
+    ;; Same for local functions.
+    (flet ((my-not (x) (not x))
+           (my-plusp (x) (plusp x)))
+      (test ((a t)) (my-not a) "The assertion (MY-NOT A) failed with A = T.")
+      (test () (my-not t) "The assertion (MY-NOT T) failed.")
+      (test ((a -1)) (my-plusp (signum a))
+            "The assertion (MY-PLUSP (SIGNUM A)) failed with (SIGNUM A) = -1."))))
+
+(with-test (:name (find-restart :recheck-conditions-and-tests :bug-774410))
+  (let ((activep t))
+    (restart-bind ((switchable-restart
+                     (constantly 'irrelevant)
+                     :test-function (lambda (condition)
+                                      (declare (ignore condition))
+                                      activep)))
+      (let ((actual-restart (find-restart 'switchable-restart)))
+        ;; Active/inactive because of condition-restarts associations.
+        (let ((required-condition (make-condition 'condition))
+              (wrong-condition (make-condition 'condition)))
+          (with-condition-restarts required-condition (list actual-restart)
+            (assert (find-restart actual-restart required-condition))
+            (assert (not (find-restart actual-restart wrong-condition)))))
+
+        ;; Inactive because of test-function.
+        (setf activep nil)
+        (assert (not (find-restart actual-restart)))
+        (assert (not (find-restart actual-restart (make-condition 'condition))))))))
+
+(macrolet
+    ((with-testing-restart ((&key
+                               (condition-var (gensym))
+                               (condition-restart-p t))
+                            &body body)
+       `(block block
+          (handler-bind ((condition (lambda (,condition-var)
+                                      (declare (ignorable ,condition-var))
+                                      ,@body)))
+            (restart-bind ((testing-restart
+                             (lambda () (return-from block :transfer))
+                             :test-function (lambda (condition)
+                                              (typep condition 'condition))))
+              ,(if condition-restart-p
+                   `(let ((condition (make-condition 'condition)))
+                      (with-condition-restarts condition (car sb-kernel:*restart-clusters*)
+                        (signal condition)))
+                   `(signal (make-condition 'condition)))
+              :no-transfer)))))
+
+  (with-test (:name (invoke-restart :test-function))
+
+    ;; When given a restart name, there is no condition so
+    ;; INVOKE-RESTART cannot call the :test-function. SBCL considers
+    ;; the restart unsuitable for the requested invocation. See
+    ;; comment in INVOKE-RESTART.
+    (assert-error (with-testing-restart ()
+                    (invoke-restart 'testing-restart))
+                  control-error)
+
+    ;; When given a RESTART instance (which could only have been found
+    ;; by passing an appropriate condition to FIND-RESTART),
+    ;; INVOKE-RESTART does not call the :test-function. Again, see
+    ;; comment in INVOKE-RESTART.
+    (assert (eq :transfer
+                (with-testing-restart (:condition-var condition)
+                  (invoke-restart
+                   (find-restart 'testing-restart condition)))))
+
+    ;; Some other condition, even if it passes the :test-function,
+    ;; only works if the restart has not been associated to the
+    ;; original condition.
+    (assert (eq :transfer
+                (with-testing-restart (:condition-restart-p nil)
+                  (invoke-restart
+                   (find-restart 'testing-restart (make-condition 'condition))))))
+    (with-testing-restart ()
+      (assert (not (find-restart 'testing-restart (make-condition 'condition))))))
+
+  (with-test (:name (invoke-restart-interactively :test-function))
+    ;; Comments in (INVOKE-RESTART :TEST-FUNCTION) apply here as well.
+    (assert-error
+     (with-testing-restart ()
+       (invoke-restart-interactively 'testing-restart))
+     control-error)
+
+    (assert (eq :transfer
+                (with-testing-restart (:condition-var condition)
+                  (invoke-restart-interactively
+                   (find-restart 'testing-restart condition)))))
+
+    (assert (eq :transfer
+                (with-testing-restart (:condition-restart-p nil)
+                  (invoke-restart-interactively
+                   (find-restart 'testing-restart (make-condition 'condition))))))))
+
+(defun case-failure-example (x) (etypecase x (function 1) (symbol 2)))
+;; The :report method should not print "wanted one of #'SYMBOL"
+(with-test (:name :case-failure-report-pprint-silliness)
+  (handler-case (foo 3)
+    (condition (c)
+      (let ((str (write-to-string c :escape nil :pretty t)))
+        (assert (not (search "#'SYMBOL" str)))))))

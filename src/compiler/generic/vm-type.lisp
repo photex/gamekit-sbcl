@@ -14,12 +14,6 @@
 
 (in-package "SB!KERNEL")
 
-;;;; FIXME: I'm not sure where to put this. -- WHN 19990817
-
-(def!type sb!vm:word () `(unsigned-byte ,sb!vm:n-word-bits))
-(def!type sb!vm:signed-word () `(signed-byte ,sb!vm:n-word-bits))
-
-
 ;;;; implementation-dependent DEFTYPEs
 
 ;;; Make DOUBLE-FLOAT a synonym for LONG-FLOAT, SINGLE-FLOAT for
@@ -107,43 +101,43 @@
     (double-float 'double-float)
     #!+long-float (long-float 'long-float)))
 
-;;; This function is called when the type code wants to find out how
-;;; an array will actually be implemented. We set the
-;;; SPECIALIZED-ELEMENT-TYPE to correspond to the actual
-;;; specialization used in this implementation.
-(declaim (ftype (function (array-type) array-type) specialize-array-type))
-(defun specialize-array-type (type)
-  (let ((eltype (array-type-element-type type)))
-    (setf (array-type-specialized-element-type type)
-          (if (or (eq eltype *wild-type*)
-                  ;; This is slightly dubious, but not as dubious as
-                  ;; assuming that the upgraded-element-type should be
-                  ;; equal to T, given the way that the AREF
-                  ;; DERIVE-TYPE optimizer works.  -- CSR, 2002-08-19
-                  (unknown-type-p eltype))
-              *wild-type*
-              (dolist (stype-name *specialized-array-element-types*
-                                  *universal-type*)
-                ;; FIXME: Mightn't it be better to have
-                ;; *SPECIALIZED-ARRAY-ELEMENT-TYPES* be stored as precalculated
-                ;; SPECIFIER-TYPE results, instead of having to calculate
-                ;; them on the fly this way? (Call the new array
-                ;; *SPECIALIZED-ARRAY-ELEMENT-SPECIFIER-TYPES* or something..)
-                (let ((stype (specifier-type stype-name)))
-                  (aver (not (unknown-type-p stype)))
-                  (when (csubtypep eltype stype)
-                    (return stype))))))
-    type))
+(declaim (ftype (sfunction (ctype) ctype) %upgraded-array-element-type))
+(defun %upgraded-array-element-type (eltype)
+  (if (or (eq eltype *wild-type*)
+          ;; This is slightly dubious, but not as dubious as
+          ;; assuming that the upgraded-element-type should be
+          ;; equal to T, given the way that the AREF
+          ;; DERIVE-TYPE optimizer works.  -- CSR, 2002-08-19
+          (contains-unknown-type-p eltype))
+      *wild-type*
+      (dolist (stype-name *specialized-array-element-types*
+                          *universal-type*)
+        ;; FIXME: Mightn't it be better to have
+        ;; *SPECIALIZED-ARRAY-ELEMENT-TYPES* be stored as precalculated
+        ;; SPECIFIER-TYPE results, instead of having to calculate
+        ;; them on the fly this way? (Call the new array
+        ;; *SPECIALIZED-ARRAY-ELEMENT-SPECIFIER-TYPES* or something..)
+        (let ((stype (specifier-type stype-name)))
+          (aver (not (unknown-type-p stype)))
+          (when (csubtypep eltype stype)
+            (return stype))))))
 
 (defun sb!xc:upgraded-array-element-type (spec &optional environment)
   #!+sb-doc
   "Return the element type that will actually be used to implement an array
    with the specifier :ELEMENT-TYPE Spec."
   (declare (ignore environment))
-  (if (unknown-type-p (specifier-type spec))
-      (error "undefined type: ~S" spec)
-      (type-specifier (array-type-specialized-element-type
-                       (specifier-type `(array ,spec))))))
+  (handler-case
+      ;; Can't rely on SPECIFIER-TYPE to signal PARSE-UNKNOWN-TYPE in
+      ;; the case of (AND KNOWN UNKNOWN), since the result of the
+      ;; outter call to SPECIFIER-TYPE can be cached by the code that
+      ;; doesn't catch PARSE-UNKNOWN-TYPE signal.
+      (let ((type (specifier-type spec)))
+        (if (contains-unknown-type-p type)
+            (error "Undefined type: ~S" spec)
+            (type-specifier (%upgraded-array-element-type type))))
+    (parse-unknown-type (c)
+      (error "Undefined type: ~S" (parse-unknown-type-specifier c)))))
 
 (defun sb!xc:upgraded-complex-part-type (spec &optional environment)
   #!+sb-doc
@@ -213,3 +207,185 @@
      'sb!c:check-fun)
     (t
      nil)))
+
+;; Given a union type INPUT, see if it fully covers an ARRAY-* type,
+;; and unite into that when possible, taking care to handle more
+;; than one dimensionality/complexity of array, and non-array types.
+;; If FOR-TYPEP is true, then:
+;;  - The input and result are lists of the component types.
+;;  - We allow "almost coverings" of ARRAY-* to produce an answer
+;;    that results in a quicker test.
+;;    e.g. unboxed-array = (and array (not (array t)))
+;; Otherwise, if not FOR-TYPEP, the input/result are CTYPES,
+;; and we don't introduce negations into the union.
+;;
+;; Note that in FOR-TYPEP usage, this function should get a chance to see
+;; the whole union before WIDETAGS-FROM-UNION-TYPE has removed any types that
+;; are testable by their widetag. Otherwise (TYPEP X '(UNBOXED-ARRAY 1))
+;; becomes suboptimal. WIDETAGS-FROM-UNION-TYPE knows that strings/bit-vectors,
+;; either simple or hairy, all have distinguishing widetags, so if it sees
+;; them, reducing to (OR (%OTHER-POINTER-SUBTYPE-P ...) <more-array-types>),
+;; the other array-types will not comprise an "almost covering" of ARRAY-*
+;; and this code will not do what you want.
+;; Additionally, as part of the contract, we don't create a type-difference
+;; for a union all of whose types are testable by widetags.
+;; e.g. it would be suboptimal to rewrite
+;;  (SIMPLE-UNBOXED-ARRAY (*)) -> (AND (SIMPLE-ARRAY * (*)) (NOT (ARRAY T)))
+;; because it always better to use %OTHER-POINTER-SUBTYPE-P in that case.
+
+(defun simplify-array-unions (input &optional for-typep)
+  (let* ((array-props sb!vm:*specialized-array-element-type-properties*)
+         (types (if (listp input) input (union-type-types input)))
+         (full-mask (1- (ash 1 (length array-props))))
+         buckets output)
+    ;; KLUDGE: counting the input types is a fine preliminary check
+    ;; to avoid extra work, but importantly it (magically) bypasses all
+    ;; this logic during cold-init when CTYPE slots of all SAETPs are nil.
+    ;; SBCL sources mostly don't contain type expressions that benefit
+    ;; from this transform.
+    ;; If, in the not-for-typep case, there aren't at least as many
+    ;; array types as SAETPs, there can't be a covering.
+    ;; In the for-typep case, if there aren't at least half as many,
+    ;; then it couldn't be rewritten as negation.
+    ;; Uber-KLUDGE: using (length types) isn't enough to make the
+    ;; not-for-typep case make it all the way through cold-init.
+    (when (if for-typep
+              (< (length types) (floor (length array-props) 2))
+              (< (count-if #'array-type-p types) (length array-props)))
+      (return-from simplify-array-unions input))
+    (flet ((bucket-match-p (a b)
+             (and (eq (array-type-complexp a) (array-type-complexp b))
+                  (equal (array-type-dimensions a) (array-type-dimensions b))))
+           (saetp-index (type)
+             (and (array-type-p type)
+                  (neq (array-type-specialized-element-type type) *wild-type*)
+                  (position (array-type-specialized-element-type type) array-props
+                            :key #'sb!vm:saetp-ctype :test #'type=)))
+           (wild (type)
+             (make-array-type (array-type-dimensions type)
+                              :element-type *wild-type*
+                              :complexp (array-type-complexp type))))
+      ;; Bucket the array types by <dimensions,complexp> where each bucket
+      ;; tracks which SAETPs were seen.
+      ;; Search actual element types by TYPE=, not upgraded types, so that the
+      ;; transform into (ARRAY *) is not lossy. However, if uniting does occur
+      ;; and the resultant OR still contains any array type that upgrades to T,
+      ;; we might want to do yet another reduction because:
+      ;; (SPECIFIER-TYPE '(OR (VECTOR *) (VECTOR BAD))) => #<ARRAY-TYPE VECTOR>
+      (dolist (type types)
+        (binding* ((bit (saetp-index type) :exit-if-null)
+                   (bucket (assoc type buckets :test #'bucket-match-p)))
+          (unless bucket
+            (push (setq bucket (cons type full-mask)) buckets))
+          ;; Each _missing_ type is represented by a '1' bit so that
+          ;; a final mask of 0 indicates an exhaustive partitioning.
+          ;; (SETF LOGBITP) would work for us, but CLHS doesn't require it.
+          (setf (cdr bucket) (logandc2 (cdr bucket) (ash 1 bit)))))
+      (cond
+        (for-typep
+         ;; Maybe compute the complement with respect to (ARRAY *)
+         ;; but never express unions of simple-rank-1 as a type-difference,
+         ;; because widetag testing of those is better.
+         (dolist (type types (nreverse output))
+           (let* ((bucket
+                   (and (saetp-index type)
+                        (or (array-type-complexp type)
+                            (not (equal (array-type-dimensions type) '(*))))
+                        (assoc type buckets :test #'bucket-match-p)))
+                  (disjunct
+                   (cond ((and bucket
+                               (plusp (cdr bucket))
+                               (< (logcount (cdr bucket))
+                                  (floor (length array-props) 2)))
+                          (let (exclude)
+                            (dotimes (i (length array-props))
+                              (when (logbitp i (cdr bucket)) ; exclude it
+                                (push (sb!vm:saetp-specifier
+                                       (svref array-props i)) exclude)))
+                            (setf (cdr bucket) -1) ; mark as generated
+                            (specifier-type
+                             `(and ,(type-specifier (wild type))
+                                   ,@(mapcar (lambda (x) `(not (array ,x)))
+                                             exclude)))))
+                         ((not (eql (cdr bucket) -1))
+                          ;; noncanonical input is a bug,
+                          ;; so assert that bucket is not full.
+                          (aver (not (eql (cdr bucket) 0)))
+                          type)))) ; keep
+             (when disjunct
+               (push disjunct output)))))
+        ((rassoc 0 buckets) ; at least one full bucket
+         ;; For each input type subsumed by a full bucket,
+         ;; insert the wild array type for that bucket.
+         (dolist (type types (apply #'type-union (nreverse output)))
+           (let* ((bucket (and (saetp-index type)
+                               (assoc type buckets :test #'bucket-match-p)))
+                  (disjunct (cond ((eql (cdr bucket) 0) ; bucket is full
+                                   (setf (cdr bucket) -1) ; mark as generated
+                                   (wild type))
+                                  ((not (eql (cdr bucket) -1))
+                                   type)))) ; keep
+             (when disjunct
+               (push disjunct output)))))
+        (t input))))) ; no change
+
+;; Given TYPES which is a list of types from a union type, decompose into
+;; two unions, one being an OR over types representable as widetags
+;; with other-pointer-lowtag, and the other being the difference
+;; between the input TYPES and the widetags.
+;; This is architecture-independent, but unfortunately the needed VOP can't
+;; be defined using DEFINE-TYPE-VOPS, so return (VALUES NIL TYPES) for
+;; unsupported backends which can't generate an arbitrary call to %TEST-HEADERS.
+(defun widetags-from-union-type (types)
+  (setq types (simplify-array-unions types t))
+  ;; This seems preferable to a reader-conditional in generic code.
+  ;; There is a unit test that the supported architectures don't generate
+  ;; excessively large code, so hopefully it'll not get broken.
+  (let ((info (info :function :info '%other-pointer-subtype-p)))
+    (unless (and info (sb!c::fun-info-templates info))
+      (return-from widetags-from-union-type (values nil types))))
+  (let (widetags remainder)
+    (dolist (x types)
+      (let ((adjunct
+             (cond
+               ((and (array-type-p x)
+                     (equal (array-type-dimensions x) '(*))
+                     (type= (array-type-specialized-element-type x)
+                            (array-type-element-type x)))
+                (if (eq (array-type-specialized-element-type x) *wild-type*)
+                    ;; could be done, but probably no merit to implementing
+                    ;; maybe/definitely-complex wild-type.
+                    (unless (array-type-complexp x)
+                      (map 'list #'sb!vm::saetp-typecode
+                           sb!vm:*specialized-array-element-type-properties*))
+                    (let ((saetp
+                           (find
+                            (array-type-element-type x)
+                            sb!vm:*specialized-array-element-type-properties*
+                            :key #'sb!vm:saetp-ctype :test #'type=)))
+                      (cond ((not (array-type-complexp x))
+                             (sb!vm:saetp-typecode saetp))
+                            ((sb!vm:saetp-complex-typecode saetp)
+                             (list* (sb!vm:saetp-complex-typecode saetp)
+                                    (when (eq (array-type-complexp x) :maybe)
+                                      (list (sb!vm:saetp-typecode saetp)))))))))
+               ((classoid-p x)
+                (case (classoid-name x)
+                  (symbol sb!vm:symbol-header-widetag) ; plus a hack for nil
+                  (system-area-pointer sb!vm:sap-widetag))))))
+        (cond ((not adjunct) (push x remainder))
+              ((listp adjunct) (setq widetags (nconc adjunct widetags)))
+              (t (push adjunct widetags)))))
+    (let ((remainder (nreverse remainder)))
+      (when (member sb!vm:symbol-header-widetag widetags)
+        ;; If symbol is the only widetag-testable type, it's better
+        ;; to just use symbolp. e.g. (OR SYMBOL CHARACTER) should not
+        ;; become (OR (%OTHER-POINTER-SUBTYPE-P ...)
+        (when (null (rest widetags))
+          (return-from widetags-from-union-type (values nil types)))
+        ;; Manipulate 'remainder' to include NULL since NIL's lowtag
+        ;; isn't other-pointer.
+        (let ((null-type (specifier-type 'null)))
+          (unless (member null-type remainder :test #'csubtypep)
+            (push null-type remainder))))
+      (values widetags remainder))))

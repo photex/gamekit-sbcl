@@ -112,8 +112,10 @@
 ;;; readmacros instead of the ordinary #+ and #- readmacros.
 (setf *shebang-features*
       (let* ((default-features
-               (append (read-from-file "base-target-features.lisp-expr")
-                       (eval (read-from-file "local-target-features.lisp-expr"))))
+               (funcall (compile
+                         nil
+                         (read-from-file "local-target-features.lisp-expr"))
+                        (read-from-file "base-target-features.lisp-expr")))
              (customizer-file-name "customize-target-features.lisp")
              (customizer (if (probe-file customizer-file-name)
                              (compile nil
@@ -140,20 +142,25 @@
           "target backend-subfeatures *SHEBANG-BACKEND-FEATURES*=~@<~S~:>~%"
           *shebang-backend-subfeatures*))
 
+(let ((arch (intersection '(:alpha :arm :hppa :mips :ppc :sparc :x86 :x86-64)
+                          *shebang-features*)))
+  (cond ((not arch) (error "No architecture selected"))
+        ((> (length arch) 1) (error "More than one architecture selected"))))
+
 ;;; Some feature combinations simply don't work, and sometimes don't
 ;;; fail until quite a ways into the build.  Pick off the more obvious
 ;;; combinations now, and provide a description of what the actual
 ;;; failure is (not always obvious from when the build fails).
-(let ((feature-compatability-tests
+(let ((feature-compatibility-tests
        '(("(and sb-thread (not gencgc))"
           ":SB-THREAD requires :GENCGC")
          ("(and sb-thread (not (or ppc x86 x86-64)))"
           ":SB-THREAD not supported on selected architecture")
          ("(and gencgc cheneygc)"
           ":GENCGC and :CHENEYGC are incompatible")
-         ("(and cheneygc (not (or alpha hppa mips ppc sparc)))"
+         ("(and cheneygc (not (or alpha arm hppa mips ppc sparc)))"
           ":CHENEYGC not supported on selected architecture")
-         ("(and gencgc (not (or sparc ppc x86 x86-64)))"
+         ("(and gencgc (not (or sparc ppc x86 x86-64 arm)))"
           ":GENCGC not supported on selected architecture")
          ("(not (or gencgc cheneygc))"
           "One of :GENCGC or :CHENEYGC must be enabled")
@@ -167,15 +174,11 @@
           ;; updated to take the additional indirection into account.
           ;; Let's avoid this unusual combination.
           ":SB-DYNAMIC-CORE requires :LINKAGE-TABLE and :SB-THREAD")
-         ("(or (and alpha (or hppa mips ppc sparc x86 x86-64))
-               (and hppa (or mips ppc sparc x86 x86-64))
-               (and mips (or ppc sparc x86 x86-64))
-               (and ppc (or sparc x86 x86-64))
-               (and sparc (or x86 x86-64))
-               (and x86 x86-64))"
-          "More than one architecture selected")))
+         ;; There is still hope to make multithreading on DragonFly x86-64
+         ("(and sb-thread x86 dragonfly)"
+          ":SB-THREAD not supported on selected architecture")))
       (failed-test-descriptions nil))
-  (dolist (test feature-compatability-tests)
+  (dolist (test feature-compatibility-tests)
     (let ((*features* *shebang-features*))
       (when (read-from-string (concatenate 'string "#+" (first test) "T NIL"))
         (push (second test) failed-test-descriptions))))
@@ -232,12 +235,15 @@
 
 (defparameter *stems-and-flags* (read-from-file "build-order.lisp-expr"))
 
+(defvar *array-to-specialization* (make-hash-table :test #'eq))
+
 (defmacro do-stems-and-flags ((stem flags) &body body)
   (let ((stem-and-flags (gensym "STEM-AND-FLAGS")))
     `(dolist (,stem-and-flags *stems-and-flags*)
        (let ((,stem (first ,stem-and-flags))
              (,flags (rest ,stem-and-flags)))
-         ,@body))))
+         ,@body
+         (clrhash *array-to-specialization*)))))
 
 ;;; Given a STEM, remap the path component "/target/" to a suitable
 ;;; target directory.
@@ -253,6 +259,7 @@
                    #!+mips "mips"
                    #!+alpha "alpha"
                    #!+hppa "hppa"
+                   #!+arm "arm"
                    (subseq stem (+ position 7)))
       stem)))
 (compile 'stem-remap-target)

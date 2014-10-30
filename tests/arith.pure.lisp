@@ -34,8 +34,8 @@
 ;;; In a bug reported by Wolfhard Buss on cmucl-imp 2002-06-18 (BUG
 ;;; 184), sbcl didn't catch all divisions by zero, notably divisions
 ;;; of bignums and ratios by 0.  Fixed in sbcl-0.7.6.13.
-(assert (raises-error? (/ 2/3 0) division-by-zero))
-(assert (raises-error? (/ (1+ most-positive-fixnum) 0) division-by-zero))
+(assert-error (/ 2/3 0) division-by-zero)
+(assert-error (/ (1+ most-positive-fixnum) 0) division-by-zero)
 
 ;;; In a bug reported by Raymond Toy on cmucl-imp 2002-07-18, (COERCE
 ;;; <RATIONAL> '(COMPLEX FLOAT)) was failing to return a complex
@@ -51,8 +51,8 @@
 ;;; COERCE also sometimes failed to verify that a particular coercion
 ;;; was possible (in particular coercing rationals to bounded float
 ;;; types.
-(assert (raises-error? (coerce 1 '(float 2.0 3.0)) type-error))
-(assert (raises-error? (coerce 1 '(single-float -1.0 0.0)) type-error))
+(assert-error (coerce 1 '(float 2.0 3.0)) type-error)
+(assert-error (coerce 1 '(single-float -1.0 0.0)) type-error)
 (assert (eql (coerce 1 '(single-float -1.0 2.0)) 1.0))
 
 ;;; ANSI says MIN and MAX should signal TYPE-ERROR if any argument
@@ -70,6 +70,26 @@
 (assert (= (max -1 10.0) 10.0))
 (assert (null (ignore-errors (max 3 #'max))))
 (assert (= (max -3 0) 0))
+
+(with-test (:name :numeric-inequality-&rest-arguments)
+  (dolist (f '(= < <= > >=))
+    ;; 1 arg
+    (assert-error (funcall f 'feep) type-error)
+    (unless (eq f '=)
+      ;; = accepts complex numbers
+      (assert-error (funcall f #c(0s0 1s0)) type-error))
+    ;; 2 arg
+    (assert-error (funcall f 3 'feep) type-error)
+    (assert-error (funcall f 'feep 3) type-error)
+    ;; 3 arg
+    (assert-error (funcall f 0 0 'feep) type-error)
+    (assert-error (funcall f 0 1 'feep) type-error)
+    (assert-error (funcall f 1 0 'feep) type-error)
+    ;; 4 arg
+    (assert-error (funcall f 0 0 0 'feep) type-error))
+  ;; Also MIN,MAX operate only on REAL
+  (dolist (f '(min max))
+    (assert-error (funcall f #c(1s0 -2s0)) type-error)))
 
 ;;; (CEILING x 2^k) was optimized incorrectly
 (loop for divisor in '(-4 4)
@@ -217,7 +237,7 @@
              `(let ((fn (compile nil '(lambda (x)
                                        (declare (optimize speed) (fixnum x))
                                        (,name x 0)))))
-               (assert (raises-error? (funcall fn 1) division-by-zero)))))
+                (assert-error (funcall fn 1) division-by-zero))))
   (frob mod)
   (frob truncate)
   (frob rem)
@@ -381,8 +401,8 @@
 (with-test (:name :expt-zero-zero)
   ;; Check that (expt 0.0 0.0) and (expt 0 0.0) signal error, but (expt 0.0 0)
   ;; returns 1.0
-  (assert (raises-error? (expt 0.0 0.0) sb-int:arguments-out-of-domain-error))
-  (assert (raises-error? (expt 0 0.0) sb-int:arguments-out-of-domain-error))
+  (assert-error (expt 0.0 0.0) sb-int:arguments-out-of-domain-error)
+  (assert-error (expt 0 0.0) sb-int:arguments-out-of-domain-error)
   (assert (eql (expt 0.0 0) 1.0)))
 
 (with-test (:name :multiple-constant-folding)
@@ -630,27 +650,23 @@
             (assert (eql (logior x k) (funcall f x)))))))))
 
 (with-test (:name :ldb-negative-index-no-error)
-  (assert
-   (raises-error?
-    (funcall (compile nil
-                      `(lambda (x y)
-                         (ldb (byte x y) 100)))
-             -1 -2)))
-  (assert
-   (raises-error?
-    (funcall (compile nil
-                      `(lambda (x y)
-                         (mask-field (byte x y) 100)))
-             -1 -2)))
-  (assert
-   (raises-error?
-    (funcall (compile nil
-                      `(lambda (x y)
-                         (dpb 0 (byte x y) 100)))
-             -1 -2)))
-  (assert
-   (raises-error?
-    (funcall (compile nil
-                      `(lambda (x y)
-                         (deposit-field 0 (byte x y) 100)))
-             -1 -2))))
+  (assert-error
+   (funcall (compile nil
+                     `(lambda (x y)
+                        (ldb (byte x y) 100)))
+            -1 -2))
+  (assert-error
+   (funcall (compile nil
+                     `(lambda (x y)
+                        (mask-field (byte x y) 100)))
+            -1 -2))
+  (assert-error
+   (funcall (compile nil
+                     `(lambda (x y)
+                        (dpb 0 (byte x y) 100)))
+            -1 -2))
+  (assert-error
+   (funcall (compile nil
+                     `(lambda (x y)
+                        (deposit-field 0 (byte x y) 100)))
+            -1 -2)))

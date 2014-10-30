@@ -15,7 +15,7 @@
 
 (in-package "SB!IMPL")
 
-(declaim (maybe-inline get get2 get3 %put getf remprop %putf get-properties keywordp))
+(declaim (maybe-inline get get3 %put getf remprop %putf get-properties keywordp))
 
 (defun symbol-value (symbol)
   #!+sb-doc
@@ -56,7 +56,7 @@ distinct from the global value. Can also be SETF."
 
 (defun set-symbol-global-value (symbol new-value)
   (about-to-modify-symbol-value symbol 'set new-value)
-  (sb!kernel:%set-symbol-global-value symbol new-value))
+  (%set-symbol-global-value symbol new-value))
 
 (declaim (inline %makunbound))
 (defun %makunbound (symbol)
@@ -66,7 +66,8 @@ distinct from the global value. Can also be SETF."
   #!+sb-doc
   "Make SYMBOL unbound, removing any value it may currently have."
   (with-single-package-locked-error (:symbol symbol "unbinding the symbol ~A")
-    (when (and (info :variable :always-bound symbol))
+    ;; :EVENTUALLY is allowed for :always-bound here, as it has no bearing
+    (when (eq (info :variable :always-bound symbol) :always-bound)
       (error "Can't make ~A variable unbound: ~S" 'always-bound symbol))
     (about-to-modify-symbol-value symbol 'makunbound)
     (%makunbound symbol)
@@ -79,7 +80,7 @@ distinct from the global value. Can also be SETF."
 (defun symbol-function (symbol)
   #!+sb-doc
   "Return SYMBOL's current function definition. Settable with SETF."
-  (%coerce-name-to-fun symbol))
+  (!coerce-name-to-fun symbol-fdefn symbol))
 
 (defun (setf symbol-function) (new-value symbol)
   (declare (type symbol symbol) (type function new-value))
@@ -87,13 +88,163 @@ distinct from the global value. Can also be SETF."
       (:symbol symbol "setting the symbol-function of ~A")
     (setf (%coerce-name-to-fun symbol) new-value)))
 
+;;; Accessors for the dual-purpose info/plist slot
+
+;; A symbol's INFO slot is always in one of three states:
+;;   1. NIL                                    ; the initial state
+;;   2. #(data ....)                           ; globaldb used the slot
+;;   3. (PLIST . NIL) or (PLIST . #(data ...)) ; plist was touched,
+;;      and also possibly globaldb used the slot
+;;
+;; State 1 transitions to state 2 by assigning globaldb data,
+;;         or to state 3 via ({SETF|CAS} SYMBOL-PLIST).
+;;         (SETF INFO) by itself will never cause 1 -> 3 transition.
+;; State 2 transitions to state 3 via ({SETF|CAS} SYMBOL-PLIST).
+;; There are *no* other permissible state transitions.
+
+(defun symbol-info (symbol)
+  (symbol-info symbol))
+
+;; An "interpreter stub" for an operation that is only implemented for
+;; the benefit of platforms without compare-and-swap-vops.
+(defun (setf symbol-info) (new-info symbol)
+  (setf (symbol-info symbol) new-info))
+
+;; Atomically update SYMBOL's info/plist slot to contain a new info vector.
+;; The vector is computed by calling UPDATE-FN on the old vector,
+;; repeatedly as necessary, until no conflict happens with other updaters.
+;; The function may choose to abort the update by returning NIL.
+(defun update-symbol-info (symbol update-fn)
+  (declare (symbol symbol)
+           (type (function (t) t) update-fn))
+  (prog ((info-holder (symbol-info symbol))
+         (current-vect))
+   outer-restart
+    ;; Do not use SYMBOL-INFO-VECTOR - this must not perform a slot read again.
+    (setq current-vect (if (listp info-holder) (cdr info-holder) info-holder))
+   inner-restart
+    ;; KLUDGE: The "#." on +nil-packed-infos+ is due to slightly crippled
+    ;; fops in genesis's fasload. Anonymizing the constant works around the
+    ;; issue, at the expense of an extra copy of the empty info vector.
+    (let ((new-vect (funcall update-fn
+                             (or current-vect #.sb!c::+nil-packed-infos+))))
+      (unless (simple-vector-p new-vect)
+        (aver (null new-vect))
+        (return)) ; nothing to do
+      (if (consp info-holder) ; State 3: exchange the CDR
+          (let ((old (%compare-and-swap-cdr info-holder current-vect new-vect)))
+            (when (eq old current-vect) (return t)) ; win
+            (setq current-vect old) ; Don't touch holder- it's still a cons
+            (go inner-restart)))
+      ;; State 1 or 2: info-holder is NIL or a vector.
+      ;; Exchange the contents of the info slot. Type-inference derives
+      ;; SIMPLE-VECTOR-P on the args to CAS, so no extra checking.
+      (let ((old (%compare-and-swap-symbol-info symbol info-holder new-vect)))
+        (when (eq old info-holder) (return t)) ; win
+        ;; Check whether we're in state 2 or 3 now.
+        ;; Impossible to be in state 1: nobody ever puts NIL in the slot.
+        ;; Up above, we bailed out if the update-fn returned NIL.
+        (setq info-holder old)
+        (go outer-restart)))))
+
+(eval-when (:compile-toplevel)
+  ;; If we're in state 1 or state 3, we can take (CAR (SYMBOL-INFO S))
+  ;; to get the property list. If we're in state 2, this same access
+  ;; gets the fixnum which is the VECTOR-LENGTH of the info vector.
+  ;; So all we have to do is turn any fixnum to NIL, and we have a plist.
+  ;; Ensure that this pun stays working.
+  (assert (= (- (* sb!vm:n-word-bytes sb!vm:cons-car-slot)
+                sb!vm:list-pointer-lowtag)
+             (- (* sb!vm:n-word-bytes sb!vm:vector-length-slot)
+                sb!vm:other-pointer-lowtag))))
+
 (defun symbol-plist (symbol)
   #!+sb-doc
   "Return SYMBOL's property list."
-  (symbol-plist symbol))
+  #!+symbol-info-vops
+  (symbol-plist symbol) ; VOP translates it
+  #!-symbol-info-vops
+  (let ((list (car (truly-the list (symbol-info symbol))))) ; a white lie
+    ;; Just ensure the result is not a fixnum, and we're done.
+    (if (fixnump list) nil list)))
+
+(declaim (ftype (sfunction (symbol t) cons) %ensure-plist-holder)
+         (inline %ensure-plist-holder))
+
+;; When a plist update (setf or cas) is first performed on a symbol,
+;; a one-time allocation of an extra cons is done which creates two
+;; "slots" from one: a slot for the info-vector and a slot for the plist.
+;; This avoids complications in the implementation of the user-facing
+;; (CAS SYMBOL-PLIST) function, which should not have to be aware of
+;; competition from globaldb mutators even if no other threads attempt
+;; to manipulate the plist per se.
+
+;; Given a SYMBOL and its current INFO of type (OR LIST SIMPLE-VECTOR)
+;; ensure that SYMBOL's current info is a cons, and return that.
+;; If racing with multiple threads, at most one thread will install the cons.
+(defun %ensure-plist-holder (symbol info)
+  ;; Invoked only when SYMBOL is known to be a symbol.
+  (declare (optimize (safety 0)))
+  (if (consp info) ; it's fine to call this with a cell already installed
+      info ; all done
+      (let (newcell)
+        ;; The pointer from the new cons to the old info must be persisted
+        ;; to memory before the symbol's info slot points to the cons.
+        ;; [x86oid doesn't need the barrier, others might]
+        (sb!thread:barrier (:write)
+          (setq newcell (cons nil info)))
+        (loop (let ((old (%compare-and-swap-symbol-info symbol info newcell)))
+                (cond ((eq old info) (return newcell)) ; win
+                      ((consp old) (return old))) ; somebody else made a cons!
+                (setq info old)
+                (sb!thread:barrier (:write) ; Retry using same newcell
+                  (rplacd newcell info)))))))
+
+(declaim (inline %compare-and-swap-symbol-plist
+                 %set-symbol-plist))
+
+(defun %compare-and-swap-symbol-plist (symbol old new)
+  ;; This is the entry point into which (CAS SYMBOL-PLIST) is transformed.
+  ;; If SYMBOL's info cell is a cons, we can do (CAS CAR). Otherwise punt.
+  (declare (symbol symbol) (list old new))
+  (let ((cell (symbol-info symbol)))
+    (if (consp cell)
+        (%compare-and-swap-car cell old new)
+        (%%compare-and-swap-symbol-plist symbol old new))))
+
+(defun %%compare-and-swap-symbol-plist (symbol old new)
+  ;; This is just the second half of a partially-inline function, to avoid
+  ;; code bloat in the exceptional case.  Type assertions should have been
+  ;; done - or not, per policy - by the caller of %COMPARE-AND-SWAP-SYMBOL-PLIST
+  ;; so now use TRULY-THE to avoid further type checking.
+  (%compare-and-swap-car (%ensure-plist-holder (truly-the symbol symbol)
+                                               (symbol-info symbol))
+                         old new))
 
 (defun %set-symbol-plist (symbol new-value)
-  (setf (symbol-plist symbol) new-value))
+  ;; This is the entry point into which (SETF SYMBOL-PLIST) is transformed.
+  ;; If SYMBOL's info cell is a cons, we can do (SETF CAR). Otherwise punt.
+  (declare (symbol symbol) (list new-value))
+  (let ((cell (symbol-info symbol)))
+    (if (consp cell)
+        (setf (car cell) new-value)
+        (%%set-symbol-plist symbol new-value))))
+
+(defun %%set-symbol-plist (symbol new-value)
+  ;; Same considerations as for %%COMPARE-AND-SWAP-SYMBOL-PLIST,
+  ;; with a slight efficiency hack: if the symbol has no plist holder cell
+  ;; and the NEW-VALUE is NIL, try to avoid creating a holder cell.
+  ;; Yet we must write something, because omitting a memory operation
+  ;; could have a subtle effect in the presence of multi-threading.
+  (let ((info (symbol-info (truly-the symbol symbol))))
+    (when (and (not new-value) (atom info)) ; try to treat this as a no-op
+      (let ((old (%compare-and-swap-symbol-info symbol info info)))
+        (if (eq old info) ; good enough
+            (return-from %%set-symbol-plist new-value) ; = nil
+            (setq info old))))
+    (setf (car (%ensure-plist-holder symbol info)) new-value)))
+
+;;; End of Info/Plist slot manipulation
 
 (defun symbol-name (symbol)
   #!+sb-doc
@@ -122,20 +273,6 @@ distinct from the global value. Can also be SETF."
   "Look on the property list of SYMBOL for the specified INDICATOR. If this
   is found, return the associated value, else return DEFAULT."
   (get3 symbol indicator default))
-
-(defun get2 (symbol indicator)
-  (get3 symbol indicator nil))
-#|
-  (let (cdr-pl)
-    (do ((pl (symbol-plist symbol) (cdr cdr-pl)))
-        ((atom pl) nil)
-      (setf cdr-pl (cdr pl))
-      (cond ((atom cdr-pl)
-             (error "~S has an odd number of items in its property list."
-                    symbol))
-            ((eq (car pl) indicator)
-             (return (car cdr-pl)))))))
-|#
 
 (defun get3 (symbol indicator default)
   (let (cdr-pl)
@@ -242,9 +379,6 @@ distinct from the global value. Can also be SETF."
       (setf (symbol-function new-symbol) (symbol-function symbol))))
   new-symbol)
 
-;;; FIXME: This declaration should be redundant.
-(declaim (special *keyword-package*))
-
 (defun keywordp (object)
   #!+sb-doc
   "Return true if Object is a symbol in the \"KEYWORD\" package."
@@ -254,9 +388,27 @@ distinct from the global value. Can also be SETF."
 ;;;; GENSYM and friends
 
 (defun %make-symbol-name (prefix counter)
-  (with-output-to-string (s)
-    (write-string prefix s)
-    (%output-integer-in-base counter 10 s)))
+  (declare (string prefix))
+  (if (typep counter '(and fixnum unsigned-byte))
+      (let ((s ""))
+        (declare (simple-string s))
+        (labels ((recurse (depth n)
+                   (multiple-value-bind (q r) (truncate n 10)
+                     (if (plusp q)
+                         (recurse (1+ depth) q)
+                         (let ((et (if (or (base-string-p prefix)
+                                           (every #'base-char-p prefix))
+                                       'base-char 'character)))
+                           (setq s (make-string (+ (length prefix) depth)
+                                                :element-type et))
+                           (replace s prefix)))
+                     (setf (char s (- (length s) depth))
+                           (code-char (+ (char-code #\0) r)))
+                     s)))
+          (recurse 1 counter)))
+      (with-output-to-string (s)
+        (write-string prefix s)
+        (%output-integer-in-base counter 10 s))))
 
 (defvar *gensym-counter* 0
   #!+sb-doc
@@ -271,20 +423,13 @@ distinct from the global value. Can also be SETF."
    if it is a number, of this symbol. The default value of the number is
    the current value of *gensym-counter* which is incremented each time
    it is used."
-  (let ((old *gensym-counter*))
-    (unless (numberp thing)
-      (let ((new (etypecase old
-                   (index (1+ old))
-                   (unsigned-byte (1+ old)))))
-        (declare (optimize (speed 3) (safety 0) (inhibit-warnings 3)))
-        (setq *gensym-counter* new)))
-    (multiple-value-bind (prefix int)
-        (etypecase thing
-          (simple-string (values thing old))
-          (unsigned-byte (values "G" thing))
-          (string (values (coerce thing 'simple-string) old)))
-      (declare (simple-string prefix))
-      (make-symbol (%make-symbol-name prefix int)))))
+  (multiple-value-bind (prefix int)
+      (if (integerp thing)
+          (values "G" thing)
+          (values thing (let ((old *gensym-counter*))
+                          (setq *gensym-counter* (1+ old))
+                          old)))
+    (make-symbol (%make-symbol-name prefix int))))
 
 (defvar *gentemp-counter* 0)
 (declaim (type unsigned-byte *gentemp-counter*))
@@ -345,5 +490,5 @@ distinct from the global value. Can also be SETF."
                        :format-control "~@<Cannot ~@? to ~S, not of type ~S.~:@>"
                        :format-arguments (list (describe-action) symbol new-value spec)
                        :datum new-value
-                       :expected-type spec))))))))
-  (values))
+                       :expected-type spec)))))))
+    nil))

@@ -126,8 +126,7 @@
 
 ;;;; Initial disassembler setup.
 
-;;; FIXME-lav: is this still used, if so , why use package prefix
-;;; (setf sb!disassem:*disassem-inst-alignment-bytes* 4)
+(setf sb!disassem:*disassem-inst-alignment-bytes* 4)
 
 (defvar *disassem-use-lisp-reg-names* t)
 
@@ -417,30 +416,29 @@
   (op1  :field (byte 6 26) :value 0)
   (im13 :field (byte 13 13))
   (q2   :field (byte 8 5) :value 0)
-  (im5  :field (byte 5 0)))
+  (im5  :field (byte 5 0) :reader break-im5))
 
 (defun snarf-error-junk (sap offset &optional length-only)
-  (let* ((length (sb!sys:sap-ref-8 sap offset))
+  (let* ((length (sap-ref-8 sap offset))
          (vector (make-array length :element-type '(unsigned-byte 8))))
-    (declare (type sb!sys:system-area-pointer sap)
+    (declare (type system-area-pointer sap)
              (type (unsigned-byte 8) length)
              (type (simple-array (unsigned-byte 8) (*)) vector))
     (cond (length-only
            (values 0 (1+ length) nil nil))
           (t
-           (sb!kernel:copy-ub8-from-system-area sap (1+ offset)
-                                                vector 0 length)
+           (copy-ub8-from-system-area sap (1+ offset) vector 0 length)
            (collect ((sc-offsets)
                      (lengths))
              (lengths 1)                ; the length byte
              (let* ((index 0)
-                    (error-number (sb!c:read-var-integer vector index)))
+                    (error-number (read-var-integer vector index)))
                (lengths index)
                (loop
                  (when (>= index length)
                    (return))
                  (let ((old-index index))
-                   (sc-offsets (sb!c:read-var-integer vector index))
+                   (sc-offsets (read-var-integer vector index))
                    (lengths (- index old-index))))
                (values error-number
                        (1+ length)

@@ -63,56 +63,82 @@
        (declaim (inline ,name))
        (defun ,name (instance)
          (declare (type ,structure instance) (optimize speed))
-         (sb!ext:truly-the
-          sb!vm:word
-          (+ (sb!kernel:get-lisp-obj-address instance)
+         (truly-the
+          word
+          (+ (get-lisp-obj-address instance)
              (- (* ,(if (eq t raw-type)
                         (+ sb!vm:instance-slots-offset index)
-                        (- (1+ (sb!kernel::dd-instance-length dd)) sb!vm:instance-slots-offset index
+                        (- (1+ (sb!kernel::dd-instance-length dd))
+                           sb!vm:instance-slots-offset index
                            (1- (sb!kernel::raw-slot-words raw-type))))
                    sb!vm:n-word-bytes)
                 sb!vm:instance-pointer-lowtag)))))))
 
 ;;;; ATOMIC-INCF and ATOMIC-DECF
 
-(defun expand-atomic-frob (name place diff)
+(defun expand-atomic-frob (name specified-place diff env
+                           &aux (place (sb!xc:macroexpand specified-place env)))
+  (declare (type (member atomic-incf atomic-decf) name))
   (flet ((invalid-place ()
-           (error "Invalid first argument to ~S: ~S" name place)))
+           (error "Invalid first argument to ~S: ~S" name specified-place)))
+    (if (and (symbolp place)
+             (eq (info :variable :kind place) :global)
+             (type= (info :variable :type place) (specifier-type 'fixnum)))
+        ;; Global can't be lexically rebound.
+        (return-from expand-atomic-frob
+          `(truly-the fixnum (,(case name
+                                (atomic-incf '%atomic-inc-symbol-global-value)
+                                (atomic-decf '%atomic-dec-symbol-global-value))
+                              ',place (the fixnum ,diff)))))
+
     (unless (consp place)
       (invalid-place))
     (destructuring-bind (op &rest args) place
+      ;; FIXME: The lexical environment should not be disregarded.
+      ;; CL builtins can't be lexically rebound, but structure accessors can.
       (case op
         (aref
          (when (cddr args)
            (invalid-place))
          #!+(or x86 x86-64 ppc)
          (with-unique-names (array)
-           `(let ((,array (the (simple-array sb!ext:word (*)) ,(car args))))
+           `(let ((,array (the (simple-array word (*)) ,(car args))))
               (%array-atomic-incf/word
                ,array
                (%check-bound ,array (array-dimension ,array 0) ,(cadr args))
                (logand #.(1- (ash 1 sb!vm:n-word-bits))
-                       ,(ecase name
-                               (atomic-incf
-                                `(the sb!vm:signed-word ,diff))
-                               (atomic-decf
-                                `(- (the sb!vm:signed-word ,diff))))))))
+                       ,(case name
+                         (atomic-incf `(the sb!vm:signed-word ,diff))
+                         (atomic-decf `(- (the sb!vm:signed-word ,diff))))))))
          #!-(or x86 x86-64 ppc)
          (with-unique-names (array index old-value)
            (let ((incremented-value
-                  (ecase name
-                         (atomic-incf
-                          `(+ ,old-value (the sb!vm:signed-word ,diff)))
-                         (atomic-decf
-                          `(- ,old-value (the sb!vm:signed-word ,diff))))))
-             `(sb!sys:without-interrupts
-               (let* ((,array ,(car args))
-                      (,index ,(cadr args))
-                      (,old-value (aref ,array ,index)))
-                 (setf (aref ,array ,index)
-                       (logand #.(1- (ash 1 sb!vm:n-word-bits))
-                               ,incremented-value))
-                 ,old-value)))))
+                  (case name
+                   (atomic-incf
+                    `(+ ,old-value (the sb!vm:signed-word ,diff)))
+                   (atomic-decf
+                    `(- ,old-value (the sb!vm:signed-word ,diff))))))
+             `(without-interrupts
+                (let* ((,array ,(car args))
+                       (,index ,(cadr args))
+                       (,old-value (aref ,array ,index)))
+                  (setf (aref ,array ,index)
+                        (logand #.(1- (ash 1 sb!vm:n-word-bits))
+                                ,incremented-value))
+                  ,old-value)))))
+        ((car cdr first rest)
+         (when (cdr args)
+           (invalid-place))
+         `(truly-the
+           fixnum
+           (,(case op
+              ((first car) (case name
+                            (atomic-incf '%atomic-inc-car)
+                            (atomic-decf '%atomic-dec-car)))
+              ((rest cdr)  (case name
+                            (atomic-incf '%atomic-inc-cdr)
+                            (atomic-decf '%atomic-dec-cdr))))
+             ,(car args) (the fixnum ,diff))))
         (t
          (when (cdr args)
            (invalid-place))
@@ -135,74 +161,142 @@
                              (%raw-instance-atomic-incf/word
                               (the ,structure ,@args) ,index
                               (logand #.(1- (ash 1 sb!vm:n-word-bits))
-                                      ,(ecase name
-                                              (atomic-incf
-                                               `(the sb!vm:signed-word ,diff))
-                                              (atomic-decf
-                                               `(- (the sb!vm:signed-word ,diff)))))))
+                                      ,(case name
+                                        (atomic-incf
+                                         `(the sb!vm:signed-word ,diff))
+                                        (atomic-decf
+                                         `(- (the sb!vm:signed-word ,diff)))))))
                  ;; No threads outside x86 and x86-64 for now, so this is easy...
                  #!-(or x86 x86-64 ppc)
                  (with-unique-names (structure old)
-                                    `(sb!sys:without-interrupts
-                                      (let* ((,structure ,@args)
-                                             (,old (,op ,structure)))
-                                        (setf (,op ,structure)
-                                              (logand #.(1- (ash 1 sb!vm:n-word-bits))
-                                                      ,(ecase name
-                                                              (atomic-incf
-                                                               `(+ ,old (the sb!vm:signed-word ,diff)))
-                                                              (atomic-decf
-                                                               `(- ,old (the sb!vm:signed-word ,diff))))))
-                                        ,old))))
+                   `(without-interrupts
+                      (let* ((,structure ,@args)
+                             (,old (,op ,structure)))
+                        (setf (,op ,structure)
+                              (logand
+                               #.(1- (ash 1 sb!vm:n-word-bits))
+                               ,(case name
+                                 (atomic-incf
+                                  `(+ ,old (the sb!vm:signed-word ,diff)))
+                                 (atomic-decf
+                                  `(- ,old (the sb!vm:signed-word ,diff))))))
+                        ,old))))
              (invalid-place))))))))
 
-(defmacro atomic-incf (place &optional (diff 1))
+(def!macro atomic-incf (&environment env place &optional (diff 1))
   #!+sb-doc
+  #.(format nil
   "Atomically increments PLACE by DIFF, and returns the value of PLACE before
 the increment.
 
-The incrementation is done using word-size modular arithmetic: on 32 bit
-platforms ATOMIC-INCF of #xFFFFFFFF by one results in #x0 being stored in
-PLACE.
+PLACE must access one of the following:
+ - a DEFSTRUCT slot with declared type (UNSIGNED-BYTE ~D~:*)
+   or AREF of a (SIMPLE-ARRAY (UNSIGNED-BYTE ~D~:*) (*))
+   The type SB-EXT:WORD can be used for these purposes.
+ - CAR or CDR (respectively FIRST or REST) of a CONS.
+ - a variable defined using DEFGLOBAL with a proclaimed type of FIXNUM.
+Macroexpansion is performed on PLACE before expanding ATOMIC-INCF.
 
-PLACE must be an accessor form whose CAR is the name of a DEFSTRUCT accessor
-whose declared type is (UNSIGNED-BYTE 32) on 32 bit platforms,
-and (UNSIGNED-BYTE 64) on 64 bit platforms or an AREF of a (SIMPLE-ARRAY
-SB-EXT:WORD (*) -- the type SB-EXT:WORD can be used for this purpose.
+Incrementing is done using modular arithmetic,
+which is well-defined over two different domains:
+ - For structures and arrays, the operation accepts and produces
+   an (UNSIGNED-BYTE ~D~:*), and DIFF must be of type (SIGNED-BYTE ~D).
+   ATOMIC-INCF of #x~x by one results in #x0 being stored in PLACE.
+ - For other places, the domain is FIXNUM, and DIFF must be a FIXNUM.
+   ATOMIC-INCF of #x~x by one results in #x~x
+   being stored in PLACE.
 
-DIFF defaults to 1, and must be a (SIGNED-BYTE 32) on 32 bit platforms,
-and (SIGNED-BYTE 64) on 64 bit platforms.
+DIFF defaults to 1.
 
 EXPERIMENTAL: Interface subject to change."
-  (expand-atomic-frob 'atomic-incf place diff))
+  sb!vm:n-word-bits most-positive-word
+  sb!xc:most-positive-fixnum sb!xc:most-negative-fixnum)
+  (expand-atomic-frob 'atomic-incf place diff env))
 
-(defmacro atomic-decf (place &optional (diff 1))
+(defmacro atomic-decf (&environment env place &optional (diff 1))
   #!+sb-doc
+  #.(format nil
   "Atomically decrements PLACE by DIFF, and returns the value of PLACE before
-the increment.
+the decrement.
 
-The decrementation is done using word-size modular arithmetic: on 32 bit
-platforms ATOMIC-DECF of #x0 by one results in #xFFFFFFFF being stored in
-PLACE.
+PLACE must access one of the following:
+ - a DEFSTRUCT slot with declared type (UNSIGNED-BYTE ~D~:*)
+   or AREF of a (SIMPLE-ARRAY (UNSIGNED-BYTE ~D~:*) (*))
+   The type SB-EXT:WORD can be used for these purposes.
+ - CAR or CDR (respectively FIRST or REST) of a CONS.
+ - a variable defined using DEFGLOBAL with a proclaimed type of FIXNUM.
+Macroexpansion is performed on PLACE before expanding ATOMIC-DECF.
 
-PLACE must be an accessor form whose CAR is the name of a DEFSTRUCT accessor
-whose declared type is (UNSIGNED-BYTE 32) on 32 bit platforms,
-and (UNSIGNED-BYTE 64) on 64 bit platforms or an AREF of a (SIMPLE-ARRAY
-SB-EXT:WORD (*) -- the type SB-EXT:WORD can be used for this purpose.
+Decrementing is done using modular arithmetic,
+which is well-defined over two different domains:
+ - For structures and arrays, the operation accepts and produces
+   an (UNSIGNED-BYTE ~D~:*), and DIFF must be of type (SIGNED-BYTE ~D).
+   ATOMIC-DECF of #x0 by one results in #x~x being stored in PLACE.
+ - For other places, the domain is FIXNUM, and DIFF must be a FIXNUM.
+   ATOMIC-DECF of #x~x by one results in #x~x
+   being stored in PLACE.
 
-DIFF defaults to 1, and must be a (SIGNED-BYTE 32) on 32 bit platforms,
-and (SIGNED-BYTE 64) on 64 bit platforms.
+DIFF defaults to 1.
 
 EXPERIMENTAL: Interface subject to change."
-  (expand-atomic-frob 'atomic-decf place diff))
+  sb!vm:n-word-bits most-positive-word
+  sb!xc:most-negative-fixnum sb!xc:most-positive-fixnum)
+  (expand-atomic-frob 'atomic-decf place diff env))
 
 ;; Interpreter stubs for ATOMIC-INCF.
 #!+(or x86 x86-64 ppc)
 (defun %array-atomic-incf/word (array index diff)
   (declare (type (simple-array word (*)) array)
-           (fixnum index)
+           (type fixnum index)
            (type sb!vm:signed-word diff))
   (%array-atomic-incf/word array index diff))
+
+;; This code would be more concise if workable versions
+;; of +-MODFX, --MODFX were defined generically.
+(macrolet ((modular (fun a b)
+             #!+(or x86 x86-64)
+             `(,(let ((*package* (find-package "SB!VM")))
+                  (symbolicate fun "-MODFX"))
+                ,a ,b)
+             #!-(or x86 x86-64)
+             ;; algorithm of https://graphics.stanford.edu/~seander/bithacks
+             `(let ((res (logand (,fun ,a ,b)
+                                 (ash sb!ext:most-positive-word
+                                      (- sb!vm:n-fixnum-tag-bits))))
+                    (m (ash 1 (1- sb!vm:n-fixnum-bits))))
+                (- (logxor res m) m))))
+
+  ;; Atomically frob a global variable.
+  ;; There is a quasi-bug that "can't happen" - the CAS operation will swap
+  ;; a thread-local value, however this function should only be called with
+  ;; a symbol that is known not to be thread-locally bindable.
+  ;; (We should define a CASser for SYMBOL-GLOBAL-VALUE)
+  (macrolet ((def-frob (name op)
+               `(defun ,name (symbol delta)
+                  (declare (type symbol symbol) (type fixnum delta))
+                  (loop (let ((old (truly-the
+                                    fixnum
+                                    (locally (declare (optimize (safety 0)))
+                                      (symbol-global-value symbol)))))
+                          (when (eq (%compare-and-swap-symbol-value
+                                     symbol old (modular ,op old delta))
+                                    old)
+                            (return old)))))))
+    (def-frob %atomic-inc-symbol-global-value +)
+    (def-frob %atomic-dec-symbol-global-value -))
+
+  ;; Atomically frob the CAR or CDR of a cons.
+  (macrolet ((def-frob (name op slot)
+               `(defun ,name (cell delta)
+                  (declare (type cons cell) (type fixnum delta))
+                  (loop (let ((old (the fixnum (,slot cell))))
+                          (when (eq (cas (,slot cell) old
+                                         (modular ,op old delta)) old)
+                            (return old)))))))
+    (def-frob %atomic-inc-car + car)
+    (def-frob %atomic-dec-car - car)
+    (def-frob %atomic-inc-cdr + cdr)
+    (def-frob %atomic-dec-cdr - cdr)))
 
 (defun spin-loop-hint ()
   #!+sb-doc
@@ -232,26 +326,49 @@ locally bound, declared special, defined as constants, and neither bound
 nor defined as symbol macros.
 
 See also the declarations SB-EXT:GLOBAL and SB-EXT:ALWAYS-BOUND."
-  `(progn
-     (eval-when (:compile-toplevel)
-       (let ((boundp (boundp ',name)))
-         (%compiler-defglobal ',name (unless boundp ,value) boundp)))
-     (eval-when (:load-toplevel :execute)
-       (let ((boundp (boundp ',name)))
-         (%defglobal ',name (unless boundp ,value) boundp ',doc ,docp
+  (let ((boundp (make-symbol "BOUNDP")))
+    `(progn
+       (eval-when (:compile-toplevel)
+         (let ((,boundp (boundp ',name)))
+           (%compiler-defglobal ',name :always-bound
+                                (unless ,boundp ,value) (not ,boundp))))
+       (let ((,boundp (boundp ',name)))
+         (%defglobal ',name (unless ,boundp ,value) ,boundp ',doc ,docp
                      (sb!c:source-location))))))
 
-(defun %compiler-defglobal (name value boundp)
+(defmacro-mundanely define-load-time-global (name value &optional (doc nil docp))
+  #!+sb-doc
+  "Defines NAME as a global variable that is always bound. VALUE is evaluated
+and assigned to NAME at load-time, but only if NAME is not already bound.
+
+Attempts to read NAME at compile-time will signal an UNBOUND-VARIABLE error
+unless it has otherwise been assigned a value.
+
+See also DEFGLOBAL which assigns the VALUE at compile-time too."
+  (let ((boundp (make-symbol "BOUNDP")))
+    `(progn
+       (eval-when (:compile-toplevel)
+         (%compiler-defglobal ',name :eventually nil nil))
+       (let ((,boundp (boundp ',name)))
+         (%defglobal ',name (unless ,boundp ,value) ,boundp ',doc ,docp
+                     (sb!c:source-location))))))
+
+(defun %compiler-defglobal (name always-boundp value assign-it-p)
   (sb!xc:proclaim `(global ,name))
-  (unless boundp
+  (when assign-it-p
     #-sb-xc-host
     (set-symbol-global-value name value)
     #+sb-xc-host
     (set name value))
-  (sb!xc:proclaim `(always-bound ,name)))
+  (sb!c::process-variable-declaration
+   name 'always-bound
+   ;; don't "weaken" the proclamation if it's in fact always bound now
+   (if (eq (info :variable :always-bound name) :always-bound)
+       :always-bound
+       always-boundp)))
 
 (defun %defglobal (name value boundp doc docp source-location)
-  (%compiler-defglobal name value boundp)
+  (%compiler-defglobal name :always-bound value (not boundp))
   (when docp
     (setf (fdocumentation name 'variable) doc))
   (sb!c:with-source-location (source-location)
@@ -267,7 +384,7 @@ See also the declarations SB-EXT:GLOBAL and SB-EXT:ALWAYS-BOUND."
              (awhen (funcall test)
                (return-from %%wait-for it)))
            (tick (sec usec)
-             (declare (fixnum sec usec))
+             (declare (type fixnum sec usec))
              ;; TICK is microseconds
              (+ usec (* 1000000 sec)))
            (get-tick ()
@@ -307,7 +424,7 @@ See also the declarations SB-EXT:GLOBAL and SB-EXT:ALWAYS-BOUND."
                                 (- timeout-tick now)
                                 sleep-ticks)
                             sleep-ticks)))
-                 (declare (fixnum sleep))
+                 (declare (type fixnum sleep))
                  (cond ((plusp sleep)
                         ;; microseconds to seconds and nanoseconds
                         (multiple-value-bind (sec nsec)
@@ -362,7 +479,7 @@ returns NIL each time."
                   (let ((,time-left (- ,deadline (get-internal-real-time))))
                     (if (plusp ,time-left)
                         (* (coerce ,time-left 'single-float)
-                           ,(/ 1.0 internal-time-units-per-second))
+                           (load-time-value (/ 1.0f0 internal-time-units-per-second) t))
                         0)))))
          ,@body))))
 
@@ -436,3 +553,44 @@ Works on all CASable places."
              for ,new = (cdr ,old)
              until (eq ,old (setf ,old ,cas-form))
              finally (return (car ,old))))))
+
+(defun split-version-string (string)
+  (loop with subversion and start = 0
+        with end = (length string)
+        when (setf (values subversion start)
+                   (parse-integer string :start start :junk-allowed t))
+        collect it
+        while (and subversion
+                   (< start end)
+                   (char= (char string start) #\.))
+        do (incf start)))
+
+(defun version>= (x y)
+  (unless (or x y)
+    (return-from version>= t))
+  (let ((head-x (or (first x) 0))
+        (head-y (or (first y) 0)))
+    (or (> head-x head-y)
+        (and (= head-x head-y)
+             (version>= (rest x) (rest y))))))
+
+(defun assert-version->= (&rest subversions)
+  #!+sb-doc
+  "Asserts that the current SBCL is of version equal to or greater than
+the version specified in the arguments.  A continuable error is signaled
+otherwise.
+
+The arguments specify a sequence of subversion numbers in big endian order.
+They are compared lexicographically with the runtime version, and versions
+are treated as though trailed by an unbounded number of 0s.
+
+For example, (assert-version->= 1 1 4) asserts that the current SBCL is
+version 1.1.4[.0.0...] or greater, and (assert-version->= 1) that it is
+version 1[.0.0...] or greater."
+  (let ((version (split-version-string (lisp-implementation-version))))
+    (unless (version>= version subversions)
+      (cerror "Disregard this version requirement."
+              "SBCL ~A is too old for this program (version ~{~A~^.~} ~
+               or later is required)."
+              (lisp-implementation-version)
+              subversions))))

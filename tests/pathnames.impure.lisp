@@ -302,9 +302,9 @@
   (assert (string=
            (namestring (parse-namestring "FOO" (host-namestring #p"SCRATCH:BAR")))
            "SCRATCH:FOO"))
-  (assert (raises-error?
-           (setf (logical-pathname-translations "")
-                 (list '("**;*.*.*" "/**/*.*"))))))
+  (assert-error
+   (setf (logical-pathname-translations "")
+         (list '("**;*.*.*" "/**/*.*")))))
 
 ;;; Bug 200: translate-logical-pathname is according to the spec supposed
 ;;; not to give errors if asked to translate a namestring for a valid
@@ -318,36 +318,40 @@
 ;;; functions (they would cause memory protection errors).  Make sure
 ;;; that those errors are gone:
 (with-test (:name (:string-streams-as-pathnames 1))
-  (assert (raises-error? (pathname (make-string-input-stream "FOO"))
-                         type-error))
-  (assert (raises-error? (merge-pathnames (make-string-output-stream))
-                         type-error)))
+  (assert-error (pathname (make-string-input-stream "FOO"))
+                type-error)
+  (assert-error (merge-pathnames (make-string-output-stream))
+                type-error))
 
 ;;; ensure print-read consistency (or print-not-readable-error) on
 ;;; pathnames:
-(with-test (:name :print/read-consistency :fails-on :win32)
+(with-test (:name :print/read-consistency)
   (let ((pathnames (list
                     (make-pathname :name "foo" :type "txt" :version :newest)
                     (make-pathname :name "foo" :type "txt" :version 1)
                     (make-pathname :name "foo" :type ".txt")
                     (make-pathname :name "foo." :type "txt")
+                    (make-pathname :name "\\" :type "txt")
+                    (make-pathname :name "^" :type "txt")
+                    (make-pathname :name "foo*" :type "txt")
+                    (make-pathname :name "foo[" :type "txt")
                     (parse-namestring "SCRATCH:FOO.TXT.1")
                     (parse-namestring "SCRATCH:FOO.TXT.NEWEST")
                     (parse-namestring "SCRATCH:FOO.TXT"))))
     (dolist (p pathnames)
       (print p)
       (handler-case
-         (let* ((*print-readably* t)
-                (new (read-from-string (format nil "~S" p))))
-           (unless (equal new p)
-             (let ((*print-readably* nil))
-               (error "oops: host:~S device:~S dir:~S version:~S~% ->~%~
+          (let* ((*print-readably* t)
+                 (new (read-from-string (format nil "~S" p))))
+            (unless (equal new p)
+              (let ((*print-readably* nil))
+                (error "oops: host:~S device:~S dir:~S version:~S~% ->~%~
                              host:~S device:~S dir:~S version:~S"
-                      (pathname-host p) (pathname-device p)
-                      (pathname-directory p) (pathname-version p)
-                      (pathname-host new) (pathname-device new)
-                      (pathname-directory new) (pathname-version new)))))
-       (print-not-readable ()
+                       (pathname-host p) (pathname-device p)
+                       (pathname-directory p) (pathname-version p)
+                       (pathname-host new) (pathname-device new)
+                       (pathname-directory new) (pathname-version new)))))
+        (print-not-readable ()
           nil)))))
 
 ;;; BUG 330: "PARSE-NAMESTRING should accept namestrings as the
@@ -398,9 +402,9 @@
 
 ;;; we got (truename "/") wrong for about 6 months.  Check that it's
 ;;; still right.
-(with-test (:name :root-truename :fails-on :win32)
+(with-test (:name :root-truename)
   (let ((pathname (truename "/")))
-    (assert (equalp pathname #p"/"))
+    (assert (equalp pathname (merge-pathnames #p"/")))
     (assert (equal (pathname-directory pathname) '(:absolute)))))
 
 ;;; we failed to unparse logical pathnames with :NAME :WILD :TYPE NIL.
@@ -412,7 +416,7 @@
     (assert (string= (write-to-string pathname :readably t) "#P\"SYS:**;*\""))))
 
 ;;; reported by James Y Knight on sbcl-devel 2006-05-17
-(with-test (:name :merge-back :fails-on :win32)
+(with-test (:name :merge-back)
   (let ((p1 (make-pathname :directory '(:relative "bar")))
         (p2 (make-pathname :directory '(:relative :back "foo"))))
     (assert (equal (merge-pathnames p1 p2)
@@ -567,7 +571,7 @@
       (ignore-errors (delete-file bar))
       (setf (logical-pathname-translations "SYS") translations))))
 
-(with-test (:name :tilde-expansion :fails-on :win32)
+(with-test (:name :tilde-expansion)
   (assert (equal '(:absolute :home "foo") (pathname-directory "~/foo/bar.txt")))
   (assert (equal '(:absolute (:home "jdoe") "quux") (pathname-directory "~jdoe/quux/")))
   (assert (equal "~/foo/x" (namestring (make-pathname :directory '(:absolute :home "foo")
@@ -579,7 +583,9 @@
   ;; Not at the start of the first directory
   (assert (equal (native-namestring #p"foo/~/bar")
                  #-win32 "foo/~/bar"
-                 #+win32 "foo\\~\\bar")))
+                 #+win32 "foo\\~\\bar"))
+  (equal (native-namestring (merge-pathnames "~/"))
+         (native-namestring (user-homedir-pathname))))
 
 ;;; lp#673625
 (with-test (:name :pathname-escape-first-directory-component
@@ -600,7 +606,7 @@
   (let* ((x '("hint--if-you-are-having-trouble-deleting-this-test-directory"
               "use-the-7zip-file-manager"))
          (base (truename
-                (directory-namestring (or *load-pathname* *compile-pathname*))))
+                (directory-namestring (or *load-pathname* *compile-file-pathname*))))
          (shallow (make-pathname :directory `(:relative ,(car x))))
          (shallow (merge-pathnames shallow base))
          (deep (make-pathname
@@ -616,5 +622,13 @@
            (assert (probe-file deep)))
       (sb-ext:delete-directory shallow :recursive t))
     (assert (not (probe-file shallow)))))
+
+#+unix
+(with-test (:name :simplify-namestring)
+  (assert (string= (sb-int:simplify-namestring "./a/b/../c/")
+                   "a/c/")))
+
+(with-test (:name :back-and-truename)
+  (probe-file (make-pathname :directory '(:absolute "a" "b" :back))))
 
 ;;;; success

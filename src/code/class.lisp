@@ -192,21 +192,32 @@
   (pure nil :type (member t nil 0))
   ;; Number of raw words at the end.
   ;; This slot is known to the C runtime support code.
+  ;; It counts the number of untagged cells, not user-visible slots.
+  ;; e.g. on 32-bit machines, each (COMPLEX DOUBLE-FLOAT) counts as 4.
   (n-untagged-slots 0 :type index)
   ;; Definition location
   (source-location nil)
+  ;; If this layout is for an object of metatype STANDARD-CLASS,
+  ;; these are the EFFECTIVE-SLOT-DEFINITION metaobjects.
+  (slot-list nil :type list)
   ;; Information about slots in the class to PCL: this provides fast
   ;; access to slot-definitions and locations by name, etc.
   (slot-table #(nil) :type simple-vector)
   ;; True IFF the layout belongs to a standand-instance or a
-  ;; standard-funcallable-instance -- that is, true only if the layout
-  ;; is really a wrapper.
-  ;;
-  ;; FIXME: If we unify wrappers and layouts this can go away, since
-  ;; it is only used in SB-PCL::EMIT-FETCH-WRAPPERS, which can then
-  ;; use INSTANCE-SLOTS-LAYOUT instead (if there is are no slot
-  ;; layouts, there are no slots for it to pull.)
-  (for-std-class-p nil :type boolean :read-only t))
+  ;; standard-funcallable-instance.
+  ;; Old comment was:
+  ;;   FIXME: If we unify wrappers and layouts this can go away, since
+  ;;   it is only used in SB-PCL::EMIT-FETCH-WRAPPERS, which can then
+  ;;   use INSTANCE-SLOTS-LAYOUT instead (if there is are no slot
+  ;;   layouts, there are no slots for it to pull.)
+  ;; But while that's conceivable, it still seems advantageous to have
+  ;; a single bit that decides whether something is STANDARD-OBJECT.
+  (%for-std-class-b 0 :type bit :read-only t))
+
+(declaim (freeze-type layout)) ; Good luck hot-patching new subtypes of LAYOUT
+
+(declaim (inline layout-for-std-class-p))
+(defun layout-for-std-class-p (x) (not (zerop (layout-%for-std-class-b x))))
 
 (def!method print-object ((layout layout) stream)
   (print-unreadable-object (layout stream :type t :identity t)
@@ -251,6 +262,9 @@
 ;;; function in a MAKE-LOAD-FORM expression) that functionality has
 ;;; been split off into INIT-OR-CHECK-LAYOUT.
 (declaim (ftype (sfunction (symbol) layout) find-layout))
+;; The comment "This seems ..." is misleading but I don't have a better one.
+;; FIND-LAYOUT is used by FIND-AND-INIT-OR-CHECK-LAYOUT which is used
+;; by FOP-LAYOUT, so clearly it's used when reading fasl files.
 (defun find-layout (name)
   ;; This seems to be currently used only from the compiler, but make
   ;; it thread-safe all the same. We need to lock *F-R-L* before doing
@@ -672,9 +686,7 @@
 ;;; classes. Non-structure "typed" defstructs are a special case, and
 ;;; don't have a corresponding class.
 (def!struct (structure-classoid (:include classoid)
-                                (:constructor make-structure-classoid))
-  ;; If true, a default keyword constructor for this structure.
-  (constructor nil :type (or function null)))
+                                (:constructor make-structure-classoid)))
 
 ;;;; classoid namespace
 
@@ -685,7 +697,7 @@
              (:make-load-form-fun (lambda (c)
                                     `(find-classoid-cell
                                       ',(classoid-cell-name c)
-                                      :errorp t)))
+                                      :create t)))
              #-no-ansi-print-object
              (:print-object (lambda (s stream)
                               (print-unreadable-object (s stream :type t)
@@ -696,25 +708,14 @@
   (classoid nil :type (or classoid null))
   ;; PCL class, if any
   (pcl-class nil))
+(declaim (freeze-type classoid-cell))
 
-;;; Protected by the hash-table lock, used only in FIND-CLASSOID-CELL.
-(defvar *classoid-cells*)
-(!cold-init-forms
-  (setq *classoid-cells* (make-hash-table :test 'eq)))
-
-(defun find-classoid-cell (name &key create errorp)
-  (let ((table *classoid-cells*)
-        (real-name (uncross name)))
-    (or (with-locked-system-table (table)
-          (or (gethash real-name table)
-              (when create
-                (setf (gethash real-name table) (make-classoid-cell real-name)))))
-        (when errorp
-          (error 'simple-type-error
-                 :datum nil
-                 :expected-type 'class
-                 :format-control "Class not yet defined: ~S"
-                 :format-arguments (list name))))))
+(defun find-classoid-cell (name &key create)
+  (let ((real-name (uncross name)))
+    (cond ((info :type :classoid-cell real-name))
+          (create
+           (get-info-value-initializing :type :classoid-cell real-name
+                                        (make-classoid-cell real-name))))))
 
 (eval-when (#-sb-xc :compile-toplevel :load-toplevel :execute)
 
@@ -722,8 +723,14 @@
   ;; then NIL is returned when no such class exists."
   (defun find-classoid (name &optional (errorp t))
     (declare (type symbol name))
-    (let ((cell (find-classoid-cell name :errorp errorp)))
-      (when cell (classoid-cell-classoid cell))))
+    (let ((cell (find-classoid-cell name)))
+      (cond ((and cell (classoid-cell-classoid cell)))
+            (errorp
+             (error 'simple-type-error
+                    :datum nil
+                    :expected-type 'class
+                    :format-control "Class not yet defined: ~S"
+                    :format-arguments (list name))))))
 
   (defun (setf find-classoid) (new-value name)
     #-sb-xc (declare (type (or null classoid) new-value))
@@ -769,9 +776,9 @@
             (:defined
              (warn "redefining DEFTYPE type to be a class: ~
                     ~/sb-impl::print-symbol-with-prefix/" name)
-                (setf (info :type :expander name) nil
-                      (info :type :lambda-list name) nil
-                      (info :type :source-location name) nil)))
+             (clear-info :type :expander name)
+             (clear-info :type :lambda-list name)
+             (clear-info :type :source-location name)))
 
           (remhash name table)
           (%note-type-defined name)
@@ -817,9 +824,9 @@
          ;; Clear the cell.
          (setf (classoid-cell-classoid cell) nil
                (classoid-cell-pcl-class cell) nil))
-       (setf (info :type :kind name) nil
-             (info :type :documentation name) nil
-             (info :type :compiler-layout name) nil)))))
+       (clear-info :type :kind name)
+       (clear-info :type :documentation name)
+       (clear-info :type :compiler-layout name)))))
 
 ;;; Called when we are about to define NAME as a class meeting some
 ;;; predicate (such as a meta-class type test.) The first result is
@@ -894,6 +901,7 @@
       (return-from %ensure-both-classoids-valid nil))))
 
 (defun update-object-layout-or-invalid (object layout)
+  ;; FIXME: explain why this isn't (LAYOUT-FOR-STD-CLASS-P LAYOUT).
   (if (layout-for-std-class-p (layout-of object))
       (sb!pcl::check-wrapper-validity object)
       (sb!c::%layout-invalid-error object layout)))
@@ -1067,13 +1075,13 @@
              :prototype-form '#:mu)
 
      (system-area-pointer :codes (#.sb!vm:sap-widetag)
-                          :prototype-form (sb!sys:int-sap 42))
+                          :prototype-form (int-sap 42))
      (weak-pointer :codes (#.sb!vm:weak-pointer-widetag)
-      :prototype-form (sb!ext:make-weak-pointer (find-package "CL")))
+      :prototype-form (make-weak-pointer (find-package "CL")))
      (code-component :codes (#.sb!vm:code-header-widetag))
      (lra :codes (#.sb!vm:return-pc-header-widetag))
      (fdefn :codes (#.sb!vm:fdefn-widetag)
-            :prototype-form (sb!kernel:make-fdefn "42"))
+            :prototype-form (make-fdefn "42"))
      (random-class) ; used for unknown type codes
 
      (function
@@ -1559,7 +1567,7 @@
 
 (!cold-init-forms
   #-sb-xc-host (/show0 "about to set *BUILT-IN-CLASS-CODES*")
-  (setq *built-in-class-codes*
+  (setq **built-in-class-codes**
         (let* ((initial-element
                 (locally
                   ;; KLUDGE: There's a FIND-CLASSOID DEFTRANSFORM for
@@ -1576,13 +1584,6 @@
               (let ((layout (classoid-layout (find-classoid name))))
                 (dolist (code codes)
                   (setf (svref res code) layout)))))))
-  (setq *null-classoid-layout*
-        ;; KLUDGE: we use (LET () ...) instead of a LOCALLY here to
-        ;; work around a bug in the LOCALLY handling in the fopcompiler
-        ;; (present in 0.9.13-0.9.14.18). -- JES, 2006-07-16
-        (let ()
-          (declare (notinline find-classoid))
-          (classoid-layout (find-classoid 'null))))
   #-sb-xc-host (/show0 "done setting *BUILT-IN-CLASS-CODES*"))
 
 (!defun-from-collected-cold-init-forms !classes-cold-init)

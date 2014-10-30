@@ -463,7 +463,21 @@ void setup_locale()
 #endif
   }
 }
-
+void print_environment(int argc, char *argv[])
+{
+    int n = 0;
+    printf("; Commandline arguments:\n");
+    while (n < argc) {
+        printf(";  %2d: \"%s\"\n", n, argv[n]);
+        ++n;
+    }
+    n = 0;
+    printf(";\n; Environment:\n");
+    while (ENVIRON[n]) {
+        printf(";  %2d: \"%s\"\n", n, ENVIRON[n]);
+        ++n;
+    }
+}
 
 int
 main(int argc, char *argv[], char *envp[])
@@ -484,6 +498,7 @@ main(int argc, char *argv[], char *envp[])
     boolean noinform = 0;
     boolean end_runtime_options = 0;
     boolean disable_lossage_handler_p = 0;
+    boolean debug_environment_p = 0;
 
     lispobj initial_function;
     const char *sbcl_home = getenv("SBCL_HOME");
@@ -572,14 +587,22 @@ main(int argc, char *argv[], char *envp[])
                 ++argi;
                 if (argi >= argc)
                     lose("missing argument for --dynamic-space-size");
-                  dynamic_space_size = parse_size_arg(argv[argi++], "--dynamic-space-size");
+                  dynamic_space_size = parse_size_arg(argv[argi++],
+                                                      "--dynamic-space-size");
 #               ifdef MAX_DYNAMIC_SPACE_END
                 if (!((DYNAMIC_SPACE_START <
                        DYNAMIC_SPACE_START+dynamic_space_size) &&
                       (DYNAMIC_SPACE_START+dynamic_space_size <=
-                       MAX_DYNAMIC_SPACE_END)))
-                  lose("--dynamic-space-size argument %s is too large, max %lu",
-                       argv[argi-1], MAX_DYNAMIC_SPACE_END-DYNAMIC_SPACE_START);
+                       MAX_DYNAMIC_SPACE_END))) {
+                  char* suffix = "";
+                  char* size = argv[argi-1];
+                  if (!strchr(size, 'B') && !strchr(size, 'b')) {
+                    suffix = " [MB]";
+                  }
+                  lose("--dynamic-space-size argument %s%s is too large, max %lu KB",
+                       size, suffix,
+                       (MAX_DYNAMIC_SPACE_END-DYNAMIC_SPACE_START) / 1024);
+                }
 #               endif
             } else if (0 == strcmp(arg, "--control-stack-size")) {
                 ++argi;
@@ -588,18 +611,7 @@ main(int argc, char *argv[], char *envp[])
                 errno = 0;
                 thread_control_stack_size = parse_size_arg(argv[argi++], "--control-stack-size");
             } else if (0 == strcmp(arg, "--debug-environment")) {
-                int n = 0;
-                printf("; Commandline arguments:\n");
-                while (n < argc) {
-                    printf(";  %2d: \"%s\"\n", n, argv[n]);
-                    ++n;
-                }
-                n = 0;
-                printf(";\n; Environment:\n");
-                while (ENVIRON[n]) {
-                    printf(";  %2d: \"%s\"\n", n, ENVIRON[n]);
-                    ++n;
-                }
+                debug_environment_p = 1;
                 ++argi;
             } else if (0 == strcmp(arg, "--disable-ldb")) {
                 disable_lossage_handler_p = 1;
@@ -671,7 +683,12 @@ main(int argc, char *argv[], char *envp[])
      * systems (e.g. Alpha) arch_init() needs need os_vm_page_size, so
      * it must follow os_init(). -- WHN 2000-01-26 */
     os_init(argv, envp);
-    dyndebug_init(); /* after os_init: do not print output before execve */
+    /* os_init may re-execute the runtime, don't print anything before
+     * that, otherwise it will be duplicated. */
+    if (debug_environment_p) {
+        print_environment(argc, argv);
+    }
+    dyndebug_init();
     arch_init();
     gc_init();
     validate();

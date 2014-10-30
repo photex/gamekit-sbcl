@@ -226,16 +226,17 @@
                 t
                 (give-up))))))))
 
-(defoptimizer (aref derive-type) ((array &rest indices) node)
+(defoptimizer (aref derive-type) ((array &rest indices))
   (assert-array-rank array (length indices))
   (derive-aref-type array))
 
-(defoptimizer (%aset derive-type) ((array &rest stuff))
-  (assert-array-rank array (1- (length stuff)))
-  (assert-new-value-type (car (last stuff)) array))
+(defoptimizer ((setf aref) derive-type) ((new-value array &rest subscripts))
+  (assert-array-rank array (length subscripts))
+  (assert-new-value-type new-value array))
 
 (macrolet ((define (name)
              `(defoptimizer (,name derive-type) ((array index))
+                (declare (ignore index))
                 (derive-aref-type array))))
   (define hairy-data-vector-ref)
   (define hairy-data-vector-ref/check-bounds)
@@ -243,10 +244,12 @@
 
 #!+(or x86 x86-64)
 (defoptimizer (data-vector-ref-with-offset derive-type) ((array index offset))
+  (declare (ignore index offset))
   (derive-aref-type array))
 
 (macrolet ((define (name)
              `(defoptimizer (,name derive-type) ((array index new-value))
+                (declare (ignore index))
                 (assert-new-value-type new-value array))))
   (define hairy-data-vector-set)
   (define hairy-data-vector-set/check-bounds)
@@ -254,6 +257,7 @@
 
 #!+(or x86 x86-64)
 (defoptimizer (data-vector-set-with-offset derive-type) ((array index offset new-value))
+  (declare (ignore index offset))
   (assert-new-value-type new-value array))
 
 ;;; Figure out the type of the data vector if we know the argument
@@ -266,8 +270,10 @@
                         (array-type-specialized-element-type atype))
                       (*))))))
 (defoptimizer (%with-array-data derive-type) ((array start end))
+  (declare (ignore start end))
   (derive-%with-array-data/mumble-type array))
 (defoptimizer (%with-array-data/fp derive-type) ((array start end))
+  (declare (ignore start end))
   (derive-%with-array-data/mumble-type array))
 
 (defoptimizer (array-row-major-index derive-type) ((array &rest indices))
@@ -275,25 +281,28 @@
   *universal-type*)
 
 (defoptimizer (row-major-aref derive-type) ((array index))
+  (declare (ignore index))
   (derive-aref-type array))
 
 (defoptimizer (%set-row-major-aref derive-type) ((array index new-value))
+  (declare (ignore index))
   (assert-new-value-type new-value array))
 
-(defoptimizer (make-array derive-type)
-              ((dims &key initial-element element-type initial-contents
-                adjustable fill-pointer displaced-index-offset displaced-to))
+(defun derive-make-array-type (dims element-type adjustable
+                               fill-pointer displaced-to)
   (let* ((simple (and (unsupplied-or-nil adjustable)
                       (unsupplied-or-nil displaced-to)
                       (unsupplied-or-nil fill-pointer)))
          (spec
-          (or `(,(if simple 'simple-array 'array)
+           (or `(,(if simple 'simple-array 'array)
                  ,(cond ((not element-type) t)
+                        ((ctype-p element-type)
+                         (type-specifier element-type))
                         ((constant-lvar-p element-type)
                          (let ((ctype (careful-specifier-type
                                        (lvar-value element-type))))
                            (cond
-                             ((or (null ctype) (unknown-type-p ctype)) '*)
+                             ((or (null ctype) (contains-unknown-type-p ctype)) '*)
                              (t (sb!xc:upgraded-array-element-type
                                  (lvar-value element-type))))))
                         (t
@@ -309,13 +318,31 @@
                          '(*))
                         (t
                          '*)))
-              'array)))
+               'array)))
     (if (and (not simple)
              (or (supplied-and-true adjustable)
                  (supplied-and-true displaced-to)
                  (supplied-and-true fill-pointer)))
         (careful-specifier-type `(and ,spec (not simple-array)))
         (careful-specifier-type spec))))
+
+(defoptimizer (make-array derive-type)
+    ((dims &key element-type adjustable fill-pointer displaced-to))
+  (derive-make-array-type dims element-type adjustable
+                          fill-pointer displaced-to))
+
+(defoptimizer (%make-array derive-type)
+    ((dims widetag n-bits &key adjustable fill-pointer displaced-to))
+  (declare (ignore n-bits))
+  (let ((saetp (and (constant-lvar-p widetag)
+                    (find (lvar-value widetag)
+                          sb!vm:*specialized-array-element-type-properties*
+                          :key #'sb!vm:saetp-typecode))))
+    (derive-make-array-type dims (if saetp
+                                     (sb!vm:saetp-ctype saetp)
+                                     *wild-type*)
+                            adjustable fill-pointer displaced-to)))
+
 
 ;;;; constructors
 
@@ -333,19 +360,37 @@
                        ,@(when initial-element
                            '(:initial-element initial-element)))))
 
+;; Traverse the :INTIAL-CONTENTS argument to an array constructor call,
+;; changing the skeleton of the data to be constructed by calls to LIST
+;; and wrapping some declarations around each array cell's constructor.
+;; If a macro is involved, expand it before traversing.
+;; Known bugs:
+;; - Despite the effort to handle multidimensional arrays here,
+;;   an array-header will not be stack-allocated, so the data won't be either.
+;; - inline functions whose behavior is merely to call LIST don't work
+;;   e.g. :INITIAL-CONTENTS (MY-LIST a b) ; where MY-LIST is inline
+;;                                        ; and effectively just (LIST ...)
 (defun rewrite-initial-contents (rank initial-contents env)
-  (if (plusp rank)
-      (if (and (consp initial-contents)
-               (member (car initial-contents) '(list vector sb!impl::backq-list)))
-          `(list ,@(mapcar (lambda (dim)
-                             (rewrite-initial-contents (1- rank) dim env))
-                           (cdr initial-contents)))
-          initial-contents)
+  (named-let recurse ((rank rank) (data initial-contents))
+    (declare (type index rank))
+    (if (plusp rank)
+        (flet ((sequence-constructor-p (form)
+                 (member (car form) '(sb!impl::|List| list
+                                      sb!impl::|Vector| vector))))
+          (let (expanded)
+            (cond ((not (listp data)) data)
+                  ((sequence-constructor-p data)
+                   `(list ,@(mapcar (lambda (dim) (recurse (1- rank) dim))
+                                    (cdr data))))
+                  ((and (sb!xc:macro-function (car data) env)
+                        (listp (setq expanded (sb!xc:macroexpand data env)))
+                        (sequence-constructor-p expanded))
+                   (recurse rank expanded))
+                  (t data))))
       ;; This is the important bit: once we are past the level of
       ;; :INITIAL-CONTENTS that relates to the array structure, reinline LIST
       ;; and VECTOR so that nested DX isn't screwed up.
-      `(locally (declare (inline list vector))
-         ,initial-contents)))
+        `(locally (declare (inline list vector)) ,data))))
 
 ;;; Prevent open coding DIMENSION and :INITIAL-CONTENTS arguments, so that we
 ;;; can pick them apart in the DEFTRANSFORMS, and transform '(3) style
@@ -414,12 +459,13 @@
                   (t
                    (let ((n-elements-per-word (/ sb!vm:n-word-bits n-bits)))
                      (declare (type index n-elements-per-word)) ; i.e., not RATIO
-                     `(ceiling ,padded-length-form ,n-elements-per-word)))))))
+                     `(ceiling (truly-the index ,padded-length-form)
+                               ,n-elements-per-word)))))))
          (result-spec
           `(simple-array ,(sb!vm:saetp-specifier saetp) (,(or c-length '*))))
          (alloc-form
-          `(truly-the ,result-spec
-                      (allocate-vector ,typecode (the index length) ,n-words-form))))
+           `(truly-the ,result-spec
+                       (allocate-vector ,typecode (the index length) ,n-words-form))))
     (cond ((and initial-element initial-contents)
            (abort-ir1-transform "Both ~S and ~S specified."
                                 :initial-contents :initial-element))
@@ -427,7 +473,8 @@
           ;; constant LENGTH.
           ((and initial-contents c-length
                 (lvar-matches initial-contents
-                              :fun-names '(list vector sb!impl::backq-list)
+                              :fun-names '(list vector
+                                           sb!impl::|List| sb!impl::|Vector|)
                               :arg-count c-length))
            (let ((parameters (eliminate-keyword-args
                               call 1 '((:element-type element-type)
@@ -523,9 +570,9 @@
 
 (deftransform make-array ((dims &key initial-element element-type
                                      adjustable fill-pointer)
-                          (t &rest *))
-  (when (null initial-element)
-    (give-up-ir1-transform))
+                          (t &rest *) *
+                          :node node)
+  (delay-ir1-transform node :constraint)
   (let* ((eltype (cond ((not element-type) t)
                        ((not (constant-lvar-p element-type))
                         (give-up-ir1-transform
@@ -533,22 +580,28 @@
                        (t
                         (lvar-value element-type))))
          (eltype-type (ir1-transform-specifier-type eltype))
-         (saetp (find-if (lambda (saetp)
-                           (csubtypep eltype-type (sb!vm:saetp-ctype saetp)))
-                         sb!vm:*specialized-array-element-type-properties*))
-         (creation-form `(make-array dims
-                          :element-type ',(type-specifier (sb!vm:saetp-ctype saetp))
+         (saetp (if (unknown-type-p eltype-type)
+                    (give-up-ir1-transform
+                     "ELEMENT-TYPE ~s is not a known type"
+                     eltype-type)
+                    (find eltype-type
+                          sb!vm:*specialized-array-element-type-properties*
+                          :key #'sb!vm:saetp-ctype
+                          :test #'csubtypep)))
+         (creation-form `(%make-array
+                          dims
+                          ,(if saetp
+                               (sb!vm:saetp-typecode saetp)
+                               (give-up-ir1-transform))
+                          ,(sb!vm:saetp-n-bits saetp)
                           ,@(when fill-pointer
-                                  '(:fill-pointer fill-pointer))
+                              '(:fill-pointer fill-pointer))
                           ,@(when adjustable
-                                  '(:adjustable adjustable)))))
-
-    (unless saetp
-      (give-up-ir1-transform "ELEMENT-TYPE not found in *SAETP*: ~S" eltype))
-
-    (cond ((and (constant-lvar-p initial-element)
-                (eql (lvar-value initial-element)
-                     (sb!vm:saetp-initial-element-default saetp)))
+                              '(:adjustable adjustable)))))
+    (cond ((or (not initial-element)
+               (and (constant-lvar-p initial-element)
+                    (eql (lvar-value initial-element)
+                         (sb!vm:saetp-initial-element-default saetp))))
            creation-form)
           (t
            ;; error checking for target, disabled on the host because
@@ -575,10 +628,10 @@
                   (compiler-style-warn "~S is not a ~S."
                                        value eltype)))))
            `(let ((array ,creation-form))
-             (multiple-value-bind (vector)
-                 (%data-vector-and-index array 0)
-               (fill vector (the ,(sb!vm:saetp-specifier saetp) initial-element)))
-             array)))))
+              (multiple-value-bind (vector)
+                  (%data-vector-and-index array 0)
+                (fill vector (the ,(sb!vm:saetp-specifier saetp) initial-element)))
+              array)))))
 
 ;;; The list type restriction does not ensure that the result will be a
 ;;; multi-dimensional array. But the lack of adjustable, fill-pointer,
@@ -613,7 +666,7 @@
           (element-type-ctype (and (constant-lvar-p element-type)
                                    (ir1-transform-specifier-type
                                     (lvar-value element-type)))))
-      (when (unknown-type-p element-type-ctype)
+      (when (contains-unknown-type-p element-type-ctype)
         (give-up-ir1-transform))
       (unless (every #'integerp dims)
         (give-up-ir1-transform
@@ -721,18 +774,60 @@
     ;; FIXME: intersection type
     (t :maybe)))
 
-;;; If we can tell the rank from the type info, use it instead.
-(deftransform array-rank ((array))
+;; Let type derivation handle constant cases. We only do easy strength
+;; reduction.
+(deftransform array-rank ((array) (array) * :node node)
   (let ((array-type (lvar-type array)))
-    (let ((dims (array-type-dimensions-or-give-up array-type)))
-      (cond ((listp dims)
-             (length dims))
-            ((eq t (array-type-complexp array-type))
-             '(%array-rank array))
-            (t
-             `(if (array-header-p array)
-                  (%array-rank array)
-                  1))))))
+    (cond ((eq t (and (array-type-p array-type)
+                      (array-type-complexp array-type)))
+           '(%array-rank array))
+          (t
+           (delay-ir1-transform node :constraint)
+           `(if (array-header-p array)
+                (%array-rank array)
+                1)))))
+
+(defun derive-array-rank (ctype)
+  (let ((array (specifier-type 'array)))
+    (flet ((over (x)
+             (cond ((not (types-equal-or-intersect x array))
+                    '()) ; Definitely not an array!
+                   ((array-type-p x)
+                    (let ((dims (array-type-dimensions x)))
+                      (if (eql dims '*)
+                          '*
+                          (list (length dims)))))
+                   (t '*)))
+           (under (x)
+             ;; Might as well catch some easy negation cases.
+             (typecase x
+               (array-type
+                (let ((dims (array-type-dimensions x)))
+                  (cond ((eql dims '*)
+                         '*)
+                        ((every (lambda (dim)
+                                  (eql dim '*))
+                                dims)
+                         (list (length dims)))
+                        (t
+                         '()))))
+               (t '()))))
+      (declare (dynamic-extent #'over #'under))
+      (multiple-value-bind (not-p ranks)
+          (list-abstract-type-function ctype #'over :under #'under)
+        (cond ((eql ranks '*)
+               (aver (not not-p))
+               nil)
+              (not-p
+               (specifier-type `(not (member ,@ranks))))
+              (t
+               (specifier-type `(member ,@ranks))))))))
+
+(defoptimizer (array-rank derive-type) ((array))
+  (derive-array-rank (lvar-type array)))
+
+(defoptimizer (%array-rank derive-type) ((array))
+  (derive-array-rank (lvar-type array)))
 
 ;;; If we know the dimensions at compile time, just use it. Otherwise,
 ;;; if we can tell that the axis is in bounds, convert to
@@ -936,7 +1031,7 @@
                     (the index ,cumulative-offset)))
          (declare (type index ,cumulative-offset))))))
 
-(defun transform-%with-array-data/muble (array node check-fill-pointer)
+(defun transform-%with-array-data/mumble (array node check-fill-pointer)
   (let ((element-type (upgraded-element-type-specifier-or-give-up array))
         (type (lvar-type array))
         (check-bounds (policy node (plusp insert-array-bounds-checks))))
@@ -976,39 +1071,41 @@
                                 :node node
                                 :policy (> speed space))
   "inline non-SIMPLE-vector-handling logic"
-  (transform-%with-array-data/muble array node nil))
+  (transform-%with-array-data/mumble array node nil))
 (deftransform %with-array-data/fp ((array start end)
                                 ((or vector simple-array) index (or index null) t)
                                 *
                                 :node node
                                 :policy (> speed space))
   "inline non-SIMPLE-vector-handling logic"
-  (transform-%with-array-data/muble array node t))
+  (transform-%with-array-data/mumble array node t))
 
 ;;;; array accessors
 
-;;; We convert all typed array accessors into AREF and %ASET with type
+;;; We convert all typed array accessors into AREF and (SETF AREF) with type
 ;;; assertions on the array.
-(macrolet ((define-bit-frob (reffer setter simplep)
+(macrolet ((define-bit-frob (reffer simplep)
              `(progn
                 (define-source-transform ,reffer (a &rest i)
                   `(aref (the (,',(if simplep 'simple-array 'array)
                                   bit
                                   ,(mapcar (constantly '*) i))
                            ,a) ,@i))
-                (define-source-transform ,setter (a &rest i)
-                  `(%aset (the (,',(if simplep 'simple-array 'array)
-                                   bit
-                                   ,(cdr (mapcar (constantly '*) i)))
-                            ,a) ,@i)))))
-  (define-bit-frob sbit %sbitset t)
-  (define-bit-frob bit %bitset nil))
+                (define-source-transform (setf ,reffer) (value a &rest i)
+                  `(setf (aref (the (,',(if simplep 'simple-array 'array)
+                                     bit
+                                     ,(mapcar (constantly '*) i))
+                                    ,a) ,@i)
+                         ,value)))))
+  (define-bit-frob sbit t)
+  (define-bit-frob bit nil))
+
 (macrolet ((define-frob (reffer setter type)
              `(progn
                 (define-source-transform ,reffer (a i)
                   `(aref (the ,',type ,a) ,i))
                 (define-source-transform ,setter (a i v)
-                  `(%aset (the ,',type ,a) ,i ,v)))))
+                  `(setf (aref (the ,',type ,a) ,i) ,v)))))
   (define-frob schar %scharset simple-string)
   (define-frob char %charset string))
 
@@ -1061,8 +1158,9 @@
                   (push (make-symbol (format nil "DIM-~D" i)) dims))
                 (setf n-indices (nreverse n-indices))
                 (setf dims (nreverse dims))
-                `(lambda (,',array ,@n-indices
-                                   ,@',(when new-value (list new-value)))
+                `(lambda (,@',(when new-value (list new-value))
+                          ,',array ,@n-indices)
+                   (declare (ignorable ,',array))
                    (let* (,@(let ((,index -1))
                               (mapcar (lambda (name)
                                         `(,name (array-dimension
@@ -1095,17 +1193,16 @@
     (with-row-major-index (array indices index)
       index))
 
-  ;; Convert AREF and %ASET into a HAIRY-DATA-VECTOR-REF (or
+  ;; Convert AREF and (SETF AREF) into a HAIRY-DATA-VECTOR-REF (or
   ;; HAIRY-DATA-VECTOR-SET) with the set of indices replaced with the an
   ;; expression for the row major index.
   (deftransform aref ((array &rest indices))
     (with-row-major-index (array indices index)
       (hairy-data-vector-ref array index)))
 
-  (deftransform %aset ((array &rest stuff))
-    (let ((indices (butlast stuff)))
-      (with-row-major-index (array indices index new-value)
-        (hairy-data-vector-set array index new-value)))))
+  (deftransform (setf aref) ((new-value array &rest subscripts))
+    (with-row-major-index (array subscripts index new-value)
+                          (hairy-data-vector-set array index new-value))))
 
 ;; For AREF of vectors we do the bounds checking in the callee. This
 ;; lets us do a significantly more efficient check for simple-arrays
@@ -1115,14 +1212,16 @@
   (let* ((type (lvar-type array))
          (element-ctype (array-type-upgraded-element-type type)))
     (cond
+      ((eql element-ctype *empty-type*)
+       `(data-nil-vector-ref array index))
       ((and (array-type-p type)
             (null (array-type-complexp type))
             (not (eql element-ctype *wild-type*))
             (eql (length (array-type-dimensions type)) 1))
        (let* ((declared-element-ctype (array-type-declared-element-type type))
               (bare-form
-               `(data-vector-ref array
-                 (%check-bound array (array-dimension array 0) index))))
+                `(data-vector-ref array
+                                  (%check-bound array (array-dimension array 0) index))))
          (if (type= declared-element-ctype element-ctype)
              bare-form
              `(the ,(type-specifier declared-element-ctype) ,bare-form))))
@@ -1130,7 +1229,7 @@
        `(hairy-data-vector-ref array index))
       (t `(hairy-data-vector-ref/check-bounds array index)))))
 
-(deftransform %aset ((array index new-value) (t t t) * :node node)
+(deftransform (setf aref) ((new-value array index) (t t t) * :node node)
   (if (policy node (zerop insert-array-bounds-checks))
       `(hairy-data-vector-set array index new-value)
       `(hairy-data-vector-set/check-bounds array index new-value)))

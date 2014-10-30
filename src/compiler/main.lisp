@@ -298,20 +298,11 @@ Examples:
                     #+sb-xc-host nil
                     (ecase kind
                       (:function
-                       (case name
-                         ((declare)
-                          (compiler-warn
-                           "~@<There is no function named ~S. References to ~S ~
-                            in some contexts (like starts of blocks) have ~
-                            special meaning, but here it would have to be a ~
-                            function, and that shouldn't be right.~:@>" name
-                            name))
-                         (t
-                          (compiler-warn
-                           "~@<The function ~S is undefined, and its name is ~
+                       (compiler-warn
+                        "~@<The function ~S is undefined, and its name is ~
                             reserved by ANSI CL so that even if it were ~
                             defined later, the code doing so would not be ~
-                            portable.~:@>" name))))
+                            portable.~:@>" name))
                       (:type
                        (if (and (consp name) (eq 'quote (car name)))
                            (compiler-warn
@@ -404,8 +395,8 @@ Examples:
 (defparameter *max-optimize-iterations* 3 ; ARB
   #!+sb-doc
   "The upper limit on the number of times that we will consecutively do IR1
-  optimization that doesn't introduce any new code. A finite limit is
-  necessary, since type inference may take arbitrarily long to converge.")
+optimization that doesn't introduce any new code. A finite limit is
+necessary, since type inference may take arbitrarily long to converge.")
 
 (defevent ir1-optimize-until-done "IR1-OPTIMIZE-UNTIL-DONE called")
 (defevent ir1-optimize-maxed-out "hit *MAX-OPTIMIZE-ITERATIONS* limit")
@@ -595,7 +586,7 @@ Examples:
             (check-life-consistency component))
 
           (maybe-mumble "pack ")
-          (pack component)
+          (sb!regalloc:pack component)
 
           (when *check-consistency*
             (maybe-mumble "check-pack ")
@@ -606,7 +597,7 @@ Examples:
             (describe-ir2-component component *compiler-trace-output*))
 
           (maybe-mumble "code ")
-          (multiple-value-bind (code-length trace-table fixup-notes)
+          (multiple-value-bind (code-length fixup-notes)
               (generate-code component)
 
             #-sb-xc-host
@@ -622,7 +613,6 @@ Examples:
                (fasl-dump-component component
                                     *code-segment*
                                     code-length
-                                    trace-table
                                     fixup-notes
                                     *compile-object*))
               (core-object
@@ -630,7 +620,6 @@ Examples:
                (make-core-component component
                                     *code-segment*
                                     code-length
-                                    trace-table
                                     fixup-notes
                                     *compile-object*))
               (null))))))
@@ -880,12 +869,14 @@ Examples:
 ;;; popularized by Kent Pitman, of returning STREAM itself. If an
 ;;; error happens, then convert it to standard abort-the-compilation
 ;;; error condition (possibly recording some extra location
-;;; information).
-(defun read-for-compile-file (stream position)
+;;; information).  CONDITION-NAME is what to signal on error,
+;;; and should be INPUT-ERROR-IN-COMPILE-FILE or a subclass of it.
+;;; The signaled condition encapsulates a reader condition.
+(defun read-for-compile-file (stream position condition-name)
   (handler-case
       (read-preserving-whitespace stream nil stream)
     (reader-error (condition)
-      (compiler-error 'input-error-in-compile-file
+      (compiler-error condition-name
                       ;; We don't need to supply :POSITION here because
                       ;; READER-ERRORs already know their position in the file.
                       :condition condition
@@ -894,7 +885,7 @@ Examples:
     ;; (and that this is not a READER-ERROR) when it encounters end of
     ;; file in the middle of something it's trying to read.
     (end-of-file (condition)
-      (compiler-error 'input-error-in-compile-file
+      (compiler-error condition-name
                       :condition condition
                       ;; We need to supply :POSITION here because the END-OF-FILE
                       ;; condition doesn't carry the position that the user
@@ -902,7 +893,7 @@ Examples:
                       :position position
                       :stream stream))
     (error (condition)
-      (compiler-error 'input-error-in-compile-file
+      (compiler-error condition-name
                       :condition condition
                       :position position
                       :stream stream))))
@@ -940,8 +931,10 @@ Examples:
 
 ;;; Loop over FORMS retrieved from INFO.  Used by COMPILE-FILE and
 ;;; LOAD when loading from a FILE-STREAM associated with a source
-;;; file.
-(defmacro do-forms-from-info (((form &rest keys) info)
+;;; file.  ON-ERROR is the name of a condition class that should
+;;; be signaled if anything goes wrong during a READ.
+(defmacro do-forms-from-info (((form &rest keys) info
+                               &optional (on-error ''input-error-in-load))
                               &body body)
   (aver (symbolp form))
   (once-only ((info info))
@@ -950,7 +943,7 @@ Examples:
                  (let* ((file-info (source-info-file-info ,info))
                         (stream (get-source-stream ,info))
                         (pos (file-position stream))
-                        (form (read-for-compile-file stream pos)))
+                        (form (read-for-compile-file stream pos ,on-error)))
                    (if (eq form stream) ; i.e., if EOF
                        (return)
                        (let* ((forms (file-info-forms file-info))
@@ -965,7 +958,8 @@ Examples:
 
 ;;; Read and compile the source file.
 (defun sub-sub-compile-file (info)
-  (do-forms-from-info ((form current-index) info)
+  (do-forms-from-info ((form current-index) info
+                       'input-error-in-compile-file)
     (with-source-paths
       (find-source-paths form current-index)
       (process-toplevel-form
@@ -1006,8 +1000,16 @@ Examples:
 
 ;;; Macroexpand FORM in the current environment with an error handler.
 ;;; We only expand one level, so that we retain all the intervening
-;;; forms in the source path.
+;;; forms in the source path. A compiler-macro takes precedence over
+;;; an ordinary macro as specified in CLHS 3.2.3.1
+;;; Note that this function is _only_ for processing of toplevel forms.
+;;; Non-toplevel forms use IR1-CONVERT-FUNCTOID which considers compiler macros.
 (defun preprocessor-macroexpand-1 (form)
+  (if (listp form)
+      (let ((expansion (expand-compiler-macro form)))
+        (if (neq expansion form)
+            (return-from preprocessor-macroexpand-1
+              (values expansion t)))))
   (handler-case (%macroexpand-1 form *lexenv*)
     (error (condition)
       (compiler-error "(during macroexpansion of ~A)~%~A"
@@ -1276,10 +1278,21 @@ Examples:
 ;;; compilation. Normally just evaluate in the appropriate
 ;;; environment, but also compile if outputting a CFASL.
 (defun eval-compile-toplevel (body path)
-  (eval-tlf `(progn ,@body) (source-path-tlf-number path) *lexenv*)
-  (when *compile-toplevel-object*
-    (let ((*compile-object* *compile-toplevel-object*))
-      (convert-and-maybe-compile `(progn ,@body) path))))
+  (flet ((frob ()
+           (eval-tlf `(progn ,@body) (source-path-tlf-number path) *lexenv*)
+           (when *compile-toplevel-object*
+             (let ((*compile-object* *compile-toplevel-object*))
+               (convert-and-maybe-compile `(progn ,@body) path)))))
+    (if (null *macro-policy*)
+        (frob)
+        (let* ((*lexenv*
+                (make-lexenv :policy (process-optimize-decl (macro-policy-decls nil)
+                                                            (lexenv-policy *lexenv*))
+                             :default *lexenv*))
+               ;; In case a null lexenv is created, it needs to get the newly
+               ;; effective global policy, not the policy currently in *POLICY*.
+               (*policy* (lexenv-policy *lexenv*)))
+          (frob)))))
 
 ;;; Process a top level FORM with the specified source PATH.
 ;;;  * If this is a magic top level form, then do stuff.
@@ -1629,6 +1642,7 @@ Examples:
         (sb!xc:*compile-file-pathname* nil) ; really bound in
         (sb!xc:*compile-file-truename* nil) ; SUB-SUB-COMPILE-FILE
         (*policy* *policy*)
+        (*macro-policy* *macro-policy*)
         (*code-coverage-records* (make-hash-table :test 'equal))
         (*code-coverage-blocks* (make-hash-table :test 'equal))
         (*handled-conditions* *handled-conditions*)
@@ -1649,12 +1663,6 @@ Examples:
         (*last-format-string* nil)
         (*last-format-args* nil)
         (*last-message-count* 0)
-        ;; FIXME: Do we need this rebinding here? It's a literal
-        ;; translation of the old CMU CL rebinding to
-        ;; (OR *BACKEND-INFO-ENVIRONMENT* *INFO-ENVIRONMENT*),
-        ;; and it's not obvious whether the rebinding to itself is
-        ;; needed that SBCL doesn't need *BACKEND-INFO-ENVIRONMENT*.
-        (*info-environment* *info-environment*)
         (*compiler-sset-counter* 0)
         (sb!xc:*gensym-counter* 0))
     (handler-case

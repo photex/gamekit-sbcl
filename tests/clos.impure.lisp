@@ -175,49 +175,253 @@
 (assert (eq (born-to-be-redefined 1) 'int))
 
 ;;; In the removal of ITERATE from SB-PCL, a bug was introduced
-;;; preventing forward-references and also change-class (which
-;;; forward-references used interally) from working properly.  One
-;;; symptom was reported by Brian Spilsbury (sbcl-devel 2002-04-08),
-;;; and another on IRC by Dan Barlow simultaneously.  Better check
-;;; that it doesn't happen again.
+;;; preventing forward-references and also CHANGE-CLASS (which
+;;; forward-references used interally) from working properly.
 ;;;
-;;; First, the forward references:
+;;; One symptom was reported by Brian Spilsbury (sbcl-devel
+;;; 2002-04-08), and another on IRC by Dan Barlow simultaneously.
+;;; Better check that it doesn't happen again.
+;;;
+;;; Some more CHANGE-CLASS testing (which only applies to the now
+;;; ANSI-compliant version) thanks to Espen Johnsen)
+
+;; First, the forward references:
 (defclass forward-ref-a (forward-ref-b) ())
 (defclass forward-ref-b () ())
-;;; (a couple more complicated examples found by Paul Dietz' test
-;;; suite):
+;; (a couple more complicated examples found by Paul Dietz' test
+;; suite):
 (defclass forward-ref-c1 (forward-ref-c2) ())
 (defclass forward-ref-c2 (forward-ref-c3) ())
 
-(defclass forward-ref-d1 (forward-ref-d2 forward-ref-d3) ())
-(defclass forward-ref-d2 (forward-ref-d4 forward-ref-d5) ())
+(defclass forward-ref-d1 (forward-ref-d2 forward-ref-d3)
+  ())
+(defclass forward-ref-d2 (forward-ref-d4 forward-ref-d5)
+  ())
 
-;;; Then change-class
-(defclass class-with-slots ()
-  ((a-slot :initarg :a-slot :accessor a-slot)
-   (b-slot :initarg :b-slot :accessor b-slot)
-   (c-slot :initarg :c-slot :accessor c-slot)))
+;; Then CHANGE-CLASS
+(defun change-class-test-case (spec)
+  (destructuring-bind (from-class from-initargs
+                       to-class   to-initargs
+                       expected-slots)
+      spec
+    (let ((from (typecase from-class
+                  (symbol
+                   (apply #'make-instance from-class from-initargs))
+                  ((cons (eql :class) (cons symbol))
+                   (find-class (second from-class))))))
+      (flet ((change ()
+               (apply #'change-class from to-class to-initargs))
+             ;; These local functions make ASSERT produce better error
+             ;; messages.
+             (slot-value-equal (instance name value expected)
+               (declare (ignore instance name))
+               (equal value expected))
+             (slot-not-bound (instance name)
+               (not (slot-boundp instance name))))
+        (case expected-slots
+          (error
+           (assert-error (change)))
+          (type-error
+           (assert-error (change) type-error))
+          (t
+           (let ((to (change)))
+             (loop :for (name value) :in expected-slots
+                :do (case value
+                      (:unbound
+                       (assert (slot-not-bound to name)))
+                      (t
+                       (assert
+                        (slot-value-equal
+                         to name (slot-value to name) value))))))))))))
 
-(let ((foo (make-instance 'class-with-slots
-                          :a-slot 1
-                          :b-slot 2
-                          :c-slot 3)))
-  (let ((bar (change-class foo 'class-with-slots)))
-    (assert (= (a-slot bar) 1))
-    (assert (= (b-slot bar) 2))
-    (assert (= (c-slot bar) 3))))
+(defclass change-class.smoke.1 ()
+  ((foo :initarg :foo)))
+(defclass change-class.smoke.2 (change-class.smoke.1) ())
+(defclass change-class.smoke.3 (change-class.smoke.1)
+  ((foo :initarg :foo)))
+(defclass change-class.smoke.4 ()
+  ((foo :initarg :foo) (bar :initarg :bar)))
+(defclass change-class.smoke.5 ()
+  ((a :initarg :a) (b :initarg :b) (c :initarg :c)))
+(defclass change-class.smoke.6 () ())
 
-;;; some more CHANGE-CLASS testing, now that we have an ANSI-compliant
-;;; version (thanks to Espen Johnsen)
-(defclass from-class ()
-  ((foo :initarg :foo :accessor foo)))
-(defclass to-class ()
-  ((foo :initarg :foo :accessor foo)
-   (bar :initarg :bar :accessor bar)))
-(let* ((from (make-instance 'from-class :foo 1))
-       (to (change-class from 'to-class :bar 2)))
-  (assert (= (foo to) 1))
-  (assert (= (bar to) 2)))
+(with-test (:name (change-class :smoke))
+  (mapc
+   #'change-class-test-case
+   '(;; Test unbound slots.
+     (change-class.smoke.1 ()               change-class.smoke.1 ()
+      ((foo :unbound)))
+     (change-class.smoke.1 ()               change-class.smoke.2 ()
+      ((foo :unbound)))
+     (change-class.smoke.1 ()               change-class.smoke.3 ()
+      ((foo :unbound)))
+     (change-class.smoke.1 ()               change-class.smoke.4 ()
+      ((foo :unbound) (bar :unbound)))
+     (change-class.smoke.4 (:bar 1)         change-class.smoke.1 ()
+      ((foo :unbound)))
+
+     ;; Bound slots are retained.
+     (change-class.smoke.1 (:foo :baz)      change-class.smoke.1 ()
+      ((foo :baz)))
+     (change-class.smoke.1 (:foo :baz)      change-class.smoke.2 ()
+      ((foo :baz)))
+     (change-class.smoke.1 (:foo :baz)      change-class.smoke.3 ()
+      ((foo :baz)))
+     (change-class.smoke.1 (:foo :baz)      change-class.smoke.4 ()
+      ((foo :baz) (bar :unbound)))
+     (change-class.smoke.4 (:foo :baz)      change-class.smoke.1 ()
+      ((foo :baz)))
+
+     ;; Original test.
+     (change-class.smoke.5 (:a 1 :b 2 :c 3) change-class.smoke.5 ()
+      ((a 1) (b 2) (c 3)))
+
+     ;; Original test by Espen Johnsen
+     (change-class.smoke.1 (:foo 1)         change-class.smoke.4 (:bar 2)
+      ((foo 1) (bar 2)))
+
+     ;; Cannot change objects into metaobjects.
+     (change-class.smoke.6 ()               class                ()
+      error)
+     (change-class.smoke.6 ()               generic-function     ()
+      error)
+     (change-class.smoke.6 ()               method               ()
+      error)
+     (change-class.smoke.6 ()               slot-definition      ()
+      error))))
+
+;; Test for type-checking
+
+(locally (declare (optimize (safety 3))) ; force slot type-checking
+  (defclass change-class.type-check.1 ()
+    ((foo :initarg :foo :type real)))
+  (defclass change-class.type-check.2 ()
+    ((foo :initarg :foo :type integer))))
+
+(with-test (:name (change-class :type-check))
+  (mapc
+   #'change-class-test-case
+   '(;; These are allowed.
+     (change-class.type-check.1 ()         change-class.type-check.2 ()
+      ((foo :unbound)))
+     (change-class.type-check.1 (:foo 1)   change-class.type-check.2 ()
+      ((foo 1)))
+     (change-class.type-check.1 (:foo 1.0) change-class.type-check.2 (:foo 2)
+      ((foo 2)))
+
+     ;; These are not allowed.
+     (change-class.type-check.1 ()         change-class.type-check.2 (:foo 1.0)
+      type-error)
+     (change-class.type-check.1 (:foo 1.0) change-class.type-check.2 ()
+      type-error)))
+
+  ;; Type-mismatches should be recoverable via USE-VALUE restart.
+  (let* ((from (make-instance 'change-class.type-check.1 :foo 1.0))
+         (to (handler-bind ((type-error (lambda (condition)
+                                          (use-value 3))))
+               (change-class from 'change-class.type-check.2))))
+    (assert (equal (slot-value to 'foo) 3))))
+
+;; Test interaction with initforms and -args
+
+(defclass change-class.initforms.1 ()
+  ())
+(defclass change-class.initforms.2 ()
+  ((foo :initarg :foo)))
+(defclass change-class.initforms.3 ()
+  ((foo :initarg :foo :initform :bar)))
+(defclass change-class.initforms.4 ()
+  ((foo :initarg :foo))
+  (:default-initargs
+   :foo :bar))
+
+(with-test (:name (change-class :initforms))
+  (mapc
+   #'change-class-test-case
+   '(;; Initialization of added slot.
+     (change-class.initforms.1 ()          change-class.initforms.3 ()
+      ((foo :bar)))
+     (change-class.initforms.1 ()          change-class.initforms.3 (:foo :fez)
+      ((foo :fez)))
+     (change-class.initforms.1 ()          change-class.initforms.4 ()
+      ((foo :unbound))) ; default initargs are not used
+     (change-class.initforms.1 ()          change-class.initforms.4 (:foo :fez)
+      ((foo :fez)))
+
+     ;; Unbound slot remains unbound.
+     (change-class.initforms.2 ()          change-class.initforms.3 ()
+      ((foo :unbound)))
+     (change-class.initforms.2 ()          change-class.initforms.3 (:foo :fez)
+      ((foo :fez)))
+     (change-class.initforms.2 ()          change-class.initforms.4 ()
+      ((foo :unbound)))
+     (change-class.initforms.2 ()          change-class.initforms.4 (:foo :fez)
+      ((foo :fez)))
+
+     ;; Value is retained.
+     (change-class.initforms.2 (:foo :baz) change-class.initforms.3 ()
+      ((foo :baz)))
+     (change-class.initforms.2 (:foo :baz) change-class.initforms.3 (:foo :fez)
+      ((foo :fez)))
+     (change-class.initforms.2 (:foo :baz) change-class.initforms.4 ()
+      ((foo :baz)))
+     (change-class.initforms.2 (:foo :baz) change-class.initforms.4 (:foo :fez)
+      ((foo :fez))))))
+
+;; Test for FORWARD-REFERENCED-CLASS
+
+(defclass change-class.forward-referenced.1 () ())
+;; CHANGE-CLASS.FORWARD-REFERENCED.2 is only needed to create the
+;; FORWARD-REFERENCED-CLASS CHANGE-CLASS.FORWARD-REFERENCED.3.
+(defclass change-class.forward-referenced.2 (change-class.forward-referenced.3) ())
+
+(with-test (:name (change-class sb-pcl:forward-referenced-class))
+  (mapc
+   #'change-class-test-case
+   '(;; Changing instances of "ordinary classes" to classes which are
+     ;; instances of FORWARD-REFERENCED-CLASS is not allowed.
+     (change-class.forward-referenced.1          () change-class.forward-referenced.3 ()
+      error)
+
+     ;; Changing instances of FORWARD-REFERENCED-CLASS into
+     ;; non-CLASSes and in particular non-CLASS metaobjects is not
+     ;; allowed.
+     ((:class change-class.forward-referenced.3) () change-class.forward-referenced.1 ()
+      error)
+     ((:class change-class.forward-referenced.3) () generic-function                  ()
+      error)
+     ((:class change-class.forward-referenced.3) () method                            ()
+      error)
+     ((:class change-class.forward-referenced.3) () slot-definition                   ()
+      error)
+
+     ;; Changing instances of FORWARD-REFERENCED-CLASS into CLASS is
+     ;; allowed but destructive. Therefore has to be final test case.
+     ((:class change-class.forward-referenced.3) () standard-class                    ()
+      ()))))
+
+;; Test for FUNCALLABLE-STANDARD-CLASS
+
+(defclass change-class.funcallable.1 () ())
+(defclass change-class.funcallable.2 () ()
+  (:metaclass sb-mop:funcallable-standard-class))
+(defclass change-class.funcallable.3 () ()
+  (:metaclass sb-mop:funcallable-standard-class))
+
+(with-test (:name (change-class sb-mop:funcallable-standard-class))
+  (mapc
+   #'change-class-test-case
+   '(;; Cannot change STANDARD-OBJECT into FUNCALLABLE-STANDARD-OBJECT
+     ;; and vice-versa.
+     (change-class.funcallable.1 () change-class.funcallable.2 ()
+      error)
+     (change-class.funcallable.2 () change-class.funcallable.1 ()
+      error)
+     ;; FUNCALLABLE-STANDARD-OBJECTs should work.
+     (change-class.funcallable.2 () change-class.funcallable.2 ()
+      ())
+     (change-class.funcallable.2 () change-class.funcallable.3 ()
+      ()))))
 
 ;;; Until Pierre Mai's patch (sbcl-devel 2002-06-18, merged in
 ;;; sbcl-0.7.4.39) the :MOST-SPECIFIC-LAST option had no effect.
@@ -487,7 +691,7 @@
 
 (defgeneric wam-test-mc-a (val)
   (:method-combination wam-test-method-combination-a))
-(assert (raises-error? (wam-test-mc-a 13)))
+(assert-error (wam-test-mc-a 13))
 (defmethod wam-test-mc-a ((val number))
   (+ val (if (next-method-p) (call-next-method) 0)))
 (assert (= (wam-test-mc-a 13) 13))
@@ -538,7 +742,7 @@
 (assert (= (wam-test-mc-b 13) 26))
 (defmethod wam-test-mc-b :somethingelse ((val number))
   (+ val (if (next-method-p) (call-next-method) 0)))
-(assert (raises-error? (wam-test-mc-b 13)))
+(assert-error (wam-test-mc-b 13))
 
 ;;; now, ensure that it fails with a single group with a qualifier-pattern
 ;;; that is not *
@@ -550,25 +754,25 @@
 
 (defgeneric wam-test-mc-c (val)
   (:method-combination wam-test-method-combination-c))
-(assert (raises-error? (wam-test-mc-c 13)))
+(assert-error (wam-test-mc-c 13))
 (defmethod wam-test-mc-c :foo ((val number))
   (+ val (if (next-method-p) (call-next-method) 0)))
 (assert (= (wam-test-mc-c 13) 13))
 (defmethod wam-test-mc-c :bar ((val number))
   (+ val (if (next-method-p) (call-next-method) 0)))
-(assert (raises-error? (wam-test-mc-c 13)))
+(assert-error (wam-test-mc-c 13))
 
 ;;; DEFMETHOD should signal an ERROR if an incompatible lambda list is
 ;;; given:
 (defmethod incompatible-ll-test-1 (x) x)
-(assert (raises-error? (defmethod incompatible-ll-test-1 (x y) y)))
-(assert (raises-error? (defmethod incompatible-ll-test-1 (x &rest y) y)))
+(assert-error (defmethod incompatible-ll-test-1 (x y) y))
+(assert-error (defmethod incompatible-ll-test-1 (x &rest y) y))
 ;;; Sneakily using a bit of MOPness to check some consistency
 (assert (= (length
             (sb-pcl:generic-function-methods #'incompatible-ll-test-1)) 1))
 
 (defmethod incompatible-ll-test-2 (x &key bar) bar)
-(assert (raises-error? (defmethod incompatible-ll-test-2 (x) x)))
+(assert-error (defmethod incompatible-ll-test-2 (x) x))
 (defmethod incompatible-ll-test-2 (x &rest y) y)
 (assert (= (length
             (sb-pcl:generic-function-methods #'incompatible-ll-test-2)) 1))
@@ -577,7 +781,7 @@
             (sb-pcl:generic-function-methods #'incompatible-ll-test-2)) 2))
 
 ;;; Per Christophe, this is an illegal method call because of 7.6.5
-(assert (raises-error? (incompatible-ll-test-2 t 1 2)))
+(assert-error (incompatible-ll-test-2 t 1 2))
 
 (assert (eq (incompatible-ll-test-2 1 :bar 'yes) 'yes))
 
@@ -586,7 +790,7 @@
                (find-method #'incompatible-ll-test-3
                             nil
                             (list (find-class 'integer))))
-(assert (raises-error? (defmethod incompatible-ll-test-3 (x y) (list x y))))
+(assert-error (defmethod incompatible-ll-test-3 (x y) (list x y)))
 
 
 ;;; Attempting to instantiate classes with forward references in their
@@ -691,7 +895,7 @@
   (reinitialize-instance (make-instance 'class234) :dummy 0))
 (defun subbug-234 ()
   (reinitialize-instance (make-instance 'subclass234) :dummy 0))
-(assert (raises-error? (bug-234) program-error))
+(assert-error (bug-234) program-error)
 (defmethod shared-initialize :after ((i class234) slots &key dummy)
   (incf *bug234*))
 (assert (typep (subbug-234) 'subclass234))
@@ -847,14 +1051,14 @@
 (defmethod width ((c character-class) &key font) font)
 (defmethod width ((p picture-class) &key pixel-size) pixel-size)
 
-(assert (raises-error?
-         (width (make-instance 'character-class :char #\Q)
-                :font 'baskerville :pixel-size 10)
-         program-error))
-(assert (raises-error?
-         (width (make-instance 'picture-class :glyph #\Q)
-                :font 'baskerville :pixel-size 10)
-         program-error))
+(assert-error
+ (width (make-instance 'character-class :char #\Q)
+        :font 'baskerville :pixel-size 10)
+ program-error)
+(assert-error
+ (width (make-instance 'picture-class :glyph #\Q)
+        :font 'baskerville :pixel-size 10)
+ program-error)
 (assert (eq (width (make-instance 'character-picture-class :char #\Q)
                    :font 'baskerville :pixel-size 10)
             'baskerville))
@@ -867,9 +1071,9 @@
 ;;; attempts to add accessorish methods to generic functions with more
 ;;; complex lambda lists should fail
 (defgeneric accessoroid (object &key &allow-other-keys))
-(assert (raises-error?
-         (defclass accessoroid-class () ((slot :accessor accessoroid)))
-         program-error))
+(assert-error
+ (defclass accessoroid-class () ((slot :accessor accessoroid)))
+ program-error)
 
 ;;; reported by Bruno Haible sbcl-devel 2004-04-15
 (defclass shared-slot-and-redefinition ()
@@ -1088,8 +1292,8 @@
 (defun existing-name (object)
   (list object))
 
-(assert (raises-error? (defclass redefinition-of-accessor-class ()
-                         ((slot :accessor existing-name)))))
+(assert-error (defclass redefinition-of-accessor-class ()
+                ((slot :accessor existing-name))))
 
 (defclass redefinition-of-accessor-class ()
   ((slot :accessor new-name)))
@@ -1106,8 +1310,8 @@
   (mapcar #'eval
           '(
             (deftype defined-type () 'integer)
-            (assert (raises-error?
-                     (defmethod method-on-defined-type ((x defined-type)) x)))
+            (assert-error
+             (defmethod method-on-defined-type ((x defined-type)) x))
             (deftype defined-type-and-class () 'integer)
             (setf (find-class 'defined-type-and-class) (find-class 'integer))
             (defmethod method-on-defined-type-and-class
@@ -1264,7 +1468,7 @@
 (with-test (:name (:ctor :unnamed-after))
   (assert (typep (ctor-unnamed-literal-class2) *unnamed2*)))
 (with-test (:name (:ctor :unnamed-after/symbol))
-  (assert (raises-error? (ctor-unnamed-literal-class2/symbol))))
+  (assert-error (ctor-unnamed-literal-class2/symbol)))
 
 ;;; classes with slot types shouldn't break if the types don't name
 ;;; classes (bug #391)
@@ -1396,7 +1600,7 @@
 (defgeneric test-mc27 (x)
   (:method-combination mc27)
   (:method :ignore ((x number)) (/ 0)))
-(assert (raises-error? (test-mc27 7)))
+(assert-error (test-mc27 7))
 
 (define-method-combination mc27prime ()
   ((normal ())
@@ -1406,7 +1610,7 @@
   (:method-combination mc27prime)
   (:method :ignore ((x number)) (/ 0)))
 (assert (equal '(result) (test-mc27prime 3)))
-(assert (raises-error? (test-mc27 t))) ; still no-applicable-method
+(assert-error (test-mc27 t))           ; still no-applicable-method
 
 ;;; more invalid wrappers.  This time for a long-standing bug in the
 ;;; compiler's expansion for TYPEP on various class-like things, with
@@ -1851,14 +2055,14 @@
   (make-instance 'cacheing-initargs-redefinitions-check)
   (make-instance 'cacheing-initargs-redefinitions-check :slot 3)
   (cacheing-initargs-redefinitions-check-fun :slot)
-  (assert (raises-error? (cacheing-initargs-redefinitions-check-fun :slot2))))
+  (assert-error (cacheing-initargs-redefinitions-check-fun :slot2)))
 (defclass cacheing-initargs-redefinitions-check ()
   ((slot :initarg :slot2)))
 (with-test (:name :make-instance-redefined-initargs)
   (make-instance 'cacheing-initargs-redefinitions-check)
   (make-instance 'cacheing-initargs-redefinitions-check :slot2 3)
   (cacheing-initargs-redefinitions-check-fun :slot2)
-  (assert (raises-error? (cacheing-initargs-redefinitions-check-fun :slot))))
+  (assert-error (cacheing-initargs-redefinitions-check-fun :slot)))
 (defmethod initialize-instance :after ((class cacheing-initargs-redefinitions-check) &key slot)
   nil)
 (with-test (:name :make-instance-new-method-initargs)
@@ -2064,15 +2268,79 @@
      (foo= 15 (funcall (compile nil '(lambda () (make-instance 'bug-1179858b 'foo 15))))))))
 
 (with-test (:name (:cpl-violation-setup :bug-309076))
-  (assert (raises-error?
-           (progn
-             (defclass bug-309076-broken-class (standard-class) ()
-               (:metaclass sb-mop:funcallable-standard-class))
-             (sb-mop:finalize-inheritance (find-class 'bug-309076-broken-class))))))
+  (assert-error
+   (progn
+     (defclass bug-309076-broken-class (standard-class) ()
+       (:metaclass sb-mop:funcallable-standard-class))
+     (sb-mop:finalize-inheritance (find-class 'bug-309076-broken-class)))))
 
 (with-test (:name (:cpl-violation-irrelevant-class :bug-309076))
   (defclass bug-309076-class (standard-class) ())
   (defmethod sb-mop:validate-superclass ((x bug-309076-class) (y standard-class)) t)
   (assert (typep (make-instance 'bug-309076-class) 'bug-309076-class)))
+
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (require 'sb-cltl2)
+  (defmethod b ()))
+
+(defmacro macro ()
+  (let ((a 20))
+    (declare (special a))
+    (assert
+     (=
+      (funcall
+       (compile nil
+                (sb-mop:make-method-lambda
+                 #'b
+                 (find-method #'b () ())
+                 '(lambda () (declare (special a)) a)
+                 nil))
+       '(1) ())
+      20))))
+
+(with-test (:name :make-method-lambda-leakage)
+  ;; lambda list of X leaks into the invocation of make-method-lambda
+  ;; during code-walking performed by make-method-lambda invoked by
+  ;; DEFMETHOD
+  (sb-cltl2:macroexpand-all '(defmethod x (a) (macro))))
+
+(with-test (:name (:defmethod-undefined-function :bug-503095))
+  (flet ((test-load (file)
+           (let (implicit-gf-warning)
+             (handler-bind
+                 ((sb-ext:implicit-generic-function-warning
+                    (lambda (x)
+                      (setf implicit-gf-warning x)
+                      (muffle-warning x)))
+                  ((or warning error) #'error))
+               (load file))
+             (assert implicit-gf-warning))))
+    (multiple-value-bind (fasl warnings errorsp) (compile-file "bug-503095.lisp")
+      (unwind-protect
+           (progn (assert (and fasl (not warnings) (not errorsp)))
+                  (test-load fasl))
+        (and fasl (delete-file fasl))))
+    (test-load "bug-503095-2.lisp")))
+
+(with-test (:name :accessor-and-plain-method)
+  (defclass a-633911 ()
+    ((x-633911 :initform nil
+               :accessor x-633911)))
+
+  (defmethod x-633911 ((b a-633911)) 10)
+
+  (defclass b-633911 ()
+    ((x-633911 :initform nil
+               :accessor x-633911)))
+
+  (assert (= (x-633911 (make-instance 'a-633911)) 10)))
+
+(with-test (:name (built-in-class :subclass error))
+  (flet ((mapper (c)
+           (when (and (class-name c) (typep c 'built-in-class))
+             (assert-error (eval `(defclass ,(gensym) (,(class-name c))
+                                    ()))))))
+    (sb-pcl::map-all-classes #'mapper)))
 
 ;;;; success

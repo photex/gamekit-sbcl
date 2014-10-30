@@ -11,68 +11,69 @@
 ;;;; files for more information.
 
 (in-package "SB!KERNEL")
-
-;;; a list of lists of restarts
-(defvar *restart-clusters* '())
-
-;;; an ALIST (condition . restarts) which records the restarts currently
-;;; associated with Condition
-(defvar *condition-restarts* ())
 
 (defun muffle-warning-p (warning)
   (declare (special *muffled-warnings*))
   (typep warning *muffled-warnings*))
 
 (defun initial-handler-clusters ()
-  `(((warning . ,#'(lambda (warning)
-                     (when (muffle-warning-p warning)
-                       (muffle-warning warning)))))))
+  `(((,#'(lambda (condition)
+           (typep condition 'warning))
+      .
+      ,#'(lambda (warning)
+           (when (muffle-warning-p warning)
+             (muffle-warning warning)))))))
 
+;;; Each cluster is an alist of the form
+;;;
+;;;  ((TYPE-TEST1 . HANDLER1) (TYPE-TEST2 . HANDLER2) ...)
+;;;
+;;; where TYPE-TESTN are functions of one argument which test a given
+;;; condition instance for the type required by the corresponding
+;;; HANDLERN. HANDLERN are function designators.
+;;;
+;;; Newly established handlers are added at the beginning of the
+;;; list. Elements to the left of the alist take precedence over
+;;; elements to the right.
+;;;
+;;; Lists to which *HANDLER-CLUSTERS* is bound generally have dynamic
+;;; extent.
 (defvar *handler-clusters* (initial-handler-clusters))
 
-(defstruct (restart (:copier nil) (:predicate nil))
+;;; a list of lists of currently active RESTART instances. maintained
+;;; by RESTART-BIND.
+(defvar *restart-clusters* '())
+
+(declaim (inline restart-test-function
+                 restart-associated-conditions
+                 (setf restart-associated-conditions)))
+(defstruct (restart (:constructor make-restart
+                        ;; Having TEST-FUNCTION at the end allows
+                        ;; to not replicate its default value in RESTART-BIND.
+                        (name function
+                         &optional report-function
+                                   interactive-function
+                                   test-function))
+                    (:copier nil) (:predicate nil))
   (name (missing-arg) :type symbol :read-only t)
-  (function (missing-arg) :type function)
-  (report-function nil :type (or null function))
-  (interactive-function nil :type (or null function))
-  (test-function (lambda (cond) (declare (ignore cond)) t) :type function))
+  (function (missing-arg) :type function :read-only t)
+  (report-function nil :type (or null function) :read-only t)
+  (interactive-function nil :type (or null function) :read-only t)
+  (test-function (lambda (cond) (declare (ignore cond)) t) :type function :read-only t)
+  ;; the list of conditions which are currently associated to the
+  ;; restart. maintained by WITH-CONDITION-RESTARTS in a neither
+  ;; thread- nor interrupt-safe way. This should not be a problem
+  ;; however, since safe uses of restarts have to assume dynamic
+  ;; extent.
+  (associated-conditions '() :type list))
+
+#!-sb-fluid (declaim (freeze-type restart))
+
 (def!method print-object ((restart restart) stream)
   (if *print-escape*
       (print-unreadable-object (restart stream :type t :identity t)
         (prin1 (restart-name restart) stream))
       (restart-report restart stream)))
-
-(defvar *restart-test-stack* nil)
-
-(defun compute-restarts (&optional condition)
-  #!+sb-doc
-  "Return a list of all the currently active restarts ordered from most recently
-established to less recently established. If CONDITION is specified, then only
-restarts associated with CONDITION (or with no condition) will be returned."
-  (let ((associated ())
-        (other ()))
-    (dolist (alist *condition-restarts*)
-      (if (eq (car alist) condition)
-          (setq associated (cdr alist))
-          (setq other (append (cdr alist) other))))
-    (collect ((res))
-      (let ((stack *restart-test-stack*))
-        (dolist (restart-cluster *restart-clusters*)
-          (dolist (restart restart-cluster)
-            (when (and (or (not condition)
-                           (memq restart associated)
-                           (not (memq restart other)))
-                       ;; A call to COMPUTE-RESTARTS -- from an error, from
-                       ;; user code, whatever -- inside the test function
-                       ;; would cause infinite recursion here, so we disable
-                       ;; each restart using *restart-test-stack* for the
-                       ;; duraction of the test call.
-                       (not (memq restart stack))
-                       (let ((*restart-test-stack* (cons restart stack)))
-                         (declare (truly-dynamic-extent *restart-test-stack*))
-                         (funcall (restart-test-function restart) condition)))
-             (res restart)))))
-      (res))))
 
 #!+sb-doc
 (setf (fdocumentation 'restart-name 'function)
@@ -80,11 +81,82 @@ restarts associated with CONDITION (or with no condition) will be returned."
 
 (defun restart-report (restart stream)
   (funcall (or (restart-report-function restart)
-               (let ((name (restart-name restart)))
-                 (lambda (stream)
-                   (if name (format stream "~S" name)
-                       (format stream "~S" restart)))))
+               (lambda (stream)
+                 (format stream "~S" (or (restart-name restart)
+                                         restart))))
            stream))
+
+(defvar *restart-test-stack* nil)
+
+;; Call FUNCTION with all restarts in the current dynamic environment,
+;; 1) that are associated to CONDITION (when CONDITION is NIL, all
+;;    restarts are processed)
+;; 2) and for which the restart test returns non-NIL for CONDITION.
+;; When CALL-TEST-P is non-NIL, all restarts are processed.
+(defun map-restarts (function &optional condition (call-test-p t))
+  (declare (function function))
+  (let ((stack *restart-test-stack*))
+    (dolist (restart-cluster *restart-clusters*)
+      (dolist (restart restart-cluster)
+        (when (and (or (not condition)
+                       (null (restart-associated-conditions restart))
+                       (memq condition (restart-associated-conditions restart)))
+                   ;; A call to COMPUTE-RESTARTS -- from an error,
+                   ;; from user code, whatever -- inside the test
+                   ;; function would cause infinite recursion here, so
+                   ;; we disable each restart using
+                   ;; *restart-test-stack* for the duration of the
+                   ;; test call.
+                   (not (memq restart stack))
+                   (or (not call-test-p)
+                       (let ((*restart-test-stack* (cons restart stack)))
+                         (declare (truly-dynamic-extent *restart-test-stack*))
+                         (funcall (restart-test-function restart) condition))))
+          (funcall function restart))))))
+
+(defun compute-restarts (&optional condition)
+  #!+sb-doc
+  "Return a list of all the currently active restarts ordered from most recently
+established to less recently established. If CONDITION is specified, then only
+restarts associated with CONDITION (or with no condition) will be returned."
+  (collect ((result))
+    (map-restarts (lambda (restart) (result restart)) condition)
+    (result)))
+
+(defun %find-restart (identifier condition &optional (call-test-p t))
+  (flet ((eq-restart-p (restart)
+           (when (eq identifier restart)
+             (return-from %find-restart restart)))
+         (named-restart-p (restart)
+           (when (eq identifier (restart-name restart))
+             (return-from %find-restart restart))))
+    ;; KLUDGE: can the compiler infer this dx automatically?
+    (declare (truly-dynamic-extent #'eq-restart-p #'named-restart-p))
+    (if (typep identifier 'restart)
+        ;; The code under #+previous-... below breaks the abstraction
+        ;; introduced by MAP-RESTARTS, but is about twice as
+        ;; fast as #+equivalent-... . Also, it is a common case due to
+        ;;
+        ;;    (INVOKE-RESTART RESTART)
+        ;; -> (FIND-RESTART-OR-CONTROL-ERROR RESTART)
+        ;; -> (FIND-RESTART RESTART)
+        ;;
+        ;; However, both #+previous-... and #+equivalent-... may be
+        ;; wrong altogether because of
+        ;; https://bugs.launchpad.net/sbcl/+bug/774410:
+        ;; The behavior expected in that report can be achieved by the
+        ;; following line (which is, of course, the slowest of all
+        ;; possibilities):
+        (map-restarts #'eq-restart-p condition call-test-p)
+
+        #+equivalent-to-previous-sbcl-behavior--faster-but-see-bug-774410
+        (map-restarts #'eq-restart-p nil nil)
+
+        #+previous-behavior--fastest-but-see-bug-774410
+        (and (find-if (lambda (cluster) (find identifier cluster)) *restart-clusters*)
+             identifier)
+
+        (map-restarts #'named-restart-p condition call-test-p))))
 
 (defun find-restart (identifier &optional condition)
   #!+sb-doc
@@ -93,16 +165,14 @@ then the innermost applicable restart with that name is returned. If IDENTIFIER
 is a restart, it is returned if it is currently active. Otherwise NIL is
 returned. If CONDITION is specified and not NIL, then only restarts associated
 with that condition (or with no condition) will be returned."
-  ;; see comment above
-  (if (typep identifier 'restart)
-      (and (find-if (lambda (cluster) (find identifier cluster)) *restart-clusters*)
-           identifier)
-      (find identifier (compute-restarts condition) :key #'restart-name)))
+  ;; Calls MAP-RESTARTS such that restart test functions are
+  ;; respected.
+  (%find-restart identifier condition))
 
 ;;; helper for the various functions which are ANSI-spec'ed to do
 ;;; something with a restart or signal CONTROL-ERROR if there is none
-(defun find-restart-or-control-error (identifier &optional condition)
-  (or (find-restart identifier condition)
+(defun find-restart-or-control-error (identifier &optional condition (call-test-p t))
+  (or (%find-restart identifier condition call-test-p)
       (error 'simple-control-error
              :format-control "No restart ~S is active~@[ for ~S~]."
              :format-arguments (list identifier condition))))
@@ -113,7 +183,31 @@ with that condition (or with no condition) will be returned."
    arguments. If the argument restart is not a restart or a currently active
    non-nil restart name, then a CONTROL-ERROR is signalled."
   (/show "entering INVOKE-RESTART" restart)
-  (let ((real-restart (find-restart-or-control-error restart)))
+  ;; The following code calls MAP-RESTARTS (through
+  ;; FIND-RESTART-OR-CONTROL-ERROR -> %FIND-RESTART) such that restart
+  ;; test functions are respected when RESTART is a symbol, but not
+  ;; when RESTART is a RESTART instance.
+  ;;
+  ;; Without disabling test functions for the RESTART instance case,
+  ;; the following problem would arise:
+  ;;
+  ;;  (restart-case
+  ;;      (handler-bind
+  ;;          ((some-condition (lambda (c)
+  ;;                             (invoke-restart (find-restart 'foo c)) ; a)
+  ;;                             (invoke-restart 'foo)                  ; b)
+  ;;                             )))
+  ;;        (signal 'some-condition))
+  ;;    (foo ()
+  ;;     :test (lambda (c) (typep c 'some-condition))))
+  ;;
+  ;; In case a), INVOKE-RESTART receives the RESTART instance, but
+  ;; cannot supply the condition instance needed by the test. In case
+  ;; b) INVOKE-RESTART calls FIND-RESTART, but again cannot supply the
+  ;; condition instance. As a result, the restart would be impossible
+  ;; the invoke.
+  (let ((real-restart (find-restart-or-control-error
+                       restart nil (symbolp restart))))
     (apply (restart-function real-restart) values)))
 
 (defun interactive-restart-arguments (real-restart)
@@ -127,9 +221,13 @@ with that condition (or with no condition) will be returned."
   "Calls the function associated with the given restart, prompting for any
    necessary arguments. If the argument restart is not a restart or a
    currently active non-NIL restart name, then a CONTROL-ERROR is signalled."
-  (let* ((real-restart (find-restart-or-control-error restart))
+  ;; For an explanation of the call to FIND-RESTART-OR-CONTROL-ERROR,
+  ;; see comment in INVOKE-RESTART.
+  (let* ((real-restart (find-restart-or-control-error
+                        restart nil (symbolp restart)))
          (args (interactive-restart-arguments real-restart)))
     (apply (restart-function real-restart) args)))
+
 
 (defun assert-error (assertion args-and-values places datum &rest arguments)
   (let ((cond (if datum

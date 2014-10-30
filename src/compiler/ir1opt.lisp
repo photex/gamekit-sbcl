@@ -154,7 +154,6 @@
          (if (array-type-complexp type)
              (make-array-type
               ;; ADJUST-ARRAY may change dimensions, but rank stays same.
-              :dimensions
               (let ((old (array-type-dimensions type)))
                 (if (eq '* old)
                     old
@@ -822,7 +821,67 @@
                (eq (node-home-lambda node) (node-home-lambda entry)))
       (setf (entry-exits entry) (delq node (entry-exits entry)))
       (if value
-          (delete-filter node (node-lvar node) value)
+          (with-ir1-environment-from-node entry
+            ;; We can't simply use DELETE-FILTER to unlink the node
+            ;; and substitute some LVAR magic, as this can confuse the
+            ;; stack analysis if there's another EXIT to the same
+            ;; continuation.  Instead, we fabricate a new block (in
+            ;; the same lexenv as the ENTRY, so it can't be merged
+            ;; backwards), insert a gimmicked CAST node to link up the
+            ;; LVAR holding the value being returned to the LVAR which
+            ;; is expecting to accept the value, thus placing the
+            ;; return value where it needs to be while still providing
+            ;; the hook required for stack analysis.
+            ;;                                     -- AJB, 2014-Mar-03
+            (let* ((exit-block (node-block node))
+                   (new-ctran (make-ctran))
+                   (new-block (ctran-starts-block new-ctran))
+                   (cast-node
+                    (%make-cast
+                     :asserted-type *wild-type*
+                     :type-to-check *wild-type*
+                     :value value
+                     :vestigial-exit-lexenv (node-lexenv node)
+                     :vestigial-exit-entry-lexenv (node-lexenv entry)
+                     :%type-check nil)))
+              ;; We only expect a single successor to EXIT-BLOCK,
+              ;; because it contains an EXIT node (which must end its
+              ;; block) and the only blocks that have more than once
+              ;; successor are those with IF nodes (which also must
+              ;; end their blocks).  Still, just to be sure, we use a
+              ;; construct that guarantees an error if this
+              ;; expectation is violated.
+              (destructuring-bind
+                    (entry-block)
+                  (block-succ exit-block)
+
+                ;; Finish creating the new block.
+                (link-node-to-previous-ctran cast-node new-ctran)
+                (setf (block-last new-block) cast-node)
+
+                ;; Link the new block into the control sequence.
+                (unlink-blocks exit-block entry-block)
+                (link-blocks exit-block new-block)
+                (link-blocks new-block entry-block)
+
+                ;; Finish re-pointing the value-holding LVAR to the
+                ;; CAST node.
+                (setf (lvar-dest value) cast-node)
+                (setf (exit-value node) nil)
+                (reoptimize-lvar value)
+
+                ;; Register the CAST node as providing a value to the
+                ;; LVAR for the continuation.
+                (add-lvar-use cast-node (node-lvar node))
+                (reoptimize-lvar (node-lvar node))
+
+                ;; Remove the EXIT node.
+                (unlink-node node)
+
+                ;; And, because we created a new block, we need to
+                ;; force component reanalysis (to assign a DFO number
+                ;; to the block if nothing else).
+                (setf (component-reanalyze *current-component*) t))))
           (unlink-node node)))))
 
 
@@ -922,8 +981,12 @@
                     (every #'constant-lvar-p args)
                     (node-lvar node))
            (constant-fold-call node)
-           (return-from ir1-optimize-combination)))
-
+           (return-from ir1-optimize-combination))
+         (when (and (ir1-attributep attr commutative)
+                    (= (length args) 2)
+                    (constant-lvar-p (first args))
+                    (not (constant-lvar-p (second args))))
+           (setf (basic-combination-args node) (nreverse args))))
        (let ((fun (fun-info-derive-type info)))
          (when fun
            (let ((res (funcall fun node)))
@@ -1232,9 +1295,9 @@
          (fun (transform-function transform))
          (constrained (fun-type-p type))
          (table (component-failed-optimizations *component-being-compiled*))
-         (flame (if (transform-important transform)
-                    (policy node (>= speed inhibit-warnings))
-                    (policy node (> speed inhibit-warnings))))
+         (flame (case (transform-important transform)
+                  ((t) (policy node (>= speed inhibit-warnings)))
+                  (:slightly (policy node (> speed inhibit-warnings)))))
          (*compiler-error-context* node))
     (cond ((or (not constrained)
                (valid-fun-use node type))
@@ -2123,11 +2186,36 @@
         (note-single-valuified-lvar lvar)))
     (values)))
 
+(defun may-delete-vestigial-exit (cast)
+  (let ((exit-lexenv (cast-vestigial-exit-lexenv cast)))
+    (when exit-lexenv
+      ;; Vestigial exits are only introduced when eliminating a local
+      ;; RETURN-FROM.  We may delete them only when we can show that
+      ;; there are no other code paths that use the entry LVAR that
+      ;; are live from within the block that contained the deleted
+      ;; EXIT (our predecessor block).  The conservative version of
+      ;; this is that there are no EXITs for any ENTRY introduced
+      ;; between the LEXENV of the deleted EXIT and the LEXENV of the
+      ;; target ENTRY.
+      (let* ((entry-lexenv (cast-vestigial-exit-entry-lexenv cast))
+             (entry-blocks (lexenv-blocks entry-lexenv))
+             (entry-tags (lexenv-tags entry-lexenv)))
+        (do ((current-block (lexenv-blocks exit-lexenv) (cdr current-block)))
+            ((eq current-block entry-blocks))
+          (when (entry-exits (cadar current-block))
+            (return-from may-delete-vestigial-exit nil)))
+        (do ((current-tag (lexenv-tags exit-lexenv) (cdr current-tag)))
+            ((eq current-tag entry-tags))
+          (when (entry-exits (cadar current-tag))
+            (return-from may-delete-vestigial-exit nil))))))
+  (values t))
+
 (defun ir1-optimize-cast (cast &optional do-not-optimize)
   (declare (type cast cast))
   (let ((value (cast-value cast))
         (atype (cast-asserted-type cast)))
-    (when (not do-not-optimize)
+    (unless (or do-not-optimize
+                (not (may-delete-vestigial-exit cast)))
       (let ((lvar (node-lvar cast)))
         (when (values-subtypep (lvar-derived-type value)
                                (cast-asserted-type cast))

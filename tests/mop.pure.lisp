@@ -81,10 +81,11 @@
           when results do (cerror "continue" "~A" results))))
 
 ;;; AMOP says these are the defaults
-(assert (equal (list (find-class 'standard-object))
-               (sb-mop:class-direct-superclasses (make-instance 'standard-class))))
-(assert (equal (list (find-class 'sb-mop:funcallable-standard-object))
-               (sb-mop:class-direct-superclasses (make-instance 'sb-mop:funcallable-standard-class))))
+(with-test (:name :standard-direct-superclasses)
+  (assert (equal (list (find-class 'standard-object))
+                 (sb-mop:class-direct-superclasses (make-instance 'standard-class))))
+  (assert (equal (list (find-class 'sb-mop:funcallable-standard-object))
+                 (sb-mop:class-direct-superclasses (make-instance 'sb-mop:funcallable-standard-class)))))
 
 (with-test (:name :bug-936513)
   ;; This used to fail as ENSURE-GENERIC-FUNCTION wanted a list specifying
@@ -93,3 +94,70 @@
     (ensure-generic-function 'make-instance :method-combination mc))
   ;; Let's make sure the list works too...
   (ensure-generic-function 'make-instance :method-combination '(standard)))
+
+(with-test (:name :bug-309072)
+  ;; original reported test cases
+  (assert-error (make-instance 'sb-mop:slot-definition)
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:slot-definition :name 'pi)
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:slot-definition :name 3)
+                sb-pcl::slotd-initialization-type-error)
+  ;; extra cases from the MOP dictionary
+  (assert-error (make-instance 'sb-mop:slot-definition :name 'x
+                                                       :initform nil)
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:slot-definition :name 'x
+                                                       :initfunction (lambda () nil))
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:slot-definition :name 'x
+                                                       :initfunction (lambda () nil))
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:slot-definition :name 'x
+                                                       :allocation "")
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:slot-definition :name 'x
+                                                       :initargs "")
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:slot-definition :name 'x
+                                                       :initargs '(foo . bar))
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:slot-definition :name 'x
+                                                       :initargs '(foo bar 3))
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:slot-definition :name 'x
+                                                       :documentation '(()))
+                sb-pcl::slotd-initialization-error)
+  ;; distinction between DIRECT- and EFFECTIVE- slot definitions
+  (assert-error (make-instance 'sb-mop:effective-slot-definition
+                               :name 'x :readers '(foo))
+                sb-pcl::initarg-error)
+  (assert-error (make-instance 'sb-mop:effective-slot-definition
+                               :name 'x :writers '(foo))
+                sb-pcl::initarg-error)
+  (make-instance 'sb-mop:direct-slot-definition
+                 :name 'x :readers '(foo))
+  (make-instance 'sb-mop:direct-slot-definition
+                 :name 'x :writers '(foo))
+  (assert-error (make-instance 'sb-mop:direct-slot-definition
+                               :name 'x :readers "")
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:direct-slot-definition
+                               :name 'x :readers '(3))
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:direct-slot-definition
+                               :name 'x :readers '(foo . bar))
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:direct-slot-definition
+                               :name 'x :writers "")
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:direct-slot-definition
+                               :name 'x :writers '(3))
+                sb-pcl::slotd-initialization-error)
+  (assert-error (make-instance 'sb-mop:direct-slot-definition
+                               :name 'x :writers '(foo . bar))
+                sb-pcl::slotd-initialization-error))
+
+(with-test (:name (:bug-1332983 :validate-superclass stream t))
+  (assert
+   (sb-mop:validate-superclass (find-class 'stream) (find-class 't))))

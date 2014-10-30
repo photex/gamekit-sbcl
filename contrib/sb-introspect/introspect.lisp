@@ -195,7 +195,8 @@ If an unsupported TYPE is requested, the function will return NIL.
      (case type
        ((:variable)
         (when (and (symbolp name)
-                   (eq (sb-int:info :variable :kind name) :special))
+                   (member (sb-int:info :variable :kind name)
+                           '(:global :special)))
           (translate-source-location (sb-int:info :source-location type name))))
        ((:constant)
         (when (and (symbolp name)
@@ -233,11 +234,11 @@ If an unsupported TYPE is requested, the function will return NIL.
        ((:method)
         (when (fboundp name)
           (let ((fun (real-fdefinition name)))
-           (when (typep fun 'generic-function)
-             (loop for method in (sb-mop::generic-function-methods
-                                  fun)
-                for source = (find-definition-source method)
-                when source collect source)))))
+            (when (typep fun 'generic-function)
+              (loop for method in (sb-mop::generic-function-methods
+                                   fun)
+                    for source = (find-definition-source method)
+                    when source collect source)))))
        ((:setf-expander)
         (when (and (consp name)
                    (eq (car name) 'setf))
@@ -265,12 +266,12 @@ If an unsupported TYPE is requested, the function will return NIL.
               (find-definition-source class)))))
        ((:method-combination)
         (let ((combination-fun
-               (find-method #'sb-mop:find-method-combination
-                            nil
-                            (list (find-class 'generic-function)
-                                  (list 'eql name)
-                                  t)
-                            nil)))
+                (find-method #'sb-mop:find-method-combination
+                             nil
+                             (list (find-class 'generic-function)
+                                   (list 'eql name)
+                                   t)
+                             nil)))
           (when combination-fun
             (find-definition-source combination-fun))))
        ((:package)
@@ -315,10 +316,18 @@ If an unsupported TYPE is requested, the function will return NIL.
         (when (symbolp name)
           (find-vop-source name)))
        ((:source-transform)
-        (when (symbolp name)
-          (let ((transform-fun (sb-int:info :function :source-transform name)))
-            (when transform-fun
-              (find-definition-source transform-fun)))))
+        (let ((transform-fun (sb-int:info :function :source-transform name))
+              (accessor (sb-int:info :function :structure-accessor
+                                     (if (typep name '(cons (eql setf)
+                                                       (cons symbol null)))
+                                         (second name)
+                                         name))))
+          ;; Structure accessors have source transforms, but the
+          ;; returned locations will neither show the actual place
+          ;; where it's defined, nor is really interesting.
+          (when (and transform-fun
+                     (not accessor))
+            (find-definition-source transform-fun))))
        (t
         nil)))))
 
@@ -368,17 +377,7 @@ If an unsupported TYPE is requested, the function will return NIL.
                     (sb-eval:interpreted-function-source-location object))))
        source))
     (function
-     (cond ((struct-accessor-p object)
-            (find-definition-source
-             (struct-accessor-structure-class object)))
-           ((struct-predicate-p object)
-            (find-definition-source
-             (struct-predicate-structure-class object)))
-           ((struct-copier-p object)
-            (find-definition-source
-             (struct-copier-structure-class object)))
-           (t
-            (find-function-definition-source object))))
+     (find-function-definition-source object))
     ((or condition standard-object structure-object)
      (find-definition-source (class-of object)))
     (t
@@ -422,35 +421,6 @@ If an unsupported TYPE is requested, the function will return NIL.
            (list number)))
        :plist (sb-c:definition-source-location-plist location))
       (make-definition-source)))
-
-;;; This is kludgey.  We expect these functions (the underlying functions,
-;;; not the closures) to be in static space and so not move ever.
-;;; FIXME It's also possibly wrong: not all structures use these vanilla
-;;; accessors, e.g. when the :type option is used
-(defvar *struct-slotplace-reader*
-  (sb-vm::%simple-fun-self #'definition-source-pathname))
-(defvar *struct-slotplace-writer*
-  (sb-vm::%simple-fun-self #'(setf definition-source-pathname)))
-(defvar *struct-predicate*
-  (sb-vm::%simple-fun-self #'definition-source-p))
-(defvar *struct-copier*
-  (sb-vm::%simple-fun-self #'copy-definition-source))
-
-(defun struct-accessor-p (function)
-  (let ((self (sb-vm::%simple-fun-self function)))
-    ;; FIXME there are other kinds of struct accessor.  Fill out this list
-    (member self (list *struct-slotplace-reader*
-                       *struct-slotplace-writer*))))
-
-(defun struct-copier-p (function)
-  (let ((self (sb-vm::%simple-fun-self function)))
-    ;; FIXME there may be other structure copier functions
-    (member self (list *struct-copier*))))
-
-(defun struct-predicate-p (function)
-  (let ((self (sb-vm::%simple-fun-self function)))
-    ;; FIXME there may be other structure predicate functions
-    (member self (list *struct-predicate*))))
 
 (sb-int:define-deprecated-function :late "1.0.24.5" function-arglist function-lambda-list
     (function)
@@ -517,39 +487,6 @@ value."
          (if type
              type
              (sb-impl::%fun-type function-designator)))))))
-
-;;; FIXME: These three are pretty terrible. Can we place have some proper metadata
-;;; instead.
-
-(defun struct-accessor-structure-class (function)
-  (let ((self (sb-vm::%simple-fun-self function)))
-    (cond
-      ((member self (list *struct-slotplace-reader* *struct-slotplace-writer*))
-       (find-class
-        (sb-kernel::classoid-name
-         (sb-kernel::layout-classoid
-          (sb-kernel:%closure-index-ref function 1)))))
-      )))
-
-(defun struct-copier-structure-class (function)
-  (let ((self (sb-vm::%simple-fun-self function)))
-    (cond
-      ((member self (list *struct-copier*))
-       (find-class
-        (sb-kernel::classoid-name
-         (sb-kernel::layout-classoid
-          (sb-kernel:%closure-index-ref function 0)))))
-      )))
-
-(defun struct-predicate-structure-class (function)
-  (let ((self (sb-vm::%simple-fun-self function)))
-    (cond
-      ((member self (list *struct-predicate*))
-       (find-class
-        (sb-kernel::classoid-name
-         (sb-kernel::layout-classoid
-          (sb-kernel:%closure-index-ref function 0)))))
-      )))
 
 ;;;; find callers/callees, liberated from Helmut Eller's code in SLIME
 
@@ -642,16 +579,24 @@ constant pool."
     (function
      (sb-kernel::%fun-fun functoid))))
 
+;; Call FUNCTION with two args, NAME and VALUE, for each value that is
+;; either the FDEFINITION or MACRO-FUNCTION of some global name.
+;;
+(defun call-with-each-global-functoid (function)
+  (sb-c::call-with-each-globaldb-name
+   (lambda (name)
+     ;; In general it might be unsafe to call INFO with a NAME that is not
+     ;; valid for the kind of info being retrieved, as when the defaulting
+     ;; function tries to perform a sanity-check. But here it's safe.
+     (let ((functoid (or (sb-int:info :function :macro-function name)
+                         (sb-int:info :function :definition name))))
+             (if functoid
+                 (funcall function name functoid))))))
+
 (defun collect-xref (kind-index wanted-name)
   (let ((ret nil))
-    (dolist (env sb-c::*info-environment* ret)
-      ;; Loop through the infodb ...
-      (sb-c::do-info (env :class class :type type :name info-name
-                          :value value)
-        ;; ... looking for function or macro definitions
-        (when (and (eql class :function)
-                   (or (eql type :macro-function)
-                       (eql type :definition)))
+    (call-with-each-global-functoid
+     (lambda (info-name value)
           ;; Get a simple-fun for the definition, and an xref array
           ;; from the table if available.
           (let* ((simple-fun (get-simple-fun value))
@@ -671,7 +616,8 @@ constant pool."
                          (setf (definition-source-form-path source-location)
                                xref-path)
                          (push (cons info-name source-location)
-                               ret))))))))))
+                               ret)))))))
+    ret))
 
 (defun who-calls (function-name)
   "Use the xref facility to search for source locations where the
@@ -802,7 +748,7 @@ allocation.
 For :HEAP objects the secondary value is a plist:
 
   :SPACE
-    Inficates the heap segment the object is allocated in.
+    Indicates the heap segment the object is allocated in.
 
   :GENERATION
     Is the current generation of the object: 0 for nursery, 6 for pseudo-static
@@ -849,7 +795,8 @@ Experimental: interface subject to change."
   ;; scanning threads for negative answers? Similarly, STACK-ALLOCATED-P for
   ;; checking if an object has been stack-allocated by a given thread for
   ;; testing purposes might not come amiss.
-  (if (typep object '(or fixnum character))
+  (if (typep object '(or fixnum character
+                      #.(if (= sb-vm:n-word-bits 64) 'single-float (values))))
       (values :immediate nil)
       (let ((plist
              (sb-sys:without-gcing
@@ -1032,12 +979,17 @@ Experimental: interface subject to change."
              ;; We don't have GLOBAL-BOUNDP, and there's no ERRORP arg.
              (call (sb-ext:symbol-global-value object))
            (unbound-variable ()))
+         ;; These first two are probably unnecessary.
+         ;; The functoid values, if present, are in SYMBOL-INFO
+         ;; which is traversed whether or not EXT was true.
+         ;; But should we traverse SYMBOL-INFO?
+         ;; I don't know what is expected of this interface.
          (when (and ext (ignore-errors (fboundp object)))
            (call (fdefinition object))
            (call (macro-function object))
            (let ((class (find-class object nil)))
              (when class (call class))))
-         (call (symbol-plist object))
+         (call (symbol-plist object)) ; perhaps SB-KERNEL:SYMBOL-INFO instead?
          (call (symbol-name object))
          (unless simple
            (call (symbol-package object))))

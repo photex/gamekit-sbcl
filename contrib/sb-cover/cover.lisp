@@ -89,7 +89,7 @@ result to RESTORE-COVERAGE."
             (make-pathname :directory (append (or (pathname-directory pathname)
                                                   (list :relative))
                                               (list (file-namestring pathname)))
-                           :name nil :type nil
+                           :name nil :type nil :version nil
                            :defaults pathname)))))
 
 (defun report (directory &key ((:form-mode *source-path-mode*) :whole)
@@ -104,17 +104,20 @@ the coverage report will be placed on the CARs of any cons-forms, while if
 it has the value :WHOLE the whole form will be annotated (the default).
 The former mode shows explicitly which forms were instrumented, while the
 latter mode is generally easier to read."
-  (let ((paths)
-        (*default-pathname-defaults* (pathname-as-directory directory)))
+  (let* ((paths)
+         (directory (pathname-as-directory directory))
+         (*default-pathname-defaults* (translate-logical-pathname directory)))
     (ensure-directories-exist *default-pathname-defaults*)
     (maphash (lambda (k v)
                (declare (ignore v))
-               (let* ((n (format nil "~(~{~2,'0X~}~)"
+               (let* ((pk (translate-logical-pathname k))
+                      (n (format nil "~(~{~2,'0X~}~)"
                                 (coerce (sb-md5:md5sum-string
-                                         (sb-ext:native-namestring k))
+                                         (sb-ext:native-namestring pk))
                                         'list)))
-                      (path (make-pathname :name n :type "html")))
+                      (path (make-pathname :name n :type "html" :defaults directory)))
                  (when (probe-file k)
+                   (ensure-directories-exist pk)
                    (with-open-file (stream path
                                            :direction :output
                                            :if-exists :supersede
@@ -122,7 +125,7 @@ latter mode is generally easier to read."
                      (push (list* k n (report-file k stream external-format))
                            paths)))))
              *code-coverage-info*)
-    (let ((report-file (make-pathname :name "cover-index" :type "html")))
+    (let ((report-file (make-pathname :name "cover-index" :type "html" :defaults directory)))
       (with-open-file (stream report-file
                               :direction :output :if-exists :supersede
                               :if-does-not-exist :create)
@@ -442,7 +445,7 @@ table.summary tr.subheading td { text-align: left; font-weight: bold; padding-le
   "Return a macro character function that does the same as FN, but
 additionally stores the result together with the stream positions
 before and after of calling FN in the hashtable SOURCE-MAP."
-  (declare (type function fn))
+  (declare (type (or function symbol) fn))
   (lambda (stream char)
     (declare (optimize debug safety))
     (let ((start (file-position stream))
@@ -458,13 +461,17 @@ before and after of calling FN in the hashtable SOURCE-MAP."
 The source locations are stored in SOURCE-MAP."
   (let* ((tab (copy-readtable readtable))
          (*readtable* tab))
+    ;; It is unspecified whether doing (SET-MACRO-CHARACTER c1 fn)
+    ;; and then (SET-DISPATCH-MACRO-CHARACTER c1 c2 fn) should be allowed.
+    ;; Portability concerns aside, it doesn't work in the latest code,
+    ;; but first changing the function for #. and then # in that order works.
+    (suppress-sharp-dot tab)
     (dotimes (code 128)
       (let ((char (code-char code)))
         (multiple-value-bind (fn term) (get-macro-character char tab)
           (when fn
             (set-macro-character char (make-source-recorder fn source-map)
                                  term tab)))))
-    (suppress-sharp-dot tab)
     (set-macro-character #\(
                          (make-source-recorder
                           (make-recording-read-list source-map)
@@ -494,16 +501,16 @@ The source locations are stored in SOURCE-MAP."
                                "Nothing appears before . in list.")))
                            ((sb-impl::whitespace[2]p nextchar)
                             (setq nextchar (sb-impl::flush-whitespace stream))))
-                     (rplacd listtail
-                             ;; Return list containing last thing.
-                             (car (sb-impl::read-after-dot stream nextchar)))
+                     (rplacd listtail (sb-impl::read-after-dot stream nextchar))
                      (return (cdr thelist)))
                     ;; Put back NEXTCHAR so that we can read it normally.
                     (t (unread-char nextchar stream)))))
           ;; Next thing is not an isolated dot.
-          (let ((start (file-position stream))
-                (listobj (sb-impl::read-maybe-nothing stream firstchar))
-                (end (file-position stream)))
+          (sb-int:binding*
+              ((start (file-position stream))
+               ((winp obj) (sb-impl::read-maybe-nothing stream firstchar))
+               (listobj (if winp (list obj)))
+               (end (file-position stream)))
             ;; allows the possibility that a comment was read
             (when listobj
              (unless (consp (car listobj))

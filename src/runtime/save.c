@@ -190,7 +190,7 @@ output_space(FILE *file, int id, lispobj *addr, lispobj *end,
 
     bytes = words * sizeof(lispobj);
 
-    printf("writing %lu bytes from the %s space at 0x%p\n",
+    printf("writing %lu bytes from the %s space at %p\n",
            bytes, names[id], addr);
 
     data = write_and_compress_bytes(file, (char *)addr, bytes, file_offset,
@@ -240,10 +240,6 @@ save_to_filehandle(FILE *file, char *filename, lispobj init_function,
 
     core_start_pos = ftell(file);
     write_lispobj(CORE_MAGIC, file);
-
-    write_lispobj(VERSION_CORE_ENTRY_TYPE_CODE, file);
-    write_lispobj(3, file);
-    write_lispobj(SBCL_CORE_VERSION_INTEGER, file);
 
     write_lispobj(BUILD_ID_CORE_ENTRY_TYPE_CODE, file);
     write_lispobj(/* (We're writing the word count of the entry here, and the 2
@@ -374,7 +370,7 @@ check_runtime_build_id(void *buf, size_t size)
     size_t idlen;
     char *pos;
 
-    idlen = strlen(build_id) - 1;
+    idlen = strlen((const char*)build_id) - 1;
     while ((pos = memchr(buf, build_id[0], size)) != NULL) {
         size -= (pos + 1) - (char *)buf;
         buf = (pos + 1);
@@ -435,10 +431,34 @@ lose:
 }
 
 boolean
-save_runtime_to_filehandle(FILE *output, void *runtime, size_t runtime_size)
+save_runtime_to_filehandle(FILE *output, void *runtime, size_t runtime_size,
+                           int application_type)
 {
     size_t padding;
     void *padbytes;
+
+#ifdef LISP_FEATURE_WIN32
+    {
+        PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)runtime;
+        PIMAGE_NT_HEADERS nt_header = (PIMAGE_NT_HEADERS)((char *)dos_header +
+                                                          dos_header->e_lfanew);
+
+        int sub_system;
+        switch (application_type) {
+        case 0:
+            sub_system = IMAGE_SUBSYSTEM_WINDOWS_CUI;
+            break;
+        case 1:
+            sub_system = IMAGE_SUBSYSTEM_WINDOWS_GUI;
+            break;
+        default:
+            fprintf(stderr, "Invalid application type %d\n", application_type);
+            return 0;
+        }
+
+        nt_header->OptionalHeader.Subsystem = sub_system;
+    }
+#endif
 
     if (runtime_size != fwrite(runtime, 1, runtime_size, output)) {
         perror("Error saving runtime");
@@ -498,7 +518,8 @@ prepare_to_save(char *filename, boolean prepend_runtime, void **runtime_bytes,
 
 boolean
 save(char *filename, lispobj init_function, boolean prepend_runtime,
-     boolean save_runtime_options, boolean compressed, int compression_level)
+     boolean save_runtime_options, boolean compressed, int compression_level,
+     int application_type)
 {
     FILE *file;
     void *runtime_bytes = NULL;
@@ -509,7 +530,7 @@ save(char *filename, lispobj init_function, boolean prepend_runtime,
         return 1;
 
     if (prepend_runtime)
-        save_runtime_to_filehandle(file, runtime_bytes, runtime_size);
+        save_runtime_to_filehandle(file, runtime_bytes, runtime_size, application_type);
 
     return save_to_filehandle(file, filename, init_function, prepend_runtime,
                               save_runtime_options,

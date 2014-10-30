@@ -657,7 +657,7 @@ profiling, and :TIME for wallclock profiling.")
 loop around the BODY until a sufficient number of samples has been collected.
 Returns the values from the last evaluation of BODY.
 
-In multi-threaded operation, only the thread in which WITH-PROFILING was
+In multithreaded operation, only the thread in which WITH-PROFILING was
 evaluated will be profiled by default. If you want to profile multiple
 threads, invoke the profiler with START-PROFILING.
 
@@ -704,7 +704,7 @@ The following keyword args are recognized:
    of this. In this case using :MODE :TIME is likely to work better.
 
  :LOOP <bool>
-   If false (the default), evaluete BODY only once. If true repeatedly
+   If false (the default), evaluate BODY only once. If true repeatedly
    evaluate BODY."
   (declare (type report-type report))
   (check-type loop boolean)
@@ -1412,40 +1412,5 @@ functions during statistical profiling."
                     (sb-c:%more-arg-values more-context
                                            0
                                            more-count)))))))))
-
 
-;;; silly examples
-
-(defun test-0 (n &optional (depth 0))
-  (declare (optimize (debug 3)))
-  (when (< depth n)
-    (dotimes (i n)
-      (test-0 n (1+ depth))
-      (test-0 n (1+ depth)))))
-
-(defun test ()
-  (with-profiling (:reset t :max-samples 1000 :report :graph)
-    (test-0 7)))
-
-(defun consalot ()
-  (let ((junk '()))
-    (loop repeat 10000 do
-         (push (make-array 10) junk))
-    junk))
-
-(defun consing-test ()
-  ;; 0.0001 chosen so that it breaks rather reliably when sprof does not
-  ;; respect pseudo atomic.
-  (with-profiling (:reset t :sample-interval 0.0001 :report :graph :loop nil)
-    (let ((target (+ (get-universal-time) 15)))
-      (princ #\.)
-      (force-output)
-      (loop
-         while (< (get-universal-time) target)
-         do (consalot)))))
-
-
-;;; provision
 (provide 'sb-sprof)
-
-;;; end of file

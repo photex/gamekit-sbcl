@@ -58,11 +58,13 @@
                 ;; attempt this if TEST-FORM is the application of a
                 ;; special operator because of argument evaluation
                 ;; order issues.
-                ((and (typep test-form '(cons symbol list))
-                      (eq (info :function :kind (first test-form)) :function))
-                 (let ((name (first test-form))
-                       (args (mapcar #'process-place (rest test-form))))
-                   `(,name ,@args)))
+                ((when (typep test-form '(cons symbol list))
+                   (let ((name (first test-form)))
+                     (when (or (eq (info :function :kind name) :function)
+                               (and (typep env 'sb!kernel:lexenv)
+                                    (sb!c::functional-p
+                                     (cdr (assoc name (sb!c::lexenv-funs env))))))
+                       `(,name ,@(mapcar #'process-place (rest test-form)))))))
                 ;; For all other cases, just evaluate TEST-FORM and do
                 ;; not report any details if the assertion fails.
                 (t
@@ -145,21 +147,23 @@ invoked. In that case it will store into PLACE and start over."
            :format-arguments (list name)))
   (with-single-package-locked-error
       (:symbol name "defining ~A as a symbol-macro"))
-  (sb!c:with-source-location (source-location)
-    (setf (info :source-location :symbol-macro name) source-location))
   (let ((kind (info :variable :kind name)))
-    (ecase kind
+    (case kind
      ((:macro :unknown)
+      (sb!c:with-source-location (source-location)
+        (setf (info :source-location :symbol-macro name) source-location))
       (setf (info :variable :kind name) :macro)
       (setf (info :variable :macro-expansion name) expansion))
-     ((:special :global)
+     (t
       (error 'simple-program-error
-             :format-control "Symbol macro name already declared ~A: ~S."
-             :format-arguments (list kind name)))
-     (:constant
-      (error 'simple-program-error
-             :format-control "Symbol macro name already defined as a constant: ~S."
-             :format-arguments (list name)))))
+             :format-control "Symbol ~S is already defined as ~A."
+             :format-arguments (list name
+                                     (case kind
+                                       (:alien "an alien variable")
+                                       (:constant "a constant")
+                                       (:special "a special variable")
+                                       (:global "a global variable")
+                                       (t kind)))))))
   name)
 
 ;;;; DEFINE-COMPILER-MACRO
@@ -177,15 +181,19 @@ invoked. In that case it will store into PLACE and start over."
         (parse-defmacro lambda-list whole body name 'define-compiler-macro
                         :environment environment)
       (let ((def `(lambda (,whole ,environment)
+                    ,@(sb!c:macro-policy-decls t)
                     ,@local-decs
                     ,body))
             (debug-name (sb!c::debug-name 'compiler-macro-function name)))
-        `(eval-when (:compile-toplevel :load-toplevel :execute)
+        `(progn
+          (eval-when (:compile-toplevel)
+           (sb!c::%compiler-defmacro :compiler-macro-function ',name t))
+          (eval-when (:compile-toplevel :load-toplevel :execute)
            (sb!c::%define-compiler-macro ',name
                                          #',def
                                          ',lambda-list
                                          ,doc
-                                         ',debug-name))))))
+                                         ',debug-name)))))))
 
 ;;; FIXME: This will look remarkably similar to those who have already
 ;;; seen the code for %DEFMACRO in src/code/defmacro.lisp.  Various
@@ -196,7 +204,7 @@ invoked. In that case it will store into PLACE and start over."
            (defun sb!c::%define-compiler-macro
                (name definition lambda-list doc debug-name)
              ,@(unless set-p
-                 '((declare (ignore lambda-list debug-name))))
+                 '((declare (ignore lambda-list doc debug-name))))
              ;; FIXME: warn about incompatible lambda list with
              ;; respect to parent function?
              (setf (sb!xc:compiler-macro-function name) definition)
@@ -300,7 +308,7 @@ invoked. In that case it will store into PLACE and start over."
                       (null (cdr cases)))
                  (push `(t nil ,@forms) clauses))
                 ((and multi-p (listp keyoid))
-                 (setf keys (append keyoid keys))
+                 (setf keys (nconc (reverse keyoid) keys))
                  (check-clause keyoid)
                  (push `((or ,@(mapcar (lambda (key)
                                          `(,test ,keyform-value ',key))
@@ -326,6 +334,11 @@ invoked. In that case it will store into PLACE and start over."
                          nil
                          ,@forms)
                        clauses))))))
+    (setq keys
+          (nreverse (mapcon (lambda (tail)
+                              (unless (member (car tail) (cdr tail))
+                                (list (car tail))))
+                            keys)))
     (case-body-aux name keyform keyform-value clauses keys errorp proceedp
                    `(,(if multi-p 'member 'or) ,@keys))))
 
@@ -434,30 +447,21 @@ invoked. In that case it will store into PLACE and start over."
                                             &body forms-decls)
   (multiple-value-bind (forms decls)
       (parse-body forms-decls :doc-string-allowed nil)
-    ;; The ONCE-ONLY inhibits compiler note for unreachable code when
-    ;; END is true.
-    (once-only ((string string))
-      `(let ((,var
-              ,(cond ((null end)
-                      `(make-string-input-stream ,string ,(or start 0)))
-                     ((symbolp end)
-                      `(if ,end
-                           (make-string-input-stream ,string
-                                                     ,(or start 0)
-                                                     ,end)
-                           (make-string-input-stream ,string
-                                                     ,(or start 0))))
-                     (t
-                      `(make-string-input-stream ,string
-                                                 ,(or start 0)
-                                                 ,end)))))
+    `(let ((,var
+            ;; Should (WITH-INPUT-FROM-STRING (stream str :start nil :end 5))
+            ;; pass the explicit NIL, and thus get an error? It's logical
+            ;; because an explicit NIL does not mean "default" in any other
+            ;; string operation. So why does it here?
+            ,(if (null end)
+                 `(make-string-input-stream ,string ,@(if start (list start)))
+                 `(make-string-input-stream ,string ,(or start 0) ,end))))
          ,@decls
          (multiple-value-prog1
              (unwind-protect
                   (progn ,@forms)
                (close ,var))
            ,@(when index
-               `((setf ,index (string-input-stream-current ,var)))))))))
+               `((setf ,index (string-input-stream-current ,var))))))))
 
 (defmacro-mundanely with-output-to-string
     ((var &optional string &key (element-type ''character))
@@ -491,8 +495,8 @@ invoked. In that case it will store into PLACE and start over."
 
 (defmacro-mundanely nth-value (n form)
   #!+sb-doc
-  "Evaluate FORM and return the Nth value (zero based). This involves no
-  consing when N is a trivial constant integer."
+  "Evaluate FORM and return the Nth value (zero based)
+ without consing a temporary list of values."
   ;; FIXME: The above is true, if slightly misleading.  The
   ;; MULTIPLE-VALUE-BIND idiom [ as opposed to MULTIPLE-VALUE-CALL
   ;; (LAMBDA (&REST VALUES) (NTH N VALUES)) ] does indeed not cons at
@@ -506,12 +510,12 @@ invoked. In that case it will store into PLACE and start over."
         `(multiple-value-bind (,@dummy-list ,keeper) ,form
            (declare (ignore ,@dummy-list))
            ,keeper))
-      (once-only ((n n))
-        `(case (the fixnum ,n)
-           (0 (nth-value 0 ,form))
-           (1 (nth-value 1 ,form))
-           (2 (nth-value 2 ,form))
-           (t (nth (the fixnum ,n) (multiple-value-list ,form)))))))
+      ;; &MORE conversion handily deals with non-constant N,
+      ;; avoiding the unstylish practice of inserting FORM into the
+      ;; expansion more than once to pick off a few small values.
+      `(multiple-value-call
+           (lambda (n &rest list) (nth (truly-the index n) list))
+         (the index ,n) ,form)))
 
 (defmacro-mundanely declaim (&rest specs)
   #!+sb-doc
@@ -521,15 +525,21 @@ invoked. In that case it will store into PLACE and start over."
      ,@(mapcar (lambda (spec) `(sb!xc:proclaim ',spec))
                specs)))
 
+;; Avoid unknown return values in emitted code for PRINT-UNREADABLE-OBJECT
+(declaim (ftype (sfunction (t t t t &optional t) null)
+                %print-unreadable-object))
 (defmacro-mundanely print-unreadable-object ((object stream &key type identity)
                                              &body body)
+  #!+sb-doc
   "Output OBJECT to STREAM with \"#<\" prefix, \">\" suffix, optionally
   with object-type prefix and object-identity suffix, and executing the
   code in BODY to provide possible further output."
-  `(%print-unreadable-object ,object ,stream ,type ,identity
-                             ,(if body
-                                  `(lambda () ,@body)
-                                  nil)))
+  ;; Note: possibly out-of-order keyword argument evaluation.
+  (if body
+      (let ((fun (make-symbol "THUNK")))
+        `(dx-flet ((,fun () ,@body))
+           (%print-unreadable-object ,object ,stream ,type ,identity #',fun)))
+      `(%print-unreadable-object ,object ,stream ,type ,identity)))
 
 (defmacro-mundanely ignore-errors (&rest forms)
   #!+sb-doc

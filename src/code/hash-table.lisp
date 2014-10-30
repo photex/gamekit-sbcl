@@ -104,7 +104,7 @@ values are the key and the value of the next object.
 
 Consequences are undefined if HASH-TABLE is mutated during execution of BODY,
 except for changing or removing elements corresponding to the current key. The
-applies to all threads, not just the curren one -- even for synchronized
+applies to all threads, not just the current one -- even for synchronized
 hash-tables. If the table may be mutated by another thread during iteration,
 use eg. SB-EXT:WITH-LOCKED-HASH-TABLE to protect the WITH-HASH-TABLE-ITERATOR
 for."
@@ -151,3 +151,11 @@ unspecified."
   `(sb!thread::with-recursive-system-lock
        ((hash-table-lock ,hash-table))
      ,@body))
+
+;;; Return an association list representing the same data as HASH-TABLE.
+(defun %hash-table-alist (hash-table)
+  (let ((result nil))
+    (maphash (lambda (key value)
+               (push (cons key value) result))
+             hash-table)
+    result))

@@ -181,8 +181,13 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
 ;;; lookup machinery.
 
 (defvar *standard-classes*
+  ;; KLUDGE: order matters!  finding effective slot definitions
+  ;; involves calling slot-definition-name, and we need to do that to
+  ;; break metacycles, so STANDARD-EFFECTIVE-SLOT-DEFINITION must
+  ;; precede STANDARD-DIRECT-SLOT-DEFINITION in this list, at least
+  ;; until ACCESSES-STANDARD-CLASS-SLOT-P is generalized
   '(standard-method standard-generic-function standard-class
-    standard-effective-slot-definition))
+    standard-effective-slot-definition standard-direct-slot-definition))
 
 (defvar *standard-slot-locations* (make-hash-table :test 'equal))
 
@@ -223,6 +228,10 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
 (defun standard-slot-value/eslotd (slotd slot-name)
   (standard-slot-value slotd slot-name
                        *the-class-standard-effective-slot-definition*))
+
+(defun standard-slot-value/dslotd (slotd slot-name)
+  (standard-slot-value slotd slot-name
+                       *the-class-standard-direct-slot-definition*))
 
 (defun standard-slot-value/class (class slot-name)
   (standard-slot-value class slot-name *the-class-standard-class*))
@@ -605,9 +614,9 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
       (let ((cdc  (caching-dfun-cost gf))) ; fast
         (> cdc (dispatch-dfun-cost gf cdc))))))
 
-(defparameter *non-built-in-typep-cost* 100)
+(defparameter *non-system-typep-cost* 100)
 (defparameter *structure-typep-cost*  15)
-(defparameter *built-in-typep-cost* 5)
+(defparameter *system-typep-cost* 5)
 
 ;;; According to comments in the original CMU CL version of PCL,
 ;;; the cost LIMIT is important to cut off exponential growth for
@@ -624,12 +633,11 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
              (if (eq 'class (car type))
                  (let* ((metaclass (class-of (cadr type)))
                         (mcpl (class-precedence-list metaclass)))
-                   (cond ((memq *the-class-built-in-class* mcpl)
-                          *built-in-typep-cost*)
+                   (cond ((memq *the-class-system-class* mcpl)
+                          *system-typep-cost*)
                          ((memq *the-class-structure-class* mcpl)
                           *structure-typep-cost*)
-                         (t
-                          *non-built-in-typep-cost*)))
+                         (t *non-system-typep-cost*)))
                  0))
             (max-cost-so-far
              (+ (max true-value false-value) type-test-cost)))
@@ -653,6 +661,7 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
 
 (declaim (inline make-callable))
 (defun make-callable (gf methods generator method-alist wrappers)
+  (declare (ignore gf))
   (let* ((*applicable-methods* methods)
          (callable (function-funcall generator method-alist wrappers)))
     callable))
@@ -1107,17 +1116,32 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
 ;;; object of the slot accessed, and ACCESSOR-TYPE is one of the symbols
 ;;; READER or WRITER describing the slot access.
 (defun accesses-standard-class-slot-p (gf)
-  (flet ((standard-class-slot-access (gf class)
-           (loop with gf-name = (standard-slot-value/gf gf 'name)
-                 for slotd in (standard-slot-value/class class 'slots)
-                 ;; FIXME: where does BOUNDP fit in here?  Is it
-                 ;; relevant?
-                 as readers = (standard-slot-value/eslotd slotd 'readers)
-                 as writers = (standard-slot-value/eslotd slotd 'writers)
-                 if (member gf-name readers :test #'equal)
-                   return (values slotd 'reader)
-                 else if (member gf-name writers :test #'equal)
-                   return (values slotd 'writer))))
+  (labels
+      ((all-dslotds (class &aux done)
+         (labels ((all-dslotds-aux (class)
+                    (if (or (member class done) (not (eq (class-of class) *the-class-standard-class*)))
+                        nil
+                        (progn
+                          (push class done)
+                          (append (standard-slot-value/class class 'direct-slots)
+                                  (mapcan #'(lambda (c)
+                                              (copy-list (all-dslotds-aux c)))
+                                          (standard-slot-value/class class 'direct-superclasses)))))))
+           (all-dslotds-aux class)))
+       (standard-class-slot-access (gf class)
+
+         (loop with gf-name = (standard-slot-value/gf gf 'name)
+            with eslotds = (standard-slot-value/class class 'slots)
+            with dslotds = (all-dslotds class)
+            for dslotd in dslotds
+            as readers = (standard-slot-value/dslotd dslotd 'readers)
+            as writers = (standard-slot-value/dslotd dslotd 'writers)
+            as name = (standard-slot-value/dslotd dslotd 'name)
+            as eslotd = (find name eslotds :key (lambda (x) (standard-slot-value/eslotd x 'name)))
+            if (member gf-name readers :test #'equal)
+            return (values eslotd 'reader)
+            else if (member gf-name writers :test #'equal)
+            return (values eslotd 'writer))))
     (dolist (class-name *standard-classes*)
       (let ((class (find-class class-name)))
         (multiple-value-bind (slotd accessor-type)
@@ -1163,6 +1187,8 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
     (accessor-values-internal accessor-type accessor-class methods)))
 
 (defun accessor-values-internal (accessor-type accessor-class methods)
+  (unless accessor-class
+    (return-from accessor-values-internal (values nil nil)))
   (dolist (meth methods)
     (when (if (consp meth)
               (early-method-qualifiers meth)
@@ -1170,31 +1196,26 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
       (return-from accessor-values-internal (values nil nil))))
   (let* ((meth (car methods))
          (early-p (not (eq **boot-state** 'complete)))
-         (slot-name (when accessor-class
-                      (if (consp meth)
-                          (and (early-method-standard-accessor-p meth)
-                               (early-method-standard-accessor-slot-name meth))
-                          (and (member *the-class-standard-object*
-                                       (if early-p
-                                           (early-class-precedence-list
-                                            accessor-class)
-                                           (class-precedence-list
-                                            accessor-class))
-                                       :test #'eq)
-                               (accessor-method-p meth)
-                               (accessor-method-slot-name meth)))))
-         (slotd (and accessor-class
-                     (if early-p
-                         (dolist (slot (early-class-slotds accessor-class) nil)
-                           (when (eql slot-name
-                                      (early-slot-definition-name slot))
-                             (return slot)))
-                         (find-slot-definition accessor-class slot-name)))))
+         (slot-name
+          (cond
+            ((and (consp meth)
+                  (early-method-standard-accessor-p meth))
+             (early-method-standard-accessor-slot-name meth))
+            ((and (accessor-method-p meth)
+                  (member *the-class-standard-object*
+                          (if early-p
+                              (early-class-precedence-list accessor-class)
+                              (class-precedence-list accessor-class))))
+             (accessor-method-slot-name meth))
+            (t (return-from accessor-values-internal (values nil nil)))))
+         (slotd (if early-p
+                    (dolist (slot (early-class-slotds accessor-class) nil)
+                      (when (eql slot-name (early-slot-definition-name slot))
+                        (return slot)))
+                    (find-slot-definition accessor-class slot-name))))
     (when (and slotd
-               (or early-p
-                   (slot-accessor-std-p slotd accessor-type))
-               (or early-p
-                   (not (safe-p accessor-class))))
+               (or early-p (slot-accessor-std-p slotd accessor-type))
+               (or early-p (not (safe-p accessor-class))))
       (values (if early-p
                   (early-slot-definition-location slotd)
                   (slot-definition-location slotd))

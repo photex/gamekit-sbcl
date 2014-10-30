@@ -1,13 +1,26 @@
-MODULE=asdf
-include ../vanilla-module.mk
+DEST=$(SBCL_PWD)/obj/sbcl-home/contrib/
+ASDF_FASL=$(DEST)/asdf.fasl
+UIOP_FASL=$(DEST)/uiop.fasl
+FASL=$(UIOP_FASL) $(ASDF_FASL)
 
+fasl:: $(UIOP_FASL) $(ASDF_FASL)
+$(UIOP_FASL):: uiop.lisp ../../output/sbcl.core
+	mkdir -p $(DEST)
+	$(SBCL) --eval '(compile-file #p"SYS:CONTRIB;ASDF;UIOP.LISP" :output-file (parse-native-namestring "$@"))' </dev/null
 
-test::
+$(ASDF_FASL):: asdf.lisp ../../output/sbcl.core
+	if [ -d asdf-upstream ] ; then rm -rf asdf-upstream ; fi
+	mkdir -p $(DEST)
+	$(SBCL) --eval '(compile-file #p"SYS:CONTRIB;ASDF;ASDF.LISP" :output-file (parse-native-namestring "$@"))' </dev/null
+
+install::
+	cp $(FASL) "$(BUILD_ROOT)$(INSTALL_DIR)"
+
+test:: $(FASL)
 	true
 
-up:
+UPSTREAM=../../obj/asdf-upstream
+up::
 	sh pull-asdf.sh
-	(cd asdf-upstream; make build/asdf.lisp)
-	cp asdf-upstream/build/asdf.lisp asdf.lisp
-	cp asdf-upstream/doc/asdf.texinfo asdf.texinfo
-	cp asdf-upstream/README README
+	ln -f $(UPSTREAM)/doc/asdf.texinfo asdf.texinfo
+	ln -f $(UPSTREAM)/README README

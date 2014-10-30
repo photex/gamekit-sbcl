@@ -37,9 +37,10 @@ F(bind)
 F(brk)
 #if defined(hpux) \
      || defined(SVR4) \
-     || defined(__FreeBSD__) \
+     || defined(LISP_FEATURE_FREEBSD) \
      || defined(__OpenBSD__) \
-     || defined(__NetBSD__)
+     || defined(__NetBSD__) \
+     || defined(__DragonFly__)
 F(cfgetospeed)
 F(cfsetospeed)
 F(cfgetispeed)
@@ -154,7 +155,7 @@ F(sigreturn)
 #if !defined(SVR4)
 F(sigsetmask)
 #endif
-#if !defined(SVR4) && !defined(__FreeBSD__) && !defined(__OpenBSD__) && !defined(__NetBSD__)
+#if !defined(SVR4) && !defined(LISP_FEATURE_FREEBSD) && !defined(__OpenBSD__) && !defined(__NetBSD__) && !defined(__DragonFly__)
 F(sigstack)
 F(sigvec)
 #endif
@@ -177,9 +178,10 @@ F(readdir)
 #endif
 #if defined(hpux) \
      || defined(SVR4) \
-     || defined(__FreeBSD__) \
+     || defined(LISP_FEATURE_FREEBSD) \
      || defined(__OpenBSD__) \
      || defined(__NetBSD__) \
+     || defined(__DragonFly__) \
      || defined(__linux__)
 F(tcgetattr)
 F(tcsetattr)
@@ -197,7 +199,8 @@ F(umask)
      && !defined(parisc) \
      && !defined(SOLARIS) \
      && !defined(__OpenBSD__) \
-     && !defined(__FreeBSD__) \
+     && !defined(LISP_FEATURE_FREEBSD) \
+     && !defined(__DragonFly__) \
      && !defined(__NetBSD__)
 F(umount)
 #endif
@@ -208,7 +211,7 @@ F(utimes)
 #ifndef irix
 F(vfork)
 #endif
-#if !defined(osf1) && !defined(__FreeBSD__) && !defined(__OpenBSD__) && !defined(__NetBSD__)
+#if !defined(osf1) && !defined(LISP_FEATURE_FREEBSD) && !defined(__OpenBSD__) && !defined(__NetBSD__) && !defined(__DragonFly__)
 F(vhangup)
 #endif
 F(wait)
@@ -262,11 +265,11 @@ F(gethostbyaddr)
 /* FIXME: NetBSD plays some renaming games, and so cannot simply
    reference symbols here.  "NetBSD needs to get fixed here too PEM
    2004-03-27" */
-#if defined(SVR4) || defined(__FreeBSD__)
+#if defined(SVR4) || defined(LISP_FEATURE_FREEBSD)
 F(setpgid)
 F(getpgid)
 D(timezone)
-#if !defined(__FreeBSD__)
+#if !defined(LISP_FEATURE_FREEBSD)
 D(altzone)
 D(daylight)
 #endif

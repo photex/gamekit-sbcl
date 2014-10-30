@@ -13,6 +13,7 @@
 
 (in-package "SB!VM")
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
 (defstruct (specialized-array-element-type-properties
             (:conc-name saetp-)
             (:constructor
@@ -54,16 +55,16 @@
   ;; the relative importance of this array type.  Previously used for
   ;; determining the order of the TYPECASE in
   ;; HAIRY-DATA-VECTOR-{REF,SET}; currently (as of 2013-09-18) unused.
-  (importance (missing-arg) :type fixnum :read-only t))
+  (importance (missing-arg) :type fixnum :read-only t)))
 
-(defparameter *specialized-array-element-type-properties*
+(defglobal *specialized-array-element-type-properties*
   (map 'simple-vector
        (lambda (args)
          (apply #'!make-saetp args))
        `(;; Erm.  Yeah.  There aren't a lot of things that make sense
          ;; for an initial element for (ARRAY NIL). -- CSR, 2002-03-07
          (nil #:mu 0 simple-array-nil
-              :complex-typecode #.sb!vm:complex-vector-nil-widetag
+              :complex-typecode #.complex-vector-nil-widetag
               :importance 0)
          #!-sb-unicode
          (character ,(code-char 0) 8 simple-base-string
@@ -71,7 +72,7 @@
                     ;; trailing #\NULL for convenience in calling out
                     ;; to C.)
                     :n-pad-elements 1
-                    :complex-typecode #.sb!vm:complex-base-string-widetag
+                    :complex-typecode #.complex-base-string-widetag
                     :importance 17)
          #!+sb-unicode
          (base-char ,(code-char 0) 8 simple-base-string
@@ -79,19 +80,19 @@
                     ;; trailing #\NULL for convenience in calling out
                     ;; to C.)
                     :n-pad-elements 1
-                    :complex-typecode #.sb!vm:complex-base-string-widetag
+                    :complex-typecode #.complex-base-string-widetag
                     :importance 17)
          #!+sb-unicode
          (character ,(code-char 0) 32 simple-character-string
                     :n-pad-elements 1
-                    :complex-typecode #.sb!vm:complex-character-string-widetag
+                    :complex-typecode #.complex-character-string-widetag
                     :importance 17)
          (single-float 0.0f0 32 simple-array-single-float
           :importance 6)
          (double-float 0.0d0 64 simple-array-double-float
           :importance 5)
          (bit 0 1 simple-bit-vector
-              :complex-typecode #.sb!vm:complex-bit-vector-widetag
+              :complex-typecode #.complex-bit-vector-widetag
               :importance 16)
          ;; KLUDGE: The fact that these UNSIGNED-BYTE entries come
          ;; before their SIGNED-BYTE partners is significant in the
@@ -115,7 +116,7 @@
          ((unsigned-byte 16) 0 16 simple-array-unsigned-byte-16
           :importance 12)
          #!+#.(cl:if (cl:= 32 sb!vm:n-word-bits) '(and) '(or))
-         ((unsigned-byte #.sb!vm:n-positive-fixnum-bits)
+         ((unsigned-byte #.n-positive-fixnum-bits)
           0 32 simple-array-unsigned-fixnum
           :importance 8
           :fixnum-p t)
@@ -124,7 +125,7 @@
          ((unsigned-byte 32) 0 32 simple-array-unsigned-byte-32
           :importance 11)
          #!+#.(cl:if (cl:= 64 sb!vm:n-word-bits) '(and) '(or))
-         ((unsigned-byte #.sb!vm:n-positive-fixnum-bits)
+         ((unsigned-byte #.n-positive-fixnum-bits)
           0 64 simple-array-unsigned-fixnum
           :importance 8
           :fixnum-p t)
@@ -165,19 +166,28 @@
          ((complex long-float) #C(0.0l0 0.0l0) #!+x86 192 #!+sparc 256
           simple-array-complex-long-float
           :importance 1)
-         (t 0 #.sb!vm:n-word-bits simple-vector :importance 18))))
+         (t 0 #.n-word-bits simple-vector :importance 18))))
+
+;; The compiler can see that the number of types that must be present in a
+;; union of arrays to convert (OR (array t1) ... (array tN)) to (ARRAY *)
+;; is a constant, but only if *SPECIALIZED-ARRAY-ELEMENT-TYPE-PROPERTIES*
+;; doesn't potentially have to signal an unbound symbol error,
+;; so use DEFGLOBAL and then proclaim its type.
+(proclaim `(type (simple-vector
+                  ,(length *specialized-array-element-type-properties*))
+                 *specialized-array-element-type-properties*))
 
 (defun valid-bit-bash-saetp-p (saetp)
   ;; BIT-BASHing isn't allowed on simple vectors that contain pointers
-  (and (not (eq t (sb!vm:saetp-specifier saetp)))
+  (and (not (eq t (saetp-specifier saetp)))
        ;; Disallowing (VECTOR NIL) also means that we won't transform
        ;; sequence functions into bit-bashing code and we let the
        ;; generic sequence functions signal errors if necessary.
-       (not (zerop (sb!vm:saetp-n-bits saetp)))
+       (not (zerop (saetp-n-bits saetp)))
        ;; Due to limitations with the current BIT-BASHing code, we can't
        ;; BIT-BASH reliably on arrays whose element types are larger
        ;; than the word size.
-       (<= (sb!vm:saetp-n-bits saetp) sb!vm:n-word-bits)))
+       (<= (saetp-n-bits saetp) n-word-bits)))
 
 (defvar sb!kernel::*specialized-array-element-types*
   (map 'list

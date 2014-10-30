@@ -40,9 +40,6 @@
           (t
            (tn-offset tn)))))
 
-;;;(sb!disassem:set-disassem-params :instruction-alignment 32
-;;;                              :opcode-column-width 11)
-
 (defvar *disassem-use-lisp-reg-names* t
   #!+sb-doc
   "If non-NIL, print registers using the Lisp register names.
@@ -485,7 +482,7 @@ about function addresses and register values.")
   (op     :field (byte 2 30) :value 0)
   (ignore :field (byte 5 25) :value 0)
   (op2    :field (byte 3 22) :value 0)
-  (data   :field (byte 22 0)))
+  (data   :field (byte 22 0) :reader format-2-unimp-data))
 
 (defconstant-eqx f3-printer
   '(:name :tab
@@ -1175,27 +1172,26 @@ about function addresses and register values.")
                            src2)))))
 
 (defun snarf-error-junk (sap offset &optional length-only)
-  (let* ((length (sb!sys:sap-ref-8 sap offset))
+  (let* ((length (sap-ref-8 sap offset))
          (vector (make-array length :element-type '(unsigned-byte 8))))
-    (declare (type sb!sys:system-area-pointer sap)
+    (declare (type system-area-pointer sap)
              (type (unsigned-byte 8) length)
              (type (simple-array (unsigned-byte 8) (*)) vector))
     (cond (length-only
            (values 0 (1+ length) nil nil))
           (t
-           (sb!kernel:copy-ub8-from-system-area sap (1+ offset)
-                                                vector 0 length)
+           (copy-ub8-from-system-area sap (1+ offset) vector 0 length)
            (collect ((sc-offsets)
                      (lengths))
              (lengths 1)                ; the length byte
              (let* ((index 0)
-                    (error-number (sb!c:read-var-integer vector index)))
+                    (error-number (read-var-integer vector index)))
                (lengths index)
                (loop
                  (when (>= index length)
                    (return))
                  (let ((old-index index))
-                   (sc-offsets (sb!c:read-var-integer vector index))
+                   (sc-offsets (read-var-integer vector index))
                    (lengths (- index old-index))))
                (values error-number
                        (1+ length)

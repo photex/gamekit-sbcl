@@ -74,21 +74,6 @@
 ;;; last-error code is maintained on a per-thread basis.
 (define-alien-routine ("GetLastError" get-last-error) dword)
 
-;;; Flag constants for FORMAT-MESSAGE.
-(defconstant format-message-from-system #x1000)
-
-;;; Format an error message based on a lookup table.  See MSDN for the
-;;; full meaning of the all options---most are not used when getting
-;;; system error codes.
-(define-alien-routine ("FormatMessageA" format-message) dword
-  (flags dword)
-  (source (* t))
-  (message-id dword)
-  (language-id dword)
-  (buffer c-string)
-  (size dword)
-  (arguments (* t)))
-
 ;;;; File Handles
 
 ;;; Historically, SBCL on Windows used CRT (lowio) file descriptors,
@@ -521,16 +506,17 @@
 (defmacro void-syscall* ((name &rest arg-types) &rest args)
   `(syscall* (,name ,@arg-types) (values t 0) ,@args))
 
-(defun get-last-error-message (err)
+(defun format-system-message (err)
   "http://msdn.microsoft.com/library/default.asp?url=/library/en-us/debug/base/retrieving_the_last_error_code.asp"
   (let ((message
          (with-alien ((amsg (* char)))
            (syscall (("FormatMessage" t)
                      dword dword dword dword dword (* (* char)) dword dword)
                     (cast-and-free amsg :free-function local-free)
-                    (logior FORMAT_MESSAGE_ALLOCATE_BUFFER
-                            FORMAT_MESSAGE_FROM_SYSTEM
-                            FORMAT_MESSAGE_MAX_WIDTH_MASK)
+                    (logior format-message-allocate-buffer
+                            format-message-from-system
+                            format-message-max-width-mask
+                            format-message-ignore-inserts)
                     0 err 0 (addr amsg) 0 0))))
     (and message (string-right-trim '(#\Space) message))))
 
@@ -540,7 +526,7 @@
      (error "~%Win32 Error [~A] - ~A~%~A"
             ,func-name
             err-code
-            (get-last-error-message err-code))))
+            (format-system-message err-code))))
 
 (defun get-folder-namestring (csidl)
   "http://msdn.microsoft.com/library/en-us/shellcc/platform/shell/reference/functions/shgetfolderpath.asp"
@@ -569,13 +555,13 @@
            (type sb!unix:unix-file-mode mode)
            (ignore mode))
   (syscall (("CreateDirectory" t) lispbool system-string (* t))
-           (values result (if result 0 (- (get-last-error))))
+           (values result (if result 0 (get-last-error)))
            name nil))
 
 (defun sb!unix:unix-rename (name1 name2)
   (declare (type sb!unix:unix-pathname name1 name2))
   (syscall (("MoveFile" t) lispbool system-string system-string)
-           (values result (if result 0 (- (get-last-error))))
+           (values result (if result 0 (get-last-error)))
            name1 name2))
 
 (defun sb!unix::posix-getenv (name)
@@ -610,7 +596,7 @@
 ;; 100-nanosecond intervals since January 1, 1601 (UTC).
 ;;
 ;; http://msdn.microsoft.com/library/en-us/sysinfo/base/filetime_str.asp?
-(define-alien-type FILETIME (sb!alien:unsigned 64))
+(define-alien-type FILETIME (unsigned 64))
 
 ;; FILETIME definition above is almost correct (on little-endian systems),
 ;; except for the wrong alignment if used in another structure: the real
@@ -894,7 +880,7 @@ absense."
       (set-file-pointer-ex handle offset whence)
     (if moved
         (values to-place 0)
-        (values -1 (- (get-last-error))))))
+        (values -1 (get-last-error)))))
 
 ;; File mapping support routines
 (define-alien-routine (#!+sb-unicode "CreateFileMappingW"
@@ -1030,7 +1016,7 @@ absense."
                        sb!unix:enoent)
                       ((#.error_already_exists #.error_file_exists)
                        sb!unix:eexist)
-                      (otherwise (- error-code)))))
+                      (otherwise error-code))))
           (progn
             ;; FIXME: seeking to the end is not enough for real APPEND
             ;; semantics, but it's better than nothing.
@@ -1121,6 +1107,16 @@ absense."
                  (logand (1- (ash 1 (alien-size dword))) identity))))
     (and (/= handle invalid-handle)
          (not (zerop handle))
+         ;;When a gui process is launched in windows (subsystem WINDOWS)
+         ;;it inherits the parent process' handles, which may very well be
+         ;;invalid unless properly orchestrated by the parent process.
+         ;;Win32 io will fail on these handles and there is no meaningful
+         ;;way to make use of them.
+         ;;So we can call GetFileType to verify the validity of the std handle
+         ;;which returns FILE_TYPE_UNKNOWN if the handle is invalid
+         ;;Technically it also returns FILE_TYPE_UNKNOWN if the function fails
+         ;;but I can't think of a reason we'd care, nor what to do about it
+         (not (zerop (get-file-type handle)))
          handle)))
 
 (defun get-std-handles ()
@@ -1174,7 +1170,7 @@ absense."
         (duplicate-handle me fd me 0 t +duplicate-same-access+)
       (if duplicated
           (values handle 0)
-          (values nil (- (get-last-error)))))))
+          (values nil (get-last-error))))))
 
 (defun call-with-crt-fd (thunk handle &optional (flags 0))
   (multiple-value-bind (duplicate errno)

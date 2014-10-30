@@ -20,7 +20,7 @@
 (def!constant lowtag-limit (ash 1 n-lowtag-bits))
 ;;; the number of tag bits used for a fixnum
 (def!constant n-fixnum-tag-bits
-    (if (= 64 sb!vm:n-word-bits)
+    (if (= 64 n-word-bits)
         ;; On 64-bit targets, this may be as low as 1 (for 63-bit
         ;; fixnums) and as high as 3 (for 61-bit fixnums).  The
         ;; constraint on the low end is that we need at least one bit
@@ -66,6 +66,7 @@
   "the fixnum closest in value to negative infinity")
 
 (def!constant most-positive-word (1- (expt 2 n-word-bits))
+  #!+sb-doc
   "The most positive integer that is of type SB-EXT:WORD.")
 
 (def!constant most-positive-exactly-single-float-fixnum

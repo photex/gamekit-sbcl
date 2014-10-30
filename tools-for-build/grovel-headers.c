@@ -39,9 +39,13 @@
   #include <sys/times.h>
   #include <sys/wait.h>
   #include <sys/ioctl.h>
+#ifdef LISP_FEATURE_ANDROID
+  #include <termios.h>
+#else
   #include <sys/termios.h>
-  #include <sys/time.h>
   #include <langinfo.h>
+#endif
+  #include <sys/time.h>
   #include <dlfcn.h>
 #endif
 
@@ -69,7 +73,7 @@
 #include "gc.h"
 
 #define DEFTYPE(lispname,cname) { cname foo; \
-    printf("(define-alien-type " lispname " (%s %d))\n", (((foo=-1)<0) ? "sb!alien:signed" : "unsigned"), (8 * (sizeof foo))); }
+    printf("(define-alien-type " lispname " (%s %d))\n", (((foo=-1)<0) ? "signed" : "unsigned"), (8 * (sizeof foo))); }
 
 #define DEFSTRUCT(lispname,cname,body) { cname bar; \
     printf("(define-alien-type nil\n  (struct %s", #lispname); \
@@ -78,7 +82,7 @@
 #define DEFSLOT(lispname,cname) \
     printf("\n          (%s (%s %d))", \
            #lispname, \
-           (((bar.cname=-1)<0) ? "sb!alien:signed" : "unsigned"), \
+           (((bar.cname=-1)<0) ? "signed" : "unsigned"), \
            (8 * (sizeof bar.cname)))
 
 void
@@ -204,9 +208,10 @@ main(int argc, char *argv[])
 
     printf(";;; FormatMessage\n");
 
-    defconstant("FORMAT_MESSAGE_ALLOCATE_BUFFER", FORMAT_MESSAGE_ALLOCATE_BUFFER);
-    defconstant("FORMAT_MESSAGE_FROM_SYSTEM", FORMAT_MESSAGE_FROM_SYSTEM);
-    defconstant("FORMAT_MESSAGE_MAX_WIDTH_MASK", FORMAT_MESSAGE_MAX_WIDTH_MASK);
+    defconstant("format-message-allocate-buffer", FORMAT_MESSAGE_ALLOCATE_BUFFER);
+    defconstant("format-message-from-system", FORMAT_MESSAGE_FROM_SYSTEM);
+    defconstant("format-message-max-width-mask", FORMAT_MESSAGE_MAX_WIDTH_MASK);
+    defconstant("format-message-ignore-inserts", FORMAT_MESSAGE_IGNORE_INSERTS);
 
     printf(";;; Errors\n");
 
@@ -297,6 +302,7 @@ main(int argc, char *argv[])
     DEFTYPE("mode-t", mode_t);
 
     DEFTYPE("wst-dev-t", wst_dev_t);
+    DEFTYPE("wst-ino-t", wst_ino_t);
     DEFTYPE("wst-off-t", wst_off_t);
     DEFTYPE("wst-blksize-t", wst_blksize_t);
     DEFTYPE("wst-blkcnt-t", wst_blkcnt_t);
@@ -327,10 +333,10 @@ main(int argc, char *argv[])
     defconstant("pollpri", POLLPRI);
     defconstant("pollhup", POLLHUP);
     DEFTYPE("nfds-t", nfds_t);
-
+#ifndef LISP_FEATURE_ANDROID
     printf(";;; langinfo\n");
     defconstant("codeset", CODESET);
-
+#endif
     printf(";;; types, types, types\n");
     DEFTYPE("clock-t", clock_t);
     DEFTYPE("dev-t",   dev_t);
@@ -350,6 +356,7 @@ main(int argc, char *argv[])
     DEFTYPE("uid-t",   uid_t);
     printf(";; Types in src/runtime/wrap.h. See that file for explantion.\n");
     printf(";; Don't use these types for anything other than the stat wrapper.\n");
+    DEFTYPE("wst-ino-t", wst_ino_t);
     DEFTYPE("wst-dev-t", wst_dev_t);
     DEFTYPE("wst-off-t", wst_off_t);
     DEFTYPE("wst-blksize-t", wst_blksize_t);
@@ -527,6 +534,11 @@ main(int argc, char *argv[])
         DEFSLOT(tv-nsec, tv_nsec));
     printf("\n");
 
+#ifdef LISP_FEATURE_ANDROID
+    defconstant("path-max", PATH_MAX);
+    printf("\n");
+#endif
+
 #ifdef LISP_FEATURE_BSD
     printf(";;; sysctl(3) names\n");
     printf("(in-package \"SB!IMPL\")\n");
@@ -537,6 +549,8 @@ main(int argc, char *argv[])
     defconstant("kern-osrelease", KERN_OSRELEASE);
     defconstant("hw-model", HW_MODEL);
     defconstant("hw-pagesize", HW_PAGESIZE);
+
+    defconstant("path-max", PATH_MAX);
     printf("\n");
 #endif
 

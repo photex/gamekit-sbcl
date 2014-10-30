@@ -32,13 +32,15 @@
 
 (deftest definition-source-plist.1
     (let* ((source (find-definition-source #'cl-user::one))
-           (plist (definition-source-plist source)))
-      (values (= (definition-source-file-write-date source)
-                 (file-write-date "test.lisp"))
+           (plist (definition-source-plist source))
+           (pathname (definition-source-pathname source)))
+      (values (equalp pathname #p"SYS:CONTRIB;SB-INTROSPECT;TEST.LISP.NEWEST")
+              (= (definition-source-file-write-date source)
+                 (file-write-date pathname))
               (or (equal (getf plist :test-outer)
                          "OUT")
                   plist)))
-  t t)
+  t t t)
 
 (deftest definition-source-plist.2
     (let ((plist (definition-source-plist
@@ -202,6 +204,10 @@
     (matchp-name :function 'cl-user::loaded-as-source-fun 3)
   t)
 
+(deftest find-source-stuff.33
+    (matchp-name :variable 'cl-user::**global** 29)
+  t)
+
 ;;; Check wrt. interplay of generic functions and their methods.
 
 (defgeneric xuuq (gf.a gf.b          &rest gf.rest &key gf.k-X))
@@ -297,36 +303,9 @@
 (deftest allocation-information.3
     (tai 42 :immediate nil)
   t)
-
-;;; Skip the whole damn test on GENCGC PPC -- the combination is just
-;;; to flaky for this to make too much sense.  GENCGC SPARC almost
-;;; certainly exhibits the same behavior patterns (or antipatterns) as
-;;; GENCGC PPC.
-;;;
-;;; -- It appears that this test can also fail due to systematic issues
-;;; (possibly with the C compiler used) which we cannot detect based on
-;;; *features*.  Until this issue has been fixed, I am marking this test
-;;; as failing on Windows to allow installation of the contrib on
-;;; affected builds, even if the underlying issue is (possibly?) not even
-;;; strictly related to windows.  C.f. lp1057631.  --DFL
-;;;
-(deftest* (allocation-information.4
-           ;; Ignored as per the comment above, even though it seems
-           ;; unlikely that this is the right condition.
-           :fails-on (or :win32 (and (or :ppc :sparc) :gencgc)))
-    #+gencgc
-    (tai #'cons :heap
-         ;; FIXME: This is the canonical GENCGC result. On PPC we sometimes get
-         ;; :LARGE T, which doesn't seem right -- but ignore that for now.
-         `(:space :dynamic :generation ,sb-vm:+pseudo-static-generation+
-           :write-protected t :boxed t :pinned nil :large nil)
-         :ignore (list :page #+ppc :large))
-    #-gencgc
-    (tai :cons :heap
-         ;; FIXME: Figure out what's the right cheney-result. SPARC at least
-         ;; has exhibited both :READ-ONLY and :DYNAMIC, which seems wrong.
-         '()
-         :ignore '(:space))
+#+x86-64
+(deftest allocation-information.3b
+    (tai 42s0 :immediate nil)
   t)
 
 #+sb-thread
@@ -470,20 +449,21 @@
             (type-equal (function-type 'mars) '(function (t t) *)))
   t t)
 
-;; DEFSTRUCT created functions
-
-;; These do not yet work because SB-KERNEL:%FUN-NAME does not work on
-;; functions defined by DEFSTRUCT. (1.0.35.x)
-
-;; See LP #520692.
-
-#+nil
 (progn
 
   (defstruct (struct (:predicate our-struct-p)
                      (:copier copy-our-struct))
     (a 42 :type fixnum))
 
+  ;; This test doesn't work because the XEP for the out-of-line accessor
+  ;; does not include the type test, and the function gets a signature
+  ;; of (FUNCTION (T) (VALUES FIXNUM &OPTIONAL)). This can easily be fixed
+  ;; by deleting (THE <struct> INSTANCE) from the access form
+  ;; and correspondingly adding a declaration on the type of INSTANCE.
+  ;;
+  ;; Yes, it can be fixed, but it is done this way because it produces
+  ;; smaller code.
+  #+nil
   (deftest function-type+defstruct.1
       (values (type-equal (function-type 'struct-a)
                           (function-type #'struct-a))
@@ -523,7 +503,7 @@
                           '(function (t) (values (member t nil) &optional))))
     t t)
 
-  ) ; #+nil (progn ...
+  )
 
 ;; SETF functions
 
@@ -560,7 +540,7 @@
           (predicate (find-definition-source #'cl-user::three-p)))
       (values (and (equalp copier accessor)
                    (equalp copier predicate))
-              (equal "test.lisp"
+              (equal "TEST.LISP.NEWEST"
                      (file-namestring (definition-source-pathname copier)))
               (equal '(5)
                      (definition-source-form-path copier))))
@@ -574,7 +554,7 @@
           (predicate (car (find-definition-sources-by-name 'cl-user::three-p :function))))
       (values (and (equalp copier accessor)
                    (equalp copier predicate))
-              (equal "test.lisp"
+              (equal "TEST.LISP.NEWEST"
                      (file-namestring (definition-source-pathname copier)))
               (equal '(5)
                      (definition-source-form-path copier))))

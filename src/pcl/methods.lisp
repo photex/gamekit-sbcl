@@ -41,6 +41,13 @@
     (reference-condition simple-error)
   ())
 
+(defun change-class-to-metaobject-violation (to-name
+                                             &optional from-name references)
+  (error 'metaobject-initialization-violation
+         :format-control "~@<Cannot ~S~@[ ~S~] objects into ~S metaobjects.~@:>"
+         :format-arguments (list 'change-class from-name to-name)
+         :references references))
+
 (macrolet ((def (name args control)
                `(defmethod ,name ,args
                  (declare (ignore initargs))
@@ -80,6 +87,7 @@
     (invalid-method-initarg method "~@<~S of ~S is neither ~S nor a ~S.~@:>"
                             :documentation doc 'null 'string)))
 (defun check-lambda-list (method ll)
+  (declare (ignore method ll))
   nil)
 
 (defun check-method-function (method fun)
@@ -99,6 +107,7 @@
                                 q :qualifiers qualifiers 'null)))))
 
 (defun check-slot-name (method name)
+  (declare (ignore method))
   (unless (symbolp name)
     (invalid-method-initarg "~@<~S of ~S is not a ~S.~@:>"
                             :slot-name name 'symbol)))
@@ -575,9 +584,10 @@
       ;; it would be bad to unwind and leave the gf in an inconsistent
       ;; state.
       (sb-thread::with-recursive-system-lock (lock)
-        (let* ((specializers (method-specializers method))
+        (let* ((specializers (method-specializers method)) ; flushable?
                (methods (generic-function-methods generic-function))
                (new-methods (remove method methods)))
+          (declare (ignore specializers))
           (setf (method-generic-function method) nil
                 (generic-function-methods generic-function) new-methods)
           (dolist (specializer (method-specializers method))
@@ -688,7 +698,7 @@
 (mapc
  #'proclaim-incompatible-superclasses
  '(;; superclass class
-   (built-in-class std-class structure-class) ; direct subclasses of pcl-class
+   (system-class std-class structure-class) ; direct subclasses of pcl-class
    (standard-class funcallable-standard-class)
    ;; superclass metaobject
    (class eql-specializer class-eq-specializer method method-combination
@@ -909,9 +919,9 @@
                                    'get-accessor-method-function)))
                     ,optimized-std-fun)))
                 (wrappers
-                 (let ((wrappers (list (wrapper-of class)
+                 (let ((wrappers (list (layout-of class)
                                        (class-wrapper class)
-                                       (wrapper-of slotd))))
+                                       (layout-of slotd))))
                    (if (eq type 'writer)
                        (cons (class-wrapper *the-class-t*) wrappers)
                        wrappers)))
@@ -1082,7 +1092,7 @@
   (cond
     ((eq class *the-class-t*) t)
     ((eq class *the-class-slot-object*)
-     `(not (typep (classoid-of ,arg) 'built-in-classoid)))
+     `(not (typep (classoid-of ,arg) 'system-classoid)))
     ((eq class *the-class-standard-object*)
      `(or (std-instance-p ,arg) (fsc-instance-p ,arg)))
     ((eq class *the-class-funcallable-standard-object*)
@@ -1556,77 +1566,109 @@
       (eq gf #'(setf slot-value-using-class))
       (eq gf #'slot-boundp-using-class)))
 
+;;; this is the normal function for computing the discriminating
+;;; function of a standard-generic-function
 (let (initial-print-object-cache)
-  (defmethod compute-discriminating-function ((gf standard-generic-function))
+  (defun standard-compute-discriminating-function (gf)
     (let ((dfun-state (slot-value gf 'dfun-state)))
-      (when (special-case-for-compute-discriminating-function-p gf)
-        ;; if we have a special case for
-        ;; COMPUTE-DISCRIMINATING-FUNCTION, then (at least for the
-        ;; special cases implemented as of 2006-05-09) any information
-        ;; in the cache is misplaced.
-        (aver (null dfun-state)))
-      (typecase dfun-state
-        (null
-         (when (eq gf #'compute-applicable-methods)
-           (update-all-c-a-m-gf-info gf))
-         (cond
-           ((eq gf #'slot-value-using-class)
-            (update-slot-value-gf-info gf 'reader)
-            #'slot-value-using-class-dfun)
-           ((eq gf #'(setf slot-value-using-class))
-            (update-slot-value-gf-info gf 'writer)
-            #'setf-slot-value-using-class-dfun)
-           ((eq gf #'slot-boundp-using-class)
-            (update-slot-value-gf-info gf 'boundp)
-            #'slot-boundp-using-class-dfun)
-           ;; KLUDGE: PRINT-OBJECT is not a special-case in the sense
-           ;; of having a desperately special discriminating function.
-           ;; However, it is important that the machinery for printing
-           ;; conditions for stack and heap exhaustion, and the
-           ;; restarts offered by the debugger, work without consuming
-           ;; many extra resources.  This way (testing by name of GF
-           ;; rather than by identity) was the only way I found to get
-           ;; this to bootstrap, given that the PRINT-OBJECT generic
-           ;; function is only set up later, in
-           ;; SRC;PCL;PRINT-OBJECT.LISP.  -- CSR, 2008-06-09
-           ((eq (slot-value gf 'name) 'print-object)
-            (let ((nkeys (nth-value 3 (get-generic-fun-info gf))))
-              (cond ((/= nkeys 1)
-                     ;; KLUDGE: someone has defined a method
-                     ;; specialized on the second argument: punt.
-                     (setf initial-print-object-cache nil)
-                     (make-initial-dfun gf))
-                    (initial-print-object-cache
-                     (multiple-value-bind (dfun cache info)
-                         (make-caching-dfun gf (copy-cache initial-print-object-cache))
-                       (set-dfun gf dfun cache info)))
-                    ;; the relevant PRINT-OBJECT methods get defined
-                    ;; late, by delayed DEF!METHOD.  We mustn't cache
-                    ;; the effective method for our classes earlier
-                    ;; than the relevant PRINT-OBJECT methods are
-                    ;; defined...
-                    ((boundp 'sb-impl::*delayed-def!method-args*)
-                     (make-initial-dfun gf))
-                    (t (multiple-value-bind (dfun cache info)
-                           (make-final-dfun-internal
-                            gf
-                            (mapcar (lambda (x) (list (find-class x)))
-                                    '(sb-kernel::control-stack-exhausted
-                                      sb-kernel::binding-stack-exhausted
-                                      sb-kernel::alien-stack-exhausted
-                                      sb-kernel::heap-exhausted-error
-                                      restart)))
-                         (setq initial-print-object-cache cache)
-                         (set-dfun gf dfun (copy-cache cache) info))))))
-           ((gf-precompute-dfun-and-emf-p (slot-value gf 'arg-info))
-            (make-final-dfun gf))
-           (t
-            (make-initial-dfun gf))))
-        (function dfun-state)
-        (cons (car dfun-state))))))
+          (when (special-case-for-compute-discriminating-function-p gf)
+            ;; if we have a special case for
+            ;; COMPUTE-DISCRIMINATING-FUNCTION, then (at least for the
+            ;; special cases implemented as of 2006-05-09) any information
+            ;; in the cache is misplaced.
+            (aver (null dfun-state)))
+          (typecase dfun-state
+            (null
+             (when (eq gf #'compute-applicable-methods)
+               (update-all-c-a-m-gf-info gf))
+             (cond
+               ((eq gf #'slot-value-using-class)
+                (update-slot-value-gf-info gf 'reader)
+                #'slot-value-using-class-dfun)
+               ((eq gf #'(setf slot-value-using-class))
+                (update-slot-value-gf-info gf 'writer)
+                #'setf-slot-value-using-class-dfun)
+               ((eq gf #'slot-boundp-using-class)
+                (update-slot-value-gf-info gf 'boundp)
+                #'slot-boundp-using-class-dfun)
+               ;; KLUDGE: PRINT-OBJECT is not a special-case in the sense
+               ;; of having a desperately special discriminating function.
+               ;; However, it is important that the machinery for printing
+               ;; conditions for stack and heap exhaustion, and the
+               ;; restarts offered by the debugger, work without consuming
+               ;; many extra resources.  This way (testing by name of GF
+               ;; rather than by identity) was the only way I found to get
+               ;; this to bootstrap, given that the PRINT-OBJECT generic
+               ;; function is only set up later, in
+               ;; SRC;PCL;PRINT-OBJECT.LISP.  -- CSR, 2008-06-09
+               ((eq (slot-value gf 'name) 'print-object)
+                (let ((nkeys (nth-value 3 (get-generic-fun-info gf))))
+                  (cond ((/= nkeys 1)
+                         ;; KLUDGE: someone has defined a method
+                         ;; specialized on the second argument: punt.
+                         (setf initial-print-object-cache nil)
+                         (make-initial-dfun gf))
+                        (initial-print-object-cache
+                         (multiple-value-bind (dfun cache info)
+                             (make-caching-dfun gf (copy-cache initial-print-object-cache))
+                           (set-dfun gf dfun cache info)))
+                        ;; the relevant PRINT-OBJECT methods get defined
+                        ;; late, by delayed DEF!METHOD.  We mustn't cache
+                        ;; the effective method for our classes earlier
+                        ;; than the relevant PRINT-OBJECT methods are
+                        ;; defined...
+                        ((boundp 'sb-impl::*delayed-def!method-args*)
+                         (make-initial-dfun gf))
+                        (t (multiple-value-bind (dfun cache info)
+                               (make-final-dfun-internal
+                                gf
+                                (mapcar (lambda (x) (list (find-class x)))
+                                        '(sb-kernel::control-stack-exhausted
+                                          sb-kernel::binding-stack-exhausted
+                                          sb-kernel::alien-stack-exhausted
+                                          sb-kernel::heap-exhausted-error
+                                          restart)))
+                             (setq initial-print-object-cache cache)
+                             (set-dfun gf dfun (copy-cache cache) info))))))
+               ((gf-precompute-dfun-and-emf-p (slot-value gf 'arg-info))
+                (make-final-dfun gf))
+               (t
+                (make-initial-dfun gf))))
+            (function dfun-state)
+            (cons (car dfun-state))))))
+
+;;; in general we need to support SBCL's encapsulation for generic
+;;; functions: the default implementation of encapsulation changes the
+;;; identity of the function bound to a name, which breaks anything
+;;; class-based, so we implement the encapsulation ourselves in the
+;;; discriminating function.
+(defun sb-impl::encapsulate-generic-function (gf type function)
+  (push (cons type function) (generic-function-encapsulations gf))
+  (reinitialize-instance gf))
+
+(defun sb-impl::unencapsulate-generic-function (gf type)
+  (setf (generic-function-encapsulations gf)
+        (remove type (generic-function-encapsulations gf)
+                :key #'car :count 1))
+  (reinitialize-instance gf))
+(defun sb-impl::encapsulated-generic-function-p (gf type)
+  (position type (generic-function-encapsulations gf) :key #'car))
+(defun maybe-encapsulate-discriminating-function (gf encs std)
+  (if (null encs)
+      std
+      (let ((inner (maybe-encapsulate-discriminating-function
+                    gf (cdr encs) std))
+            (function (cdar encs)))
+        (lambda (&rest args)
+          (apply function inner args)))))
+(defmethod compute-discriminating-function ((gf standard-generic-function))
+  (standard-compute-discriminating-function gf))
+(defmethod compute-discriminating-function :around ((gf standard-generic-function))
+  (maybe-encapsulate-discriminating-function
+   gf (generic-function-encapsulations gf) (call-next-method)))
 
 (defmethod (setf class-name) (new-value class)
-  (let ((classoid (wrapper-classoid (class-wrapper class))))
+  (let ((classoid (layout-classoid (class-wrapper class))))
     (if (and new-value (symbolp new-value))
         (setf (classoid-name classoid) new-value)
         (setf (classoid-name classoid) nil)))

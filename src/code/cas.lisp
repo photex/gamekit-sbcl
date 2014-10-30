@@ -8,20 +8,12 @@
 ;;;; DEFCAS, and #'(CAS ...) functions -- making things mostly isomorphic with
 ;;;; SETF.
 
-(defglobal **cas-expanders** (make-hash-table :test #'eq
-                                              #-sb-xc-host #-sb-xc-host
-                                              :synchronized t))
-
-(define-function-name-syntax cas (list)
-  (destructuring-bind (cas symbol) list
-    (aver (eq 'cas cas))
-    (values t symbol)))
-
 ;;; This is what it all comes down to.
 (def!macro cas (place old new &environment env)
+  #!+sb-doc
   "Synonym for COMPARE-AND-SWAP.
 
-Addtionally DEFUN, DEFGENERIC, DEFMETHOD, FLET, and LABELS can be also used to
+Additionally DEFUN, DEFGENERIC, DEFMETHOD, FLET, and LABELS can be also used to
 define CAS-functions analogously to SETF-functions:
 
   (defvar *foo* nil)
@@ -89,15 +81,14 @@ EXPERIMENTAL: Interface subject to change."
       (let ((name (car expanded)))
         (unless (symbolp name)
           (invalid-place))
-        (let ((info (gethash name **cas-expanders**)))
-          (cond
+        (acond
+            ((info :cas :expander name)
             ;; CAS expander.
-            (info
-             (funcall info expanded environment))
+             (funcall it expanded environment))
 
             ;; Structure accessor
-            ((setf info (info :function :structure-accessor name))
-             (expand-structure-slot-cas info name expanded))
+            ((info :function :structure-accessor name)
+             (expand-structure-slot-cas it name expanded))
 
             ;; CAS function
             (t
@@ -115,7 +106,7 @@ EXPERIMENTAL: Interface subject to change."
                             (push x vals)))))
                  (values vars vals old new
                          `(funcall #'(cas ,name) ,old ,new ,@args)
-                         `(,name ,@args)))))))))))
+                         `(,name ,@args))))))))))
 
 (defun expand-structure-slot-cas (dd name place)
   (let* ((structure (dd-name dd))
@@ -146,6 +137,7 @@ EXPERIMENTAL: Interface subject to change."
                 `(,op ,instance))))))
 
 (def!macro define-cas-expander (accessor lambda-list &body body)
+  #!+sb-doc
   "Analogous to DEFINE-SETF-EXPANDER. Defines a CAS-expansion for ACCESSOR.
 BODY must return six values as specified in GET-CAS-EXPANSION.
 
@@ -161,7 +153,7 @@ EXPERIMENTAL: Interface subject to change."
                         :environment environment
                         :wrap-block nil)
       `(eval-when (:compile-toplevel :load-toplevel :execute)
-         (setf (gethash ',accessor **cas-expanders**)
+         (setf (info :cas :expander ',accessor)
                (lambda (,whole ,environment)
                  ,@(when doc (list doc))
                  ,@decls
@@ -169,6 +161,7 @@ EXPERIMENTAL: Interface subject to change."
 
 (def!macro defcas (&whole form accessor lambda-list function
                   &optional docstring)
+  #!+sb-doc
   "Analogous to short-form DEFSETF. Defines FUNCTION as responsible
 for compare-and-swap on places accessed using ACCESSOR. LAMBDA-LIST
 must correspond to the lambda-list of the accessor.
@@ -251,7 +244,7 @@ been defined. (See SB-EXT:CAS for more information.)
   (def %compare-and-swap-car (cons) car)
   (def %compare-and-swap-cdr (cons) cdr)
   (def %compare-and-swap-instance-ref (instance index) %instance-ref %instance-set)
-  (def %compare-and-swap-symbol-plist (symbol) symbol-plist)
+  (def %compare-and-swap-symbol-info (symbol) symbol-info)
   (def %compare-and-swap-symbol-value (symbol) symbol-value)
   (def %compare-and-swap-svref (vector index) svref))
 

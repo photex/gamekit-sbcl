@@ -1216,12 +1216,16 @@
                    (inherited-labels
                     (multiple-value-bind (expansion expanded)
                         (,macroexpand '..inherited-labels.. env)
-                      (if expanded expansion nil)))
-                   (new-labels (append labels
-                                       (set-difference visible-labels
-                                                       inherited-labels)))
-                   (nested-labels (set-difference (append inherited-labels new-labels)
-                                                  visible-labels)))
+                      (if expanded (copy-list expansion) nil)))
+                   (new-labels
+                    (sort (append labels
+                                  (set-difference visible-labels
+                                                  inherited-labels))
+                          #'string<))
+                   (nested-labels
+                    (sort (set-difference (append inherited-labels new-labels)
+                                          visible-labels)
+                          #'string<)))
               (when (intersection labels inherited-labels)
                 (error "duplicate nested labels: ~S"
                        (intersection labels inherited-labels)))
@@ -1462,7 +1466,7 @@
 
 (defun grovel-lambda-list (lambda-list vop-var)
   (let ((segment-name (car lambda-list))
-        (vop-var (or vop-var (sb!xc:gensym "VOP"))))
+        (vop-var (or vop-var (make-symbol "VOP"))))
     (sb!int:collect ((new-lambda-list))
       (new-lambda-list segment-name)
       (new-lambda-list vop-var)
@@ -1572,27 +1576,23 @@
                (setf vop-var (car args))))
           (:printer
            (sb!int:/noshow "uniquifying :PRINTER with" args)
+           #-sb-xc-host
            (push (eval `(list (multiple-value-list
                                ,(sb!disassem:gen-printer-def-forms-def-form
                                  name
-                                 (let ((*print-right-margin* 1000))
-                                   (format nil "~@:(~A[~A]~)" name args))
                                  (cdr option-spec)))))
                  pdefs))
           (:printer-list
            ;; same as :PRINTER, but is EVALed first, and is a list of
            ;; printers
+           #-sb-xc-host
            (push
             (eval
              `(eval
                `(list ,@(mapcar (lambda (printer)
                                   `(multiple-value-list
                                     ,(sb!disassem:gen-printer-def-forms-def-form
-                                      ',name
-                                      (let ((*print-right-margin* 1000))
-                                        (format nil "~@:(~A[~A]~)" ',name printer))
-                                      printer
-                                      nil)))
+                                      ',name printer nil)))
                                 ,(cadr option-spec)))))
             pdefs))
           (t

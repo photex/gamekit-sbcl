@@ -295,7 +295,7 @@
     ((complex single-float)
      (truly-the single-float (realpart number)))
     ((complex rational)
-     (sb!kernel:%realpart number))
+     (%realpart number))
     (number
      number)))
 
@@ -311,7 +311,7 @@
     ((complex single-float)
      (truly-the single-float (imagpart number)))
     ((complex rational)
-     (sb!kernel:%imagpart number))
+     (%imagpart number))
     (float
      (* 0 number))
     (number
@@ -363,6 +363,10 @@
                 #!+sb-doc
                 ,doc
                 (if numbers
+                    ;; FIXME: using NTH here produces
+                    ;; "caught STYLE-WARNING:
+                    ;;  The binding of RESULT is not a NUMBER"
+                    ;; Same warning occurs in -, /, =, /=, etc
                     (do ((result (nth 0 numbers) (,op result (nth i numbers)))
                          (i 1 (1+ i)))
                         ((>= i (length numbers))
@@ -653,51 +657,27 @@
   #!+multiply-high-vops
   (%multiply-high x y))
 
-;;; Declare these guys inline to let them get optimized a little.
-;;; ROUND and FROUND are not declared inline since they seem too
-;;; obscure and too big to inline-expand by default. Also, this gives
-;;; the compiler a chance to pick off the unary float case.
-;;;
-;;; CEILING and FLOOR are implemented in terms of %CEILING and %FLOOR
-;;; if no better transform can be found: they aren't inline directly,
-;;; since we want to try a transform specific to them before letting
-;;; the transform for TRUNCATE pick up the slack.
-#!-sb-fluid (declaim (inline rem mod fceiling ffloor ftruncate %floor %ceiling))
-(defun %floor (number divisor)
-  ;; If the numbers do not divide exactly and the result of
-  ;; (/ NUMBER DIVISOR) would be negative then decrement the quotient
-  ;; and augment the remainder by the divisor.
-  (multiple-value-bind (tru rem) (truncate number divisor)
-    (if (and (not (zerop rem))
-             (if (minusp divisor)
-                 (plusp number)
-                 (minusp number)))
-        (values (1- tru) (+ rem divisor))
-        (values tru rem))))
-
 (defun floor (number &optional (divisor 1))
   #!+sb-doc
   "Return the greatest integer not greater than number, or number/divisor.
   The second returned value is (mod number divisor)."
-  (%floor number divisor))
-
-(defun %ceiling (number divisor)
-  ;; If the numbers do not divide exactly and the result of
-  ;; (/ NUMBER DIVISOR) would be positive then increment the quotient
-  ;; and decrement the remainder by the divisor.
-  (multiple-value-bind (tru rem) (truncate number divisor)
-    (if (and (not (zerop rem))
-             (if (minusp divisor)
-                 (minusp number)
-                 (plusp number)))
-        (values (+ tru 1) (- rem divisor))
-        (values tru rem))))
+  (floor number divisor))
 
 (defun ceiling (number &optional (divisor 1))
   #!+sb-doc
   "Return the smallest integer not less than number, or number/divisor.
   The second returned value is the remainder."
-  (%ceiling number divisor))
+  (ceiling number divisor))
+
+(defun rem (number divisor)
+  #!+sb-doc
+  "Return second result of TRUNCATE."
+  (rem number divisor))
+
+(defun mod (number divisor)
+  #!+sb-doc
+  "Return second result of FLOOR."
+  (mod number divisor))
 
 (defun round (number &optional (divisor 1))
   #!+sb-doc
@@ -722,30 +702,17 @@
                          (values (- tru 1) (+ rem divisor))))
                     (t (values tru rem))))))))
 
-(defun rem (number divisor)
-  #!+sb-doc
-  "Return second result of TRUNCATE."
-  (multiple-value-bind (tru rem) (truncate number divisor)
-    (declare (ignore tru))
-    rem))
-
-(defun mod (number divisor)
-  #!+sb-doc
-  "Return second result of FLOOR."
-  (let ((rem (rem number divisor)))
-    (if (and (not (zerop rem))
-             (if (minusp divisor)
-                 (plusp number)
-                 (minusp number)))
-        (+ rem divisor)
-        rem)))
-
 (defmacro !define-float-rounding-function (name op doc)
   `(defun ,name (number &optional (divisor 1))
     ,doc
     (multiple-value-bind (res rem) (,op number divisor)
       (values (float res (if (floatp rem) rem 1.0)) rem))))
 
+;;; Declare these guys inline to let them get optimized a little.
+;;; ROUND and FROUND are not declared inline since they seem too
+;;; obscure and too big to inline-expand by default. Also, this gives
+;;; the compiler a chance to pick off the unary float case.
+#!-sb-fluid (declaim (inline fceiling ffloor ftruncate))
 (defun ftruncate (number &optional (divisor 1))
   #!+sb-doc
   "Same as TRUNCATE, but returns first value as a float."
@@ -781,6 +748,7 @@
        (ftruncate-float (dispatch-type divisor))))))
 
 (defun ffloor (number &optional (divisor 1))
+  #!+sb-doc
   "Same as FLOOR, but returns first value as a float."
   (multiple-value-bind (tru rem) (ftruncate number divisor)
     (if (and (not (zerop rem))
@@ -791,6 +759,7 @@
         (values tru rem))))
 
 (defun fceiling (number &optional (divisor 1))
+  #!+sb-doc
   "Same as CEILING, but returns first value as a float."
   (multiple-value-bind (tru rem) (ftruncate number divisor)
     (if (and (not (zerop rem))
@@ -803,6 +772,7 @@
 ;;; FIXME: this probably needs treatment similar to the use of
 ;;; %UNARY-FTRUNCATE for FTRUNCATE.
 (defun fround (number &optional (divisor 1))
+  #!+sb-doc
   "Same as ROUND, but returns first value as a float."
   (multiple-value-bind (res rem)
       (round number divisor)
@@ -814,9 +784,10 @@
   #!+sb-doc
   "Return T if all of its arguments are numerically equal, NIL otherwise."
   (declare (number number))
-  (dotimes (i (length more-numbers) t)
-    (unless (= number (nth i more-numbers))
-      (return nil))))
+  (do-rest-arg ((n i) more-numbers 0 t)
+    (unless (= number n)
+      (return (do-rest-arg ((n) more-numbers (1+ i))
+                (the number n)))))) ; for effect
 
 (defun /= (number &rest more-numbers)
   #!+sb-doc
@@ -827,23 +798,22 @@
             (i 0 (1+ i)))
           ((>= i (length more-numbers))
            t)
-        (do ((j i (1+ j)))
-            ((>= j (length more-numbers)))
-          (when (= n (nth j more-numbers))
+        (do-rest-arg ((n2) more-numbers i)
+          (when (= n n2)
             (return-from /= nil))))
       t))
 
 (macrolet ((def (op doc)
-             #!-sb-doc (declare (ignore doc))
+             (declare (ignorable doc))
              `(defun ,op (number &rest more-numbers)
                 #!+sb-doc ,doc
-                (let ((n number))
-                  (declare (number n))
-                  (dotimes (i (length more-numbers) t)
-                    (let ((arg (nth i more-numbers)))
-                      (if (,op n arg)
-                        (setf n arg)
-                        (return-from ,op nil))))))))
+                (let ((n1 number))
+                  (declare (real n1))
+                  (do-rest-arg ((n2 i) more-numbers 0 t)
+                    (if (,op n1 n2)
+                        (setf n1 n2)
+                        (return (do-rest-arg ((n) more-numbers (1+ i))
+                                  (the real n))))))))) ; for effect
   (def <  "Return T if its arguments are in strictly increasing order, NIL otherwise.")
   (def >  "Return T if its arguments are in strictly decreasing order, NIL otherwise.")
   (def <= "Return T if arguments are in strictly non-decreasing order, NIL otherwise.")
@@ -854,22 +824,20 @@
   "Return the greatest of its arguments; among EQUALP greatest, return
 the first."
   (let ((n number))
-    (declare (number n))
-    (dotimes (i (length more-numbers) n)
-      (let ((arg (nth i more-numbers)))
-        (when (> arg n)
-          (setf n arg))))))
+    (declare (real n))
+    (do-rest-arg ((arg) more-numbers 0 n)
+      (when (> arg n)
+        (setf n arg)))))
 
 (defun min (number &rest more-numbers)
   #!+sb-doc
   "Return the least of its arguments; among EQUALP least, return
 the first."
   (let ((n number))
-    (declare (number n))
-    (dotimes (i (length more-numbers) n)
-      (let ((arg (nth i more-numbers)))
-        (when (< arg n)
-          (setf n arg))))))
+    (declare (real n))
+    (do-rest-arg ((arg) more-numbers 0 n)
+      (when (< arg n)
+        (setf n arg)))))
 
 (eval-when (:compile-toplevel :execute)
 
@@ -1066,8 +1034,8 @@ the first."
 
 (defun logcount (integer)
   #!+sb-doc
-  "Count the number of 1 bits if INTEGER is positive, and the number of 0 bits
-  if INTEGER is negative."
+  "Count the number of 1 bits if INTEGER is non-negative,
+and the number of 0 bits if INTEGER is negative."
   (etypecase integer
     (fixnum
      (logcount (truly-the (integer 0
@@ -1322,7 +1290,7 @@ the first."
 (defun gcd (&rest integers)
   #!+sb-doc
   "Return the greatest common divisor of the arguments, which must be
-  integers. Gcd with no arguments is defined to be 0."
+  integers. GCD with no arguments is defined to be 0."
   (case (length integers)
     (0 0)
     (1 (abs (the integer (nth 0 integers))))
@@ -1474,7 +1442,8 @@ the first."
 ;;;; miscellaneous number predicates
 
 (macrolet ((def (name doc)
-             `(defun ,name (number) ,doc (,name number))))
+             (declare (ignorable doc))
+             `(defun ,name (number) #!+sb-doc ,doc (,name number))))
   (def zerop "Is this number zero?")
   (def plusp "Is this real number strictly positive?")
   (def minusp "Is this real number strictly negative?")
@@ -1541,7 +1510,7 @@ the first."
     (bignum (ldb (byte 64 0)
                  (ash (logand integer #xffffffffffffffff) amount)))))
 
-#!+(or x86 x86-64)
+#!+(or x86 x86-64 arm)
 (defun sb!vm::ash-left-modfx (integer amount)
   (let ((fixnum-width (- sb!vm:n-word-bits sb!vm:n-fixnum-tag-bits)))
     (etypecase integer

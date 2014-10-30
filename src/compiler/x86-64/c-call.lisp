@@ -258,9 +258,13 @@
    (inst mov res (make-fixup foreign-symbol :foreign-dataref))))
 
 (define-vop (call-out)
-  (:args (function :scs (sap-reg))
+  (:args (function :scs (sap-reg)
+                   :target rbx)
          (args :more t))
   (:results (results :more t))
+  ;; RBX is used to first load the address, allowing the debugger to
+  ;; determine which alien was accessed in case it's undefined.
+  (:temporary (:sc sap-reg :offset rbx-offset) rbx)
   (:temporary (:sc unsigned-reg :offset rax-offset :to :result) rax)
   ;; For safepoint builds: Force values of non-volatiles to the stack.
   ;; These are the callee-saved registers in the native ABI, but
@@ -300,16 +304,17 @@
     ;; for vararg calls.
     (move-immediate rax
                     (loop for tn-ref = args then (tn-ref-across tn-ref)
-                       while tn-ref
-                       count (eq (sb-name (sc-sb (tn-sc (tn-ref-tn tn-ref))))
-                                 'float-registers)))
-    #!+win32 (inst sub rsp-tn #x20)     ;MS_ABI: shadow zone
+                          while tn-ref
+                          count (eq (sb-name (sc-sb (tn-sc (tn-ref-tn tn-ref))))
+                                    'float-registers)))
+    #!+win32 (inst sub rsp-tn #x20) ;MS_ABI: shadow zone
     #!+sb-safepoint
-    (progn                              ;Store SP and PC in thread struct
+    (progn                 ;Store SP and PC in thread struct
       (storew rsp-tn thread-base-tn thread-saved-csp-offset)
       (storew r14 thread-base-tn thread-pc-around-foreign-call-slot))
-    (inst call function)
-    #!+win32 (inst add rsp-tn #x20)     ;MS_ABI: remove shadow space
+    (move rbx function)
+    (inst call rbx)
+    #!+win32 (inst add rsp-tn #x20) ;MS_ABI: remove shadow space
     #!+sb-safepoint
     (progn
       ;; Zeroing out
@@ -341,63 +346,19 @@
       (let ((delta (logandc2 (+ amount 7) 7)))
         (inst add rsp-tn delta)))))
 
-(define-vop (alloc-alien-stack-space)
-  (:info amount)
-  #!+sb-thread (:temporary (:sc unsigned-reg) temp)
-  (:results (result :scs (sap-reg any-reg)))
-  (:result-types system-area-pointer)
-  #!+sb-thread
-  (:generator 0
-    (aver (not (location= result rsp-tn)))
-    (unless (zerop amount)
-      (let ((delta (logandc2 (+ amount 7) 7)))
-        (inst mov temp
-              (make-ea :qword
-                       :disp (+ nil-value
-                                (static-symbol-offset '*alien-stack*)
-                                (ash symbol-tls-index-slot word-shift)
-                                (- other-pointer-lowtag))))
-        (inst sub (make-ea :qword :base thread-base-tn
-                           :scale 1 :index temp) delta)))
-    (load-tl-symbol-value result *alien-stack*))
-  #!-sb-thread
-  (:generator 0
-    (aver (not (location= result rsp-tn)))
-    (unless (zerop amount)
-      (let ((delta (logandc2 (+ amount 7) 7)))
-        (inst sub (make-ea :qword
-                           :disp (+ nil-value
-                                    (static-symbol-offset '*alien-stack*)
-                                    (ash symbol-value-slot word-shift)
-                                    (- other-pointer-lowtag)))
-              delta)))
-    (load-symbol-value result *alien-stack*)))
-
-(define-vop (dealloc-alien-stack-space)
-  (:info amount)
-  #!+sb-thread (:temporary (:sc unsigned-reg) temp)
-  #!+sb-thread
-  (:generator 0
-    (unless (zerop amount)
-      (let ((delta (logandc2 (+ amount 7) 7)))
-        (inst mov temp
-              (make-ea :qword
-                       :disp (+ nil-value
-                                (static-symbol-offset '*alien-stack*)
-                                (ash symbol-tls-index-slot word-shift)
-                                (- other-pointer-lowtag))))
-        (inst add (make-ea :qword :base thread-base-tn :scale 1 :index temp)
-              delta))))
-  #!-sb-thread
-  (:generator 0
-    (unless (zerop amount)
-      (let ((delta (logandc2 (+ amount 7) 7)))
-        (inst add (make-ea :qword
-                           :disp (+ nil-value
-                                    (static-symbol-offset '*alien-stack*)
-                                    (ash symbol-value-slot word-shift)
-                                    (- other-pointer-lowtag)))
-              delta)))))
+(macrolet ((alien-stack-ptr ()
+             #!+sb-thread '(symbol-known-tls-cell '*alien-stack-pointer*)
+             #!-sb-thread '(static-symbol-value-ea '*alien-stack-pointer*)))
+  (define-vop (alloc-alien-stack-space)
+    (:info amount)
+    (:results (result :scs (sap-reg any-reg)))
+    (:result-types system-area-pointer)
+    (:generator 0
+      (aver (not (location= result rsp-tn)))
+      (unless (zerop amount)
+        (let ((delta (logandc2 (+ amount 7) 7)))
+          (inst sub (alien-stack-ptr) delta)))
+      (inst mov result (alien-stack-ptr)))))
 
 ;;; not strictly part of the c-call convention, but needed for the
 ;;; WITH-PINNED-OBJECTS macro used for "locking down" lisp objects so
@@ -422,9 +383,7 @@
              (lambda (offset)
                (make-random-tn :kind :normal
                                :sc (sc-or-lose sc-name)
-                               :offset offset)))
-           (out-of-registers-error ()
-             (error "Too many arguments in callback")))
+                               :offset offset))))
     (let* ((segment (make-segment))
            (rax rax-tn)
            #!+(or win32 (not sb-safepoint)) (rcx rcx-tn)
@@ -561,7 +520,7 @@
            (inst movq xmm0 [rsp]))
           ((alien-void-type-p result-type))
           (t
-           (error "unrecognized alien type: ~A" result-type)))
+           (error "Unrecognized alien type: ~A" result-type)))
 
         ;; Pop the arguments and the return value from the stack to get
         ;; the return address at top of stack.

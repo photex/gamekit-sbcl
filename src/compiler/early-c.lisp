@@ -22,7 +22,7 @@
   to a function, including &REST args.")
 (def!constant sb!xc:lambda-parameters-limit sb!xc:most-positive-fixnum
   #!+sb-doc
-  "The exclusive upper bound on the number of parameters which may be specifed
+  "The exclusive upper bound on the number of parameters which may be specified
   in a given lambda list. This is actually the limit on required and &OPTIONAL
   parameters. With &KEY and &AUX you can get more.")
 (def!constant sb!xc:multiple-values-limit sb!xc:most-positive-fixnum
@@ -45,9 +45,21 @@
 ;;;; of the compiler.
 
 ;;; the type of LAYOUT-DEPTHOID slot values
-(def!type sb!kernel::layout-depthoid () '(or index (integer -1 -1)))
+(def!type layout-depthoid () '(or index (integer -1 -1)))
 
-;;; possible values for the INLINE-ness of a function.
+;;; An INLINEP value describes how a function is called. The values
+;;; have these meanings:
+;;;     NIL     No declaration seen: do whatever you feel like, but don't
+;;;             dump an inline expansion.
+;;; :NOTINLINE  NOTINLINE declaration seen: always do full function call.
+;;;    :INLINE  INLINE declaration seen: save expansion, expanding to it
+;;;             if policy favors.
+;;; :MAYBE-INLINE
+;;;             Retain expansion, but only use it opportunistically.
+;;;             :MAYBE-INLINE is quite different from :INLINE. As explained
+;;;             by APD on #lisp 2005-11-26: "MAYBE-INLINE lambda is
+;;;             instantiated once per component, INLINE - for all
+;;;             references (even under #'without FUNCALL)."
 (deftype inlinep ()
   '(member :inline :maybe-inline :notinline nil))
 (defparameter *inlinep-translations*
@@ -97,6 +109,7 @@
 (defvar *handled-conditions*)
 (defvar *disabled-package-locks*)
 (defvar *policy*)
+(defvar *macro-policy* nil)
 (defvar *dynamic-counts-tn*)
 (defvar *elsewhere*)
 (defvar *event-info*)
@@ -104,7 +117,6 @@
 (defvar *failure-p*)
 (defvar *fixup-notes*)
 (defvar *in-pack*)
-(defvar *info-environment*)
 #!+inline-constants
 (progn
   (defvar *constant-segment*)
@@ -114,12 +126,12 @@
 (defvar *source-info*)
 (defvar *source-plist*)
 (defvar *source-namestring*)
-(defvar *trace-table*)
 (defvar *undefined-warnings*)
 (defvar *warnings-p*)
 (defvar *lambda-conversions*)
 
 (defvar *stack-allocate-dynamic-extent* t
+  #!+sb-doc
   "If true (the default), the compiler respects DYNAMIC-EXTENT declarations
 and stack allocates otherwise inaccessible parts of the object whenever
 possible. Potentially long (over one page in size) vectors are, however, not
@@ -186,7 +198,7 @@ the stack without triggering overflow protection.")
     ;; and then we happen to compile bar.lisp before foo.lisp.
   (when (looks-like-name-of-special-var-p symbol)
     ;; FIXME: should be COMPILER-STYLE-WARNING?
-    (style-warn 'sb!kernel:asterisks-around-lexical-variable-name
+    (style-warn 'asterisks-around-lexical-variable-name
                 :format-control
                 "using the lexical binding of the symbol ~
                  ~/sb-impl::print-symbol-with-prefix/, not the~@

@@ -168,21 +168,27 @@
       ((:special :unknown)
        (aver (symbolp name))
        (let ((name-tn (emit-constant name)))
-         (if (or unsafe (info :variable :always-bound name))
+         (if (or unsafe (always-boundp name))
              (vop fast-symbol-value node block name-tn res)
              (vop symbol-value node block name-tn res))))
       (:global
        (aver (symbolp name))
        (let ((name-tn (emit-constant name)))
-         (if (or unsafe (info :variable :always-bound name))
+         (if (or unsafe (always-boundp name))
              (vop fast-symbol-global-value node block name-tn res)
              (vop symbol-global-value node block name-tn res))))
       (:global-function
        (cond #-sb-xc-host
              ((and (info :function :definition name)
-                   (info :function :info name))
+                   (info :function :info name)
+                   (let ((*lexenv* (node-lexenv node)))
+                     (not (fun-lexically-notinline-p name))))
               ;; Known functions can be saved without going through fdefns,
               ;; except during cross-compilation
+              ;; But if NOTINLINEd, don't early-bind to the functional value
+              ;; because that disallows redefinition, including but not limited
+              ;; to encapsulations, which in turn makes TRACE not work, which
+              ;; leads to extreme frustration when debugging.
               (emit-move node block (make-load-time-constant-tn :known-fun name)
                          res))
              (t
@@ -296,7 +302,7 @@
     (find-in-physenv what this-env)))
 
 (defoptimizer (%allocate-closures ltn-annotate) ((leaves) node ltn-policy)
-  ltn-policy ; a hack to effectively (DECLARE (IGNORE LTN-POLICY))
+  (declare (ignore ltn-policy))
   (when (lvar-dynamic-extent leaves)
     (let ((info (make-ir2-lvar *backend-t-primitive-type*)))
       (setf (ir2-lvar-kind info) :delayed)
@@ -773,6 +779,7 @@
 ;;; case of IR2-CONVERT-TEMPLATE is that there can be codegen-info
 ;;; arguments.
 (defoptimizer (%%primitive ir2-convert) ((template info &rest args) call block)
+  (declare (ignore args))
   (let* ((template (lvar-value template))
          (info (lvar-value info))
          (lvar (node-lvar call))
@@ -793,6 +800,7 @@
   (values))
 
 (defoptimizer (%%primitive derive-type) ((template info &rest args))
+  (declare (ignore info args))
   (let ((type (template-type (lvar-value template))))
     (if (fun-type-p type)
         (fun-type-returns type)
@@ -1145,8 +1153,10 @@
 ;;; calls instead of primitives, sending the system off into infinite
 ;;; space. Having a report on all full calls generated makes it easier
 ;;; to figure out what form caused the problem this time.
+(declaim (type (or boolean (member :detailed :very-detailed))
+               *track-full-called-fnames-p*))
+(defvar *track-full-called-fnames-p* nil)
 #!+sb-show (defvar *show-full-called-fnames-p* nil)
-#!+sb-show (defvar *full-called-fnames* (make-hash-table :test 'equal))
 
 ;;; Do some checks (and store some notes relevant for future checks)
 ;;; on a full call:
@@ -1154,15 +1164,27 @@
 ;;;     never be full called? (Except as of sbcl-0.7.18 or so, we no
 ;;;     longer try to ensure this behavior when *FAILURE-P* has already
 ;;;     been detected.)
-;;;   * Is this a full call to (SETF FOO) which might conflict with
-;;;     a DEFSETF or some such thing elsewhere in the program?
 (defun ponder-full-call (node)
   (let* ((lvar (basic-combination-fun node))
          (fname (lvar-fun-name lvar t)))
     (declare (type (or symbol cons) fname))
 
-    #!+sb-show (unless (gethash fname *full-called-fnames*)
-                 (setf (gethash fname *full-called-fnames*) t))
+    (awhen *track-full-called-fnames-p*
+      ;; If the full call was wanted, don't record it.
+      (unless (let ((*lexenv* (node-lexenv node)))
+                (fun-lexically-notinline-p fname))
+        (let ((cell (info :function :static-full-call-count fname)))
+          (if (not cell)
+              (setf cell (list 1)
+                    (info :function :static-full-call-count fname) cell)
+              (incf (car cell)))
+          (cond ((and (eq it :detailed) (boundp 'sb!xc:*compile-file-pathname*))
+                 (pushnew sb!xc:*compile-file-pathname* (cdr cell)
+                          :test #'equal))
+                ((eq it :very-detailed)
+                 (pushnew (component-name *component-being-compiled*)
+                          (cdr cell) :test #'equalp))))))
+
     #!+sb-show (when *show-full-called-fnames-p*
                  (/show "converting full call to named function" fname)
                  (/show (basic-combination-args node))
@@ -1191,10 +1213,7 @@
           (bug "full call to ~S" fname))))
 
     (when (consp fname)
-      (aver (legal-fun-name-p fname))
-      (destructuring-bind (setfoid &rest stem) fname
-        (when (eq setfoid 'setf)
-          (setf (gethash (car stem) *setf-assumed-fboundp*) t))))))
+      (aver (legal-fun-name-p fname))))) ;; FIXME: needless check?
 
 ;;; If the call is in a tail recursive position and the return
 ;;; convention is standard, then do a tail full call. If one or fewer
@@ -1548,9 +1567,17 @@
 ;;; implementation.
 (defoptimizer (%special-bind ir2-convert) ((var value) node block)
   (let ((name (leaf-source-name (lvar-value var))))
-    (vop bind node block (lvar-tn node block value)
-         (emit-constant name))))
+    #!-(and sb-thread x86-64)
+    (vop bind node block (lvar-tn node block value) (emit-constant name))
+    #!+(and sb-thread x86-64)
+    (progn
+      ;; GC must understand that the symbol is implicitly live even though
+      ;; binding makes no references to the object.
+      (emit-constant name)
+      (vop sb!vm::bind/let node block (lvar-tn node block value) name))))
+
 (defoptimizer (%special-unbind ir2-convert) ((var) node block)
+  (declare (ignore var))
   (vop unbind node block))
 
 ;;; ### It's not clear that this really belongs in this file, or
@@ -1709,6 +1736,7 @@
   (check-catch-tag-type tag)
   (emit-nlx-start node block (lvar-value info-lvar) tag))
 (defoptimizer (%unwind-protect ir2-convert) ((info-lvar cleanup) node block)
+  (declare (ignore cleanup))
   (emit-nlx-start node block (lvar-value info-lvar) nil))
 
 ;;; Emit the entry code for a non-local exit. We receive values and
@@ -1777,7 +1805,13 @@
 
 (macrolet ((def (name)
              `(defoptimizer (,name ir2-convert) ((&rest args) node block)
-                (let* ((refs (move-tail-full-call-args node block))
+                (let* ((refs (reference-tn-list
+                              (loop for arg in args
+                                    for tn = (make-normal-tn *backend-t-primitive-type*)
+                                    do
+                                    (emit-move node block (lvar-tn node block arg) tn)
+                                    collect tn)
+                              nil))
                        (lvar (node-lvar node))
                        (res (lvar-result-tns
                              lvar
@@ -1833,6 +1867,14 @@
     (if (template-p (basic-combination-info node))
         (ir2-convert-template node block)
         (ir2-convert-full-call node block))))
+
+;; just a fancy identity
+(defoptimizer (%typep-wrapper ir2-convert) ((value variable type) node block)
+  (declare (ignore variable type))
+  (let* ((lvar (node-lvar node))
+         (results (lvar-result-tns lvar (list (primitive-type-or-lose t)))))
+    (emit-move node block (lvar-tn node block value) (first results))
+    (move-lvar-result node block results lvar)))
 
 ;;; Convert the code in a component into VOPs.
 (defun ir2-convert (component)

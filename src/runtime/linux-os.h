@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/mman.h>
-#include <sys/signal.h>
+#include <signal.h>
 #include <ucontext.h>
 #include <string.h>
  /* #include <dlfcn.h> */

@@ -63,7 +63,26 @@
                 (digit-char -1)
                 (digit-char 4 1)
                 (digit-char 4 37)))
-  (assert (raises-error? (apply (car form) (mapcar 'eval (cdr form))) type-error)))
+  (assert-error (apply (car form) (mapcar 'eval (cdr form))) type-error))
+
+;; All of the inequality predicates when called out-of-line
+;; were lazy in their type-checking, and would allow junk
+;; if short-circuit evaluation allowed early loop termination.
+(with-test (:name :char-inequality-&rest-arguments)
+  (dolist (f '(char= char< char<= char> char>=
+               char-equal char-lessp char-not-greaterp
+               char-greaterp char-not-lessp))
+    ;; 1 arg
+    (assert-error (funcall f 'feep) type-error)
+    ;; 2 arg
+    (assert-error (funcall f #\a 'feep) type-error)
+    (assert-error (funcall f 'feep #\a) type-error)
+    ;; 3 arg
+    (assert-error (funcall f #\a #\a 'feep) type-error)
+    (assert-error (funcall f #\a #\b 'feep) type-error)
+    (assert-error (funcall f #\b #\a 'feep) type-error)
+    ;; 4 arg
+    (assert-error (funcall f #\a #\a #\a 'feep) type-error)))
 
 (dotimes (i 256)
   (let* ((char (code-char i))
@@ -101,8 +120,8 @@
             (and c (not (typep c 'base-char)))))
   ;; Test the formerly buggy coercions:
   (macrolet ((assert-coerce-type-error (object type)
-               `(assert (raises-error? (coerce ,object ',type)
-                                       type-error))))
+               `(assert-error (coerce ,object ',type)
+                              type-error)))
     (assert-coerce-type-error #\Nak standard-char)
     (assert-coerce-type-error #\a extended-char)
     #+sb-unicode
@@ -140,3 +159,17 @@
         (assert (char-equal char down)))
       (when (char/= char up)
         (assert (char-equal char up))))))
+
+(macrolet ((frob (predicate yes)
+             `(with-test (:name (,predicate standard-char))
+                (dotimes (i 256)
+                  (let ((char (code-char i)))
+                    (when (typep char 'standard-char)
+                      (if (find char ,yes)
+                          (assert (,predicate char))
+                          (assert (not (,predicate char))))))))))
+  (frob lower-case-p "abcdefghijklmnopqrstuvwxyz")
+  (frob upper-case-p "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+  (frob digit-char-p "0123456789")
+  (frob both-case-p "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+  (frob alphanumericp "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"))

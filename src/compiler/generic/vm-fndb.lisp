@@ -53,6 +53,7 @@
            simple-array-complex-single-float-p
            simple-array-complex-double-float-p
            #!+long-float simple-array-complex-long-float-p
+           simple-rank-1-array-*-p
            system-area-pointer-p realp
            ;; #!+#.(cl:if (cl:= 32 sb!vm:n-word-bits) '(and) '(or))
            unsigned-byte-32-p
@@ -63,6 +64,8 @@
            #!+#.(cl:if (cl:= 64 sb!vm:n-word-bits) '(and) '(or))
            signed-byte-64-p
            weak-pointer-p code-component-p lra-p
+           simple-fun-p
+           closurep
            funcallable-instance-p)
   (t) boolean (movable foldable flushable))
 
@@ -73,6 +76,10 @@
 (defknown %other-pointer-p (t) boolean
   (movable foldable flushable always-translatable))
 
+;; Return T if the first arg is an other-pointer and its widetag
+;; is in the collection specified by the second arg.
+(defknown %other-pointer-subtype-p (t list) boolean
+  (movable foldable flushable always-translatable))
 
 ;;;; miscellaneous "sub-primitives"
 
@@ -94,6 +101,8 @@
 
 (defknown %set-symbol-hash (symbol hash)
   t ())
+
+(defknown symbol-info-vector (symbol) (or null simple-vector))
 
 (defknown initialize-vector ((simple-array * (*)) &rest t)
   (simple-array * (*))
@@ -183,8 +192,14 @@
   ())
 
 
-(defknown allocate-vector ((unsigned-byte 8) index index) (simple-array * (*))
-  (flushable movable))
+(defknown allocate-vector ((unsigned-byte 8) index
+                           ;; The number of words is later converted
+                           ;; to bytes, make sure it fits.
+                           (and index
+                                (unsigned-byte #.(- sb!vm:n-word-bits
+                                                    sb!vm:word-shift))))
+    (simple-array * (*))
+    (flushable movable))
 
 (defknown make-array-header ((unsigned-byte 8) (unsigned-byte 24)) array
   (flushable movable))
@@ -244,6 +259,9 @@
                                       control-stack-pointer-sap)  ()
   system-area-pointer
   (flushable))
+
+(defknown ensure-symbol-tls-index (symbol) fixnum)
+
 
 ;;;; debugger support
 

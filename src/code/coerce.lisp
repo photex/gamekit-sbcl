@@ -50,7 +50,14 @@
       (declare (fixnum index))
       (rplacd splice (list (aref object index))))))
 
-(defvar *offending-datum*); FIXME: Remove after debugging COERCE.
+(defun sequence-to-list (sequence)
+  (declare (type sequence sequence))
+  (let* ((result (list nil))
+         (splice result))
+    (sb!sequence:dosequence (i sequence)
+      (rplacd splice (list i))
+      (setf splice (cdr splice)))
+    (cdr result)))
 
 ;;; These are used both by the full DEFUN function and by various
 ;;; optimization transforms in the constant-OUTPUT-TYPE-SPEC case.
@@ -60,45 +67,63 @@
 ;;; DEFTRANSFORMs, though.
 (declaim (inline coerce-to-list))
 (declaim (inline coerce-to-vector))
+
+(defun coerce-symbol-to-fun (object)
+  ;; FIXME? I would think to use SYMBOL-FUNCTION here which does not strip off
+  ;; encapsulations. But Stas wrote FDEFINITION so ...
+  ;; [Also note, we won't encapsulate a macro or special-form, so this
+  ;; introspective technique to decide what kind something is works either way]
+  (let* ((def (fdefinition object))
+         (widetag (fun-subtype def)))
+    (cond ((and (eq widetag sb!vm:closure-header-widetag)
+                (eq (%closure-fun def)
+                    (load-time-value
+                     ;; pick a macro, any macro...
+                     (%closure-fun (symbol-function 'with-unique-names))
+                     t)))
+           (error "~S names a macro." object))
+          ((and (eq widetag sb!vm:simple-fun-header-widetag)
+                (let ((name (%simple-fun-name def)))
+                  (and (listp name) (eq (car name) 'special-operator))))
+           (error "~S names a special operator." object))
+          (t
+           def))))
+
 (defun coerce-to-fun (object)
   ;; (Unlike the other COERCE-TO-FOOs, this one isn't inline, because
   ;; it's so big and because optimizing away the outer ETYPECASE
   ;; doesn't seem to buy us that much anyway.)
   (etypecase object
+    (function object)
     (symbol
-     ;; ANSI lets us return ordinary errors (non-TYPE-ERRORs) here.
-     (cond ((macro-function object)
-            (error "~S names a macro." object))
-           ((special-operator-p object)
-            (error "~S is a special operator." object))
-           (t (fdefinition object))))
+     (coerce-symbol-to-fun object))
     (list
      (case (first object)
-       ((setf)
+       (setf
         (fdefinition object))
-       ((lambda)
-        ;; FIXME: If we go to a compiler-only implementation, this can
-        ;; become COMPILE instead of EVAL, which seems nicer to me.
-        (eval `(function ,object)))
+       (lambda
+        (eval object))
        (t
         (error 'simple-type-error
                :datum object
                :expected-type '(or symbol
-                                   ;; KLUDGE: ANSI wants us to
-                                   ;; return a TYPE-ERROR here, and
-                                   ;; a TYPE-ERROR is supposed to
-                                   ;; describe the expected type,
-                                   ;; but it's not obvious how to
-                                   ;; describe the coerceable cons
-                                   ;; types, so we punt and just say
-                                   ;; CONS. -- WHN 20000503
-                                   cons)
+                                ;; KLUDGE: ANSI wants us to
+                                ;; return a TYPE-ERROR here, and
+                                ;; a TYPE-ERROR is supposed to
+                                ;; describe the expected type,
+                                ;; but it's not obvious how to
+                                ;; describe the coerceable cons
+                                ;; types, so we punt and just say
+                                ;; CONS. -- WHN 20000503
+                                cons)
                :format-control "~S can't be coerced to a function."
                :format-arguments (list object)))))))
 
 (defun coerce-to-list (object)
-  (etypecase object
-    (vector (vector-to-list* object))))
+  (seq-dispatch object
+                object
+                (vector-to-list* object)
+                (sequence-to-list object)))
 
 (defun coerce-to-vector (object output-type-spec)
   (etypecase object
@@ -163,7 +188,7 @@
                      ((csubtypep type (specifier-type '(complex float)))
                       (complex (%single-float (realpart object))
                                (%single-float (imagpart object))))
-                     ((and (typep object 'rational)
+                     ((and (typep object 'rational) ; TODO jmoringe unreachable?
                            (csubtypep type (specifier-type '(complex float))))
                       ;; Perhaps somewhat surprisingly, ANSI specifies
                       ;; that (COERCE FOO 'FLOAT) is a SINGLE-FLOAT,
@@ -240,40 +265,13 @@
             (coerce-error))))
         ((and (csubtypep type (specifier-type 'sequence))
               (find-class output-type-spec nil))
-         (let ((class (find-class output-type-spec)))
-           (unless (sb!mop:class-finalized-p class)
-             (sb!mop:finalize-inheritance class))
+         (let ((prototype (sb!mop:class-prototype
+                           (sb!pcl:ensure-class-finalized
+                            (find-class output-type-spec)))))
            (sb!sequence:make-sequence-like
-            (sb!mop:class-prototype class)
-            (length object) :initial-contents object)))
+            prototype (length object) :initial-contents object)))
         ((csubtypep type (specifier-type 'function))
-         (when (and (legal-fun-name-p object)
-                    (not (fboundp object)))
-           (error 'simple-type-error
-                  :datum object
-                  ;; FIXME: SATISFIES FBOUNDP is a kinda bizarre broken
-                  ;; type specifier, since the set of values it describes
-                  ;; isn't in general constant in time. Maybe we could
-                  ;; find a better way of expressing this error? (Maybe
-                  ;; with the UNDEFINED-FUNCTION condition?)
-                  :expected-type '(satisfies fboundp)
-               :format-control "~S isn't fbound."
-               :format-arguments (list object)))
-         (when (and (symbolp object)
-                    (sb!xc:macro-function object))
-           (error 'simple-type-error
-                  :datum object
-                  :expected-type '(not (satisfies sb!xc:macro-function))
-                  :format-control "~S is a macro."
-                  :format-arguments (list object)))
-         (when (and (symbolp object)
-                    (special-operator-p object))
-           (error 'simple-type-error
-                  :datum object
-                  :expected-type '(not (satisfies special-operator-p))
-                  :format-control "~S is a special operator."
-                  :format-arguments (list object)))
-         (eval `#',object))
+         (coerce-to-fun object))
         (t
          (coerce-error))))))
 

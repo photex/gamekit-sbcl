@@ -13,14 +13,54 @@
 
 (!begin-collecting-cold-init-forms)
 
-(defvar *type-classes*)
-(!cold-init-forms
-  (unless (boundp '*type-classes*) ; FIXME: How could this be bound?
-    (setq *type-classes* (make-hash-table :test 'eq))))
+;; We can't make an instance of any CTYPE descendant until its type-class
+;; exists in *TYPE-CLASSES* and the quasi-random state has been made.
+;; By initializing the state and type-class storage vector at once,
+;; it is obvious that either both have been made or neither one has been.
+#-sb-xc
+(progn (defvar *ctype-hash-state* (make-random-state))
+       (defvar *type-classes* (make-array 20 :fill-pointer 0)))
+#+sb-xc
+(macrolet ((def ()
+             (let* ((state-type `(unsigned-byte ,sb!vm:n-positive-fixnum-bits))
+                    (initform `(make-array 1 :element-type ',state-type))
+                    (n (length *type-classes*)))
+             `(progn
+                (declaim (type (simple-array ,state-type (1))
+                               *ctype-hash-state*)
+                         (type (simple-vector ,n) *type-classes*))
+                ;; The value forms are for type-correctness only.
+                ;; COLD-INIT-FORMS will already have been run.
+                (defglobal *ctype-hash-state* ,initform)
+                (defglobal *type-classes* (make-array ,n))
+                (!cold-init-forms
+                 (setq *ctype-hash-state* ,initform
+                       *type-classes* (make-array ,n)))))))
+  (def))
 
 (defun type-class-or-lose (name)
-  (or (gethash name *type-classes*)
+  (or (find name *type-classes* :key #'type-class-name)
       (error "~S is not a defined type class." name)))
+
+#-sb-xc-host
+(define-compiler-macro type-class-or-lose (&whole form name)
+  ;; If NAME is a quoted constant, the resultant form should be
+  ;; a fixed index into *TYPE-CLASSES* except that during the building
+  ;; of the cross-compiler the array hasn't been populated yet.
+  ;; One solution to that, which I favored, is that DEFINE-TYPE-CLASS
+  ;; appear before the structure definition that uses the corresponding
+  ;; type-class in its slot initializer. That posed a problem for
+  ;; the :INHERITS option, because the constructor of a descendant
+  ;; grabs all the methods [sic] from its ancestor at the time the
+  ;; descendant is defined, which means the methods of the ancestor
+  ;; should have been filled in, which means at least one DEFINE-TYPE-CLASS
+  ;; wants to appear _after_ a structure definition that uses it.
+  (if (constantp name)
+      (let ((name (constant-form-value name)))
+        `(aref *type-classes*
+               ,(or (position name *type-classes* :key #'type-class-name)
+                    (error "~S is not a defined type class." name))))
+      form))
 
 (defun must-supply-this (&rest foo)
   (/show0 "failing in MUST-SUPPLY-THIS")
@@ -36,7 +76,7 @@
                               (print-unreadable-object (x stream :type t)
                                 (prin1 (type-class-name x) stream)))))
   ;; the name of this type class (used to resolve references at load time)
-  (name nil :type symbol) ; FIXME: should perhaps be (MISSING-ARG) default?
+  (name (missing-arg) :type symbol)
   ;; Dyadic type methods. If the classes of the two types are EQ, then
   ;; we call the SIMPLE-xxx method. If the classes are not EQ, and
   ;; either type's class has a COMPLEX-xxx method, then we call it.
@@ -113,68 +153,11 @@
   (coerce :type (or symbol null))
   |#
   )
+#!-sb-fluid (declaim (freeze-type type-class))
 
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  ;; KLUDGE: If the slots of TYPE-CLASS ever change, the slots here
-  ;; will have to be tweaked to match. -- WHN 19991021
-  (defparameter *type-class-fun-slots*
-    '((:simple-subtypep . type-class-simple-subtypep)
-      (:complex-subtypep-arg1 . type-class-complex-subtypep-arg1)
-      (:complex-subtypep-arg2 . type-class-complex-subtypep-arg2)
-      (:simple-union2 . type-class-simple-union2)
-      (:complex-union2 . type-class-complex-union2)
-      (:simple-intersection2 . type-class-simple-intersection2)
-      (:complex-intersection2 . type-class-complex-intersection2)
-      (:simple-= . type-class-simple-=)
-      (:complex-= . type-class-complex-=)
-      (:negate . type-class-negate)
-      (:unparse . type-class-unparse)
-      (:singleton-p . type-class-singleton-p))))
-
-(declaim (ftype (function (type-class) type-class) copy-type-class-coldly))
 (eval-when (#-sb-xc :compile-toplevel :load-toplevel :execute)
-;;; Copy TYPE-CLASS object X, using only operations which will work
-;;; early in cold load. (COPY-STRUCTURE won't work early in cold load,
-;;; because it needs RAW-INDEX and RAW-LENGTH information from
-;;; LAYOUT-INFO, and LAYOUT-INFO isn't initialized early in cold
-;;; load.)
-;;;
-;;; FIXME: It's nasty having to maintain this hand-written copy
-;;; function. And it seems intrinsically dain-bramaged to have
-;;; RAW-INDEX and RAW-LENGTH in LAYOUT-INFO instead of directly in
-;;; LAYOUT. We should fix this:
-;;;   * Move RAW-INDEX and RAW-LENGTH slots into LAYOUT itself.
-;;;   * Rewrite the various CHECK-LAYOUT-related functions so that
-;;;     they check RAW-INDEX and RAW-LENGTH too.
-;;;   * Remove this special hacked copy function, just use
-;;;     COPY-STRUCTURE instead.
-;;; (For even more improvement, it might be good to move the raw slots
-;;; into the same object as the ordinary slots, instead of having the
-;;; unfortunate extra level of indirection. But that'd probably
-;;; require a lot of work, including updating the garbage collector to
-;;; understand it. And it might even hurt overall performance, because
-;;; the positive effect of removing indirection could be cancelled by
-;;; the negative effect of imposing an unnecessary GC write barrier on
-;;; raw data which doesn't actually affect GC.)
-(defun copy-type-class-coldly (x)
-  ;; KLUDGE: If the slots of TYPE-CLASS ever change in a way not
-  ;; reflected in *TYPE-CLASS-FUN-SLOTS*, the slots here will
-  ;; have to be hand-tweaked to match. -- WHN 2001-03-19
-  (make-type-class :name (type-class-name x)
-                   . #.(mapcan (lambda (type-class-fun-slot)
-                                 (destructuring-bind (keyword . slot-accessor)
-                                     type-class-fun-slot
-                                   `(,keyword (,slot-accessor x))))
-                               *type-class-fun-slots*)))
-
-(defun class-fun-slot-or-lose (name)
-  (or (cdr (assoc name *type-class-fun-slots*))
-      (error "~S is not a defined type class method." name)))
-;;; FIXME: This seems to be called at runtime by cold init code.
-;;; Make sure that it's not being called at runtime anywhere but
-;;; one-time toplevel initialization code.
-
-) ; EVAL-WHEN
+  (defun !type-class-fun-slot (name)
+    (symbolicate "TYPE-CLASS-" name)))
 
 (defmacro !define-type-method ((class method &rest more-methods)
                                lambda-list &body body)
@@ -184,22 +167,29 @@
          ,@body)
        (!cold-init-forms
         ,@(mapcar (lambda (method)
-                    `(setf (,(class-fun-slot-or-lose method)
+                    `(setf (,(!type-class-fun-slot method)
                             (type-class-or-lose ',class))
                            #',name))
                   (cons method more-methods)))
        ',name)))
 
 (defmacro !define-type-class (name &key inherits)
-  `(!cold-init-forms
-     ,(once-only ((n-class (if inherits
-                               `(copy-type-class-coldly (type-class-or-lose
-                                                         ',inherits))
-                               '(make-type-class))))
-        `(progn
-           (setf (type-class-name ,n-class) ',name)
-           (setf (gethash ',name *type-classes*) ,n-class)
-           ',name))))
+  (let ((make-it
+         (if inherits
+             `(let ((class (copy-structure (type-class-or-lose ',inherits))))
+                (setf (type-class-name class) ',name)
+                class)
+             `(make-type-class :name ',name))))
+    #-sb-xc
+    `(progn
+       (eval-when (:compile-toplevel :load-toplevel :execute)
+         (unless (find ',name *type-classes* :key #'type-class-name)
+           (vector-push-extend ,make-it *type-classes*))))
+    #+sb-xc
+    `(!cold-init-forms
+      (setf (svref *type-classes*
+                   ,(position name *type-classes* :key #'type-class-name))
+            ,make-it))))
 
 ;;; Invoke a type method on TYPE1 and TYPE2. If the two types have the
 ;;; same class, invoke the simple method. Otherwise, invoke any
@@ -218,10 +208,10 @@
                                       (default '(values nil t))
                                       (complex-arg1 :foo complex-arg1-p))
   (declare (type keyword simple complex-arg1 complex-arg2))
-  (let ((simple (class-fun-slot-or-lose simple))
-        (cslot1 (class-fun-slot-or-lose
+  (let ((simple (!type-class-fun-slot simple))
+        (cslot1 (!type-class-fun-slot
                  (if complex-arg1-p complex-arg1 complex-arg2)))
-        (cslot2 (class-fun-slot-or-lose complex-arg2)))
+        (cslot2 (!type-class-fun-slot complex-arg2)))
     (once-only ((ntype1 type1)
                 (ntype2 type2))
       (once-only ((class1 `(type-class-info ,ntype1))

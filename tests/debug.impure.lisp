@@ -182,8 +182,7 @@
                     ;; HPPA are due to not having a full and valid
                     ;; stack frame for the undefined function frame.
                     ;; See PPC undefined_tramp for details.
-              :fails-on '(or :alpha :sparc :mips
-                          (and :x86-64 :freebsd)))
+              :fails-on '(or :alpha :sparc :mips))
     (assert (verify-backtrace
              (lambda () (test #'optimized))
              (list *undefined-function-frame*
@@ -572,6 +571,24 @@
     (load (compile-file "bug-414.lisp"))
     (disassemble 'bug-414)))
 
+;; A known function can be stored as a code constant in lieu of the
+;; usual mode of storing an #<fdefn> and looking up the function from it.
+;; One such usage occurs with TAIL-CALL-VARIABLE (e.g. via APPLY).
+;; Show that declaring the function locally notinline uses the #<fdefn>
+;; by first compiling a call that would have elided the #<fdefn>
+;; and then TRACE.
+(defun test-compile-then-load (filename junk)
+  (declare (notinline compile-file load))
+  (apply 'load (apply 'compile-file filename junk) junk))
+(compile 'test-compile-then-load)
+(with-test (:name :traceable-known-fun)
+  (let ((s (make-string-output-stream)))
+    (trace compile-file load)
+    (let ((*trace-output* s))
+      (test-compile-then-load "bug-414.lisp" nil))
+    (untrace)
+    (assert (>= (count #\Newline (get-output-stream-string s)) 4))))
+
 (with-test (:name :bug-310175 :fails-on '(not :stack-allocatable-lists))
   ;; KLUDGE: Not all DX-enabled platforms DX CONS, and the compiler
   ;; transforms two-arg-LIST* (and one-arg-LIST) to CONS.  Therefore,
@@ -830,5 +847,30 @@
                              (declare (ignore e))
                              (return (< (length (car (sb-debug:backtrace-as-list 1))) 10)))))
        (funcall (compile nil `(lambda (i) (declare ((mod 65536) i)) i)) nil)))))
+
+;;; bug-1261646
+
+(defun print-backtrace-to-string/debug-print-variable-alist (x)
+  (values
+   (with-output-to-string (stream)
+     (let ((*debug-print-variable-alist* '((*print-length* . 5)
+                                           (*print-level* . 3))))
+       (sb-debug:print-backtrace :stream stream :count 5)))
+   x)) ; Force use of X to prevent flushing
+
+(with-test (:name (:print-frame-call :respect *debug-print-variable-alist*
+                   *print-length* :bug-1261646))
+  (let* ((printed (print-backtrace-to-string/debug-print-variable-alist (make-array 200)))
+         (call "(PRINT-BACKTRACE-TO-STRING/DEBUG-PRINT-VARIABLE-ALIST ")
+         (position (+ (search call printed) (length call))))
+    (assert (eql position (search "#(0 0 0 0 0 ...)" printed :start2 position)))))
+
+(with-test (:name (:print-frame-call :respect *debug-print-variable-alist*
+                   *print-level* :bug-1261646))
+  (let* ((printed (print-backtrace-to-string/debug-print-variable-alist
+                   '(((((1)))))))
+         (call "(PRINT-BACKTRACE-TO-STRING/DEBUG-PRINT-VARIABLE-ALIST ")
+         (position (+ (search call printed) (length call))))
+    (assert (eql position (search "((#))" printed :start2 position)))))
 
 (write-line "/debug.impure.lisp done")

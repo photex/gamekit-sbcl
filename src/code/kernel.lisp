@@ -80,9 +80,8 @@
 
 ;;;; SIMPLE-FUN and accessors
 
-(declaim (inline simple-fun-p))
 (defun simple-fun-p (object)
-  (= sb!vm:simple-fun-header-widetag (widetag-of object)))
+  (simple-fun-p object))
 
 (deftype simple-fun ()
   '(satisfies simple-fun-p))
@@ -150,14 +149,22 @@
 (defun %simple-fun-next (simple-fun)
   (%simple-fun-next simple-fun))
 
+;; Given either a closure or a simple-fun, return the underlying simple-fun.
+;; FIXME: %SIMPLE-FUN-SELF is a somewhat poor name for this function.
+;; The x86[-64] code defines %CLOSURE-FUN as nothing more than %SIMPLE-FUN-SELF,
+;; and it's not clear whether that's because callers need the "simple" accessor
+;; to work on closures, versus reluctance to define a %CLOSURE/SIMPLE-FUN-FUN
+;; reader. %FUN-FUN works on all three function subtypes, but is nontrivial.
+;; Preferably at least one accessor should get a new name,
+;; so that %SIMPLE-FUN-SELF can mean what it says.
+
 (defun %simple-fun-self (simple-fun)
   (%simple-fun-self simple-fun))
 
 ;;;; CLOSURE type and accessors
 
-(declaim (inline closurep))
 (defun closurep (object)
-  (= sb!vm:closure-header-widetag (widetag-of object)))
+  (closurep object))
 
 (deftype closure ()
   '(satisfies closurep))
@@ -214,12 +221,12 @@
 
 (defun %vector-raw-bits (object offset)
   (declare (type index offset))
-  (sb!kernel:%vector-raw-bits object offset))
+  (%vector-raw-bits object offset))
 
 (defun %set-vector-raw-bits (object offset value)
   (declare (type index offset))
-  (declare (type sb!vm:word value))
-  (setf (sb!kernel:%vector-raw-bits object offset) value))
+  (declare (type word value))
+  (setf (%vector-raw-bits object offset) value))
 
 (defun make-single-float (x) (make-single-float x))
 (defun make-double-float (hi lo) (make-double-float hi lo))

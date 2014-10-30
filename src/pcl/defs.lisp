@@ -257,10 +257,10 @@
                        42))))
             (remove-if (lambda (kernel-bic-entry)
                          (member (first kernel-bic-entry)
-                                 ;; I'm not sure why these are removed from
-                                 ;; the list, but that's what the original
-                                 ;; CMU CL code did. -- WHN 20000715
-                                 '(t function stream
+                                 ;; remove special classes (T and our
+                                 ;; SYSTEM-CLASSes) from the
+                                 ;; BUILT-IN-CLASS list
+                                 '(t function stream sequence
                                      file-stream string-stream)))
                        sb-kernel::*built-in-classes*))))
 (/noshow "done setting up SB-PCL::*BUILT-IN-CLASSES*")
@@ -268,19 +268,25 @@
 ;;;; the classes that define the kernel of the metabraid
 
 (defclass t () ()
-  (:metaclass built-in-class))
+  ;; AMOP specifies that the class named T should be an instance of
+  ;; BUILT-IN-CLASS, but this conflicts with other specifications in
+  ;; AMOP and CLHS.
+  (:metaclass system-class))
 
 (defclass function (t) ()
-  (:metaclass built-in-class))
+  (:metaclass system-class))
 
 (defclass stream (t) ()
-  (:metaclass built-in-class))
+  (:metaclass system-class))
 
 (defclass file-stream (stream) ()
-  (:metaclass built-in-class))
+  (:metaclass system-class))
 
 (defclass string-stream (stream) ()
-  (:metaclass built-in-class))
+  (:metaclass system-class))
+
+(defclass sequence (t) ()
+  (:metaclass system-class))
 
 (defclass slot-object (t) ()
   (:metaclass slot-class))
@@ -307,9 +313,7 @@
                             definition-source-mixin
                             metaobject
                             funcallable-standard-object)
-  ((%documentation
-    :initform nil
-    :initarg :documentation)
+  ((%documentation :initform nil :initarg :documentation)
    ;; We need to make a distinction between the methods initially set
    ;; up by :METHOD options to DEFGENERIC and the ones set up later by
    ;; DEFMETHOD, because ANSI specifies that executing DEFGENERIC on
@@ -321,9 +325,8 @@
    ;; DEFMETHOD, then modifying and reloading a.lisp and/or b.lisp
    ;; tends to leave the generic function in a state consistent with
    ;; the most-recently-loaded state of a.lisp and b.lisp.)
-   (initial-methods
-    :initform ()
-    :accessor generic-function-initial-methods))
+   (initial-methods :initform () :accessor generic-function-initial-methods)
+   (encapsulations :initform () :accessor generic-function-encapsulations))
   (:metaclass funcallable-standard-class))
 
 (defclass standard-generic-function (generic-function)
@@ -446,14 +449,6 @@
     :initform nil
     :initarg :initfunction
     :accessor slot-definition-initfunction)
-   (readers
-    :initform nil
-    :initarg :readers
-    :accessor slot-definition-readers)
-   (writers
-    :initform nil
-    :initarg :writers
-    :accessor slot-definition-writers)
    (initargs
     :initform nil
     :initarg :initargs
@@ -501,7 +496,14 @@
      :accessor slot-definition-internal-writer-function)))
 
 (defclass direct-slot-definition (slot-definition)
-  ())
+  ((readers
+    :initform nil
+    :initarg :readers
+    :accessor slot-definition-readers)
+   (writers
+    :initform nil
+    :initarg :writers
+    :accessor slot-definition-writers)))
 
 (defclass effective-slot-definition (slot-definition)
   ((accessor-flags
@@ -513,16 +515,12 @@
 ;;; are critical to making SLOT-VALUE-USING-CLASS &co fast: places that need
 ;;; these functions can access the SLOT-INFO directly, avoiding the overhead
 ;;; of accessing a standard-instance.
-(defstruct (slot-info (:constructor make-slot-info
-                                    (&key slotd
-                                          typecheck
-                                          (type t)
-                                          (reader
-                                           (uninitialized-accessor-function :reader slotd))
-                                          (writer
-                                           (uninitialized-accessor-function :writer slotd))
-                                          (boundp
-                                           (uninitialized-accessor-function :boundp slotd)))))
+(defstruct (slot-info
+            (:constructor make-slot-info
+                (&key slotd typecheck
+                 (reader (uninitialized-accessor-function :reader slotd))
+                 (writer (uninitialized-accessor-function :writer slotd))
+                 (boundp (uninitialized-accessor-function :boundp slotd)))))
   (typecheck nil :type (or null function))
   (reader (missing-arg) :type function)
   (writer (missing-arg) :type function)
@@ -642,7 +640,10 @@
     (unless (and name (eq (find-class name nil) class))
       (error "~@<Can't use anonymous or undefined class as constant: ~S~:@>"
              class))
-    `(find-class ',name)))
+    ;; Essentially we want `(FIND-CLASS ',NAME) but without using backquote.
+    ;; Because this is a delayed DEF!METHOD, its entire body is quoted structure
+    ;; and can't contain a comma object until a MAKE-LOAD-FORM exists for that.
+    (list 'find-class (list 'quote name))))
 
 ;;; The class PCL-CLASS is an implementation-specific common
 ;;; superclass of all specified subclasses of the class CLASS.
@@ -692,7 +693,9 @@
 
 (defclass forward-referenced-class (pcl-class) ())
 
-(defclass built-in-class (pcl-class) ())
+(defclass system-class (pcl-class) ())
+
+(defclass built-in-class (system-class) ())
 
 (defclass condition-class (slot-class) ())
 

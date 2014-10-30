@@ -13,17 +13,17 @@
 
 ;;;; these are initialized in cold init
 
-(defvar *in-without-gcing*)
-(defvar *gc-inhibit*)
+(!defvar *in-without-gcing* nil)
+(!defvar *gc-inhibit* t)
 
 ;;; When the dynamic usage increases beyond this amount, the system
 ;;; notes that a garbage collection needs to occur by setting
 ;;; *GC-PENDING* to T. It starts out as NIL meaning nobody has figured
 ;;; out what it should be yet.
-(defvar *gc-pending*)
+(!defvar *gc-pending* nil)
 
 #!+sb-thread
-(defvar *stop-for-gc-pending*)
+(!defvar *stop-for-gc-pending* nil)
 
 ;;; This one is initialized by the runtime, at thread creation.  On
 ;;; non-x86oid gencgc targets, this is a per-thread list of objects
@@ -80,14 +80,19 @@ maintained."
 
 ;;; These macros handle the special cases of T and NIL for input and
 ;;; output streams.
+;;; It is unfortunate that the names connote synonym-streams being involved.
+;;; Perhaps {IN,OUT}-STREAM-FROM-DESIGNATOR would have been better.
+;;; And shouldn't the high-security feature check that if either NIL or T
+;;; is given, the designated stream has the right directionality?
+;;; Nothing prevents *TERMINAL-IO* from being bound to an output-only stream.
 ;;;
 ;;; FIXME: Shouldn't these be functions instead of macros?
-(defmacro in-synonym-of (stream &optional check-type)
+(defmacro in-synonym-of (stream)
   (let ((svar (gensym)))
     `(let ((,svar ,stream))
        (cond ((null ,svar) *standard-input*)
              ((eq ,svar t) *terminal-io*)
-             (t ,@(when check-type `((enforce-type ,svar ,check-type))) ;
+             (t
                 #!+high-security
                 (unless (input-stream-p ,svar)
                   (error 'simple-type-error
@@ -96,12 +101,12 @@ maintained."
                          :format-control "~S isn't an input stream"
                          :format-arguments (list ,svar)))
                 ,svar)))))
-(defmacro out-synonym-of (stream &optional check-type)
+(defmacro out-synonym-of (stream)
   (let ((svar (gensym)))
     `(let ((,svar ,stream))
        (cond ((null ,svar) *standard-output*)
              ((eq ,svar t) *terminal-io*)
-             (t ,@(when check-type `((check-type ,svar ,check-type)))
+             (t
                 #!+high-security
                 (unless (output-stream-p ,svar)
                   (error 'simple-type-error
@@ -163,21 +168,33 @@ maintained."
 
 ;;; a macro with the same calling convention as READ-CHAR, to be used
 ;;; within the scope of a PREPARE-FOR-FAST-READ-CHAR.
+;;; If EOF-ERROR-P is statically T (not any random expression evaluating
+;;; to T) then wrap the whole thing in (TRULY-THE CHARACTER ...)
+;;; because it's either going to yield a character or signal EOF.
 (defmacro fast-read-char (&optional (eof-error-p t) (eof-value ()))
-  `(cond
-     ((not %frc-buffer%)
-      (funcall %frc-method% %frc-stream% ,eof-error-p ,eof-value))
-     ((= %frc-index% +ansi-stream-in-buffer-length+)
-      (multiple-value-bind (eof-p index-or-value)
-          (fast-read-char-refill %frc-stream% ,eof-error-p ,eof-value)
-        (if eof-p
-            index-or-value
-            (progn
-              (setq %frc-index% (1+ index-or-value))
-              (aref %frc-buffer% index-or-value)))))
-     (t
-      (prog1 (aref %frc-buffer% %frc-index%)
-        (incf %frc-index%)))))
+  (let ((result
+         `(cond
+            ((not %frc-buffer%)
+             (funcall %frc-method% %frc-stream% ,eof-error-p ,eof-value))
+            ((= %frc-index% +ansi-stream-in-buffer-length+)
+             (multiple-value-bind (eof-p index-or-value)
+                 (fast-read-char-refill %frc-stream% ,eof-error-p ,eof-value)
+               (if eof-p
+                   index-or-value
+                   (progn
+                     (setq %frc-index% (1+ (truly-the index index-or-value)))
+                     (aref %frc-buffer% index-or-value)))))
+            (t
+             (prog1 (aref %frc-buffer% %frc-index%)
+               (incf %frc-index%))))))
+    (cond ((eq eof-error-p 't)
+           `(truly-the character ,result))
+          ((and (symbolp eof-value) (constantp eof-value)
+                ;; use an EQL specifier only if the const is EQL-comparable
+                (typep (symbol-value eof-value) '(or symbol fixnum)))
+           `(truly-the (or (eql ,(symbol-value eof-value)) character) ,result))
+          (t
+           result))))
 
 ;;;; And these for the fasloader...
 
@@ -220,3 +237,18 @@ maintained."
          (unwind-protect
               (locally ,@body)
            (setf (ansi-stream-in-index ,f-stream) ,f-index))))))
+
+(defmacro do-rest-arg (((var &optional index) rest-var
+                        &optional (start 0) result)
+                       &body body)
+  ;; If the &REST arg never needs to be reified, this is slightly quicker
+  ;; than using a DX list.
+  (let ((index (or index (sb!xc:gensym "INDEX"))))
+    `(let ((,index ,start))
+       (loop
+        (cond ((< (truly-the index ,index) (length ,rest-var))
+               (let ((,var (nth ,index ,rest-var)))
+                 ,@body)
+               (incf ,index))
+              (t
+               (return ,result)))))))

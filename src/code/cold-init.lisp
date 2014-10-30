@@ -25,27 +25,33 @@
 ;;; FIXME: Are there other tables that need to have entries removed?
 ;;; What about symbols of the form DEF!FOO?
 (defun !unintern-init-only-stuff ()
-  (do ((any-changes? nil nil))
-      (nil)
-    (dolist (package (list-all-packages))
-      (do-symbols (symbol package)
-        (let ((name (symbol-name symbol)))
-          (when (or (string= name "!" :end1 1 :end2 1)
-                    (and (>= (length name) 2)
-                         (string= name "*!" :end1 2 :end2 2)))
-            (/show0 "uninterning cold-init-only symbol..")
-            (/primitive-print name)
-            ;; FIXME: Is this (FIRST (LAST *INFO-ENVIRONMENT*)) really
-            ;; meant to be an idiom to use?  Is there a more obvious
-            ;; name for this? [e.g. (GLOBAL-ENVIRONMENT)?]
-            (do-info ((first (last *info-environment*))
-                            :name entry :class class :type type)
-              (when (eq entry symbol)
-                (clear-info class type entry)))
-            (unintern symbol package)
-            (setf any-changes? t)))))
-    (unless any-changes?
-      (return))))
+  (flet ((uninternable-p (symbol)
+           (let ((name (symbol-name symbol)))
+             (or (and (>= (length name) 1) (char= (char name 0) #\!))
+                 (and (>= (length name) 2)
+                      (string= name "*!" :end1 2 :end2 2))))))
+    ;; A structure constructor name, in particular !MAKE-SAETP,
+    ;; can't be uninterned if referenced by a defstruct-description.
+    ;; So loop over all structure classoids and clobber any
+    ;; symbol that should be uninternable.
+    (maphash (lambda (classoid layout)
+               (when (structure-classoid-p classoid)
+                 (let ((dd (layout-info layout)))
+                   (setf (dd-constructors dd)
+                         (delete-if (lambda (x)
+                                      (and (consp x) (uninternable-p (car x))))
+                                    (dd-constructors dd))))))
+             (classoid-subclasses (find-classoid t)))
+    ;; Todo: perform one pass, then a full GC, then a final pass to confirm
+    ;; it worked. It shoud be an error if any uninternable symbols remain,
+    ;; but at present there are about 10 other "!" symbols with referers.
+    (with-package-iterator (iter (list-all-packages) :internal :external)
+      (loop (multiple-value-bind (winp symbol accessibility package) (iter)
+              (declare (ignore accessibility))
+              (unless winp
+                (return))
+              (when (uninternable-p symbol)
+                (unintern symbol package)))))))
 
 ;;;; putting ourselves out of our misery when things become too much to bear
 
@@ -87,34 +93,28 @@
 
   (/show0 "entering !COLD-INIT")
 
-  ;; FIXME: It'd probably be cleaner to have most of the stuff here
-  ;; handled by calls like !GC-COLD-INIT, !ERROR-COLD-INIT, and
-  ;; !UNIX-COLD-INIT. And *TYPE-SYSTEM-INITIALIZED* could be changed to
-  ;; *TYPE-SYSTEM-INITIALIZED-WHEN-BOUND* so that it doesn't need to
-  ;; be explicitly set in order to be meaningful.
-  (setf *after-gc-hooks* nil
-        *in-without-gcing* nil
-        *gc-inhibit* t
-        *gc-pending* nil
-        #!+sb-thread *stop-for-gc-pending* #!+sb-thread nil
-        *allow-with-interrupts* t
-        sb!unix::*unblock-deferrables-on-enabling-interrupts-p* nil
-        *interrupts-enabled* t
-        *interrupt-pending* nil
-        #!+sb-thruption #!+sb-thruption *thruption-pending* nil
-        *break-on-signals* nil
-        *maximum-error-depth* 10
-        *current-error-depth* 0
-        *cold-init-complete-p* nil
-        *type-system-initialized* nil
-        sb!vm:*alloc-signal* nil
-        sb!kernel::*gc-epoch* (cons nil nil))
-
-  ;; I'm not sure where eval is first called, so I put this first.
-  (show-and-call !eval-cold-init)
-  (show-and-call !deadline-cold-init)
+  ;; Putting data in a synchronized hashtable (*PACKAGE-NAMES*)
+  ;; requires that the main thread be properly initialized.
   (show-and-call thread-init-or-reinit)
-  (show-and-call !typecheckfuns-cold-init)
+  ;; Printing of symbols requires that packages be filled in, because
+  ;; OUTPUT-SYMBOL calls FIND-SYMBOL to determine accessibility.
+  (show-and-call !package-cold-init)
+  ;; Fill in the printer's character attribute tables now.
+  ;; If Genesis could write constant arrays into a target core,
+  ;; that would be nice, and would tidy up some other things too.
+  (show-and-call !printer-cold-init)
+  #!-win32
+  (progn
+    (setq *error-output* (!make-cold-stderr-stream)
+          *standard-output* *error-output*
+          *trace-output* *error-output*
+          *readtable* (make-readtable)
+          *previous-case* nil
+          *previous-readtable-case* nil
+          *print-length* 6 *print-level* 3)
+    (write-string "COLD-INIT... ")
+    (prin1 `(package = ,(package-name *package*)))
+    (terpri))
 
   ;; Anyone might call RANDOM to initialize a hash value or something;
   ;; and there's nothing which needs to be initialized in order for
@@ -126,18 +126,11 @@
 
   (show-and-call !character-database-cold-init)
   (show-and-call !character-name-database-cold-init)
-
-  (show-and-call !early-package-cold-init)
-  (show-and-call !package-cold-init)
+  (show-and-call sb!unicode::!unicode-properties-cold-init)
 
   ;; All sorts of things need INFO and/or (SETF INFO).
   (/show0 "about to SHOW-AND-CALL !GLOBALDB-COLD-INIT")
   (show-and-call !globaldb-cold-init)
-
-  ;; This needs to be done early, but needs to be after INFO is
-  ;; initialized.
-  (show-and-call !function-names-cold-init)
-  (show-and-call !fdefn-cold-init)
 
   ;; Various toplevel forms call MAKE-ARRAY, which calls SUBTYPEP, so
   ;; the basic type machinery needs to be initialized before toplevel
@@ -155,12 +148,14 @@
   ;; functions are called in the same relative order as the toplevel
   ;; forms of the corresponding source files.
 
-  ;;(show-and-call !package-cold-init)
   (show-and-call !policy-cold-init-or-resanify)
   (/show0 "back from !POLICY-COLD-INIT-OR-RESANIFY")
 
   (show-and-call !constantp-cold-init)
-  (show-and-call !early-proclaim-cold-init)
+  ;; Must be done before toplevel forms are invoked
+  ;; because a toplevel defstruct will need to add itself
+  ;; to the subclasses of STRUCTURE-OBJECT.
+  (show-and-call sb!kernel::!set-up-structure-object-class)
 
   ;; KLUDGE: Why are fixups mixed up with toplevel forms? Couldn't
   ;; fixups be done separately? Wouldn't that be clearer and better?
@@ -175,8 +170,17 @@
                (let ((hexstr (hexstr r-c-tl-length)))
                  (/show0 "(hexstr calculated..)")
                  (/primitive-print hexstr)))
-  (let (#!+sb-show (index-in-cold-toplevels 0))
+  (let (#!+sb-show (index-in-cold-toplevels 0)
+        (really-note-if-setf-fun-and-macro #'sb!c::note-if-setf-fun-and-macro)
+        (really-assign-setf-macro #'sb!impl::assign-setf-macro)
+        (really-defun #'sb!impl::%defun))
     #!+sb-show (declare (type fixnum index-in-cold-toplevels))
+
+    (setf (symbol-function 'sb!c::note-if-setf-fun-and-macro)
+          (lambda (name) (declare (ignore name)) (values))
+          (symbol-function 'sb!impl::assign-setf-macro)
+          #'sb!impl::!quietly-assign-setf-macro
+          (symbol-function 'sb!impl::%defun) #'sb!impl::!%quietly-defun)
 
     (dolist (toplevel-thing (prog1
                                 (nreverse *!reversed-cold-toplevels*)
@@ -206,7 +210,11 @@
                    (svref *!load-time-values* (fourth toplevel-thing)))))
            (t
             (!cold-lose "bogus fixup code in *!REVERSED-COLD-TOPLEVELS*"))))
-        (t (!cold-lose "bogus function in *!REVERSED-COLD-TOPLEVELS*")))))
+        (t (!cold-lose "bogus function in *!REVERSED-COLD-TOPLEVELS*"))))
+    (setf (symbol-function 'sb!c::note-if-setf-fun-and-macro)
+          really-note-if-setf-fun-and-macro
+          (symbol-function 'sb!impl::assign-setf-macro) really-assign-setf-macro
+          (symbol-function 'sb!impl::%defun) really-defun))
   (/show0 "done with loop over cold toplevel forms and fixups")
 
   ;; Set sane values again, so that the user sees sane values instead
@@ -233,7 +241,7 @@
   #!-(and win32 (not sb-thread))
   (show-and-call signal-cold-init-or-reinit)
   (/show0 "enabling internal errors")
-  (setf (sb!alien:extern-alien "internal_errors_enabled" boolean) t)
+  (setf (extern-alien "internal_errors_enabled" int) 1)
 
   (show-and-call float-cold-init-or-reinit)
 
@@ -253,6 +261,7 @@
   (setf *readtable* (copy-readtable *standard-readtable*))
   (setf sb!debug:*debug-readtable* (copy-readtable *standard-readtable*))
   (sb!pretty:!pprint-cold-init)
+  (setq *print-level* nil *print-length* nil) ; restore defaults
 
   ;; the ANSI-specified initial value of *PACKAGE*
   (setf *package* (find-package "COMMON-LISP-USER"))
@@ -261,7 +270,7 @@
   (setf *cold-init-complete-p* t)
 
   ; hppa heap is segmented, lisp and c uses a stub to call eachother
-  #!+hpux (sb!sys:%primitive sb!vm::setup-return-from-lisp-stub)
+  #!+hpux (%primitive sb!vm::setup-return-from-lisp-stub)
   ;; The system is finally ready for GC.
   (/show0 "enabling GC")
   (setq *gc-inhibit* nil)
@@ -355,7 +364,7 @@ process to continue normally."
     (thread-init-or-reinit)
     #!-(and win32 (not sb-thread))
     (signal-cold-init-or-reinit)
-    (setf (sb!alien:extern-alien "internal_errors_enabled" boolean) t)
+    (setf (extern-alien "internal_errors_enabled" int) 1)
     (float-cold-init-or-reinit))
   (gc-reinit)
   (foreign-reinit)
@@ -374,20 +383,21 @@ process to continue normally."
 #!+sb-show
 (defun hexstr (thing)
   (/noshow0 "entering HEXSTR")
-  (let ((addr (get-lisp-obj-address thing))
-        (str (make-string 10 :element-type 'base-char)))
+  (let* ((addr (get-lisp-obj-address thing))
+         (nchars (* sb!vm:n-word-bytes 2))
+         (str (make-string (+ nchars 2) :element-type 'base-char)))
     (/noshow0 "ADDR and STR calculated")
     (setf (char str 0) #\0
           (char str 1) #\x)
     (/noshow0 "CHARs 0 and 1 set")
-    (dotimes (i 8)
+    (dotimes (i nchars)
       (/noshow0 "at head of DOTIMES loop")
       (let* ((nibble (ldb (byte 4 0) addr))
              (chr (char "0123456789abcdef" nibble)))
         (declare (type (unsigned-byte 4) nibble)
                  (base-char chr))
         (/noshow0 "NIBBLE and CHR calculated")
-        (setf (char str (- 9 i)) chr
+        (setf (char str (- (1+ nchars) i)) chr
               addr (ash addr -4))))
     str))
 
@@ -395,18 +405,18 @@ process to continue normally."
 (defun cold-print (x)
   (labels ((%cold-print (obj depthoid)
              (if (> depthoid 4)
-                 (sb!sys:%primitive print "...")
+                 (%primitive print "...")
                  (typecase obj
                    (simple-string
-                    (sb!sys:%primitive print obj))
+                    (%primitive print obj))
                    (symbol
-                    (sb!sys:%primitive print (symbol-name obj)))
+                    (%primitive print (symbol-name obj)))
                    (cons
-                    (sb!sys:%primitive print "cons:")
+                    (%primitive print "cons:")
                     (let ((d (1+ depthoid)))
                       (%cold-print (car obj) d)
                       (%cold-print (cdr obj) d)))
                    (t
-                    (sb!sys:%primitive print (hexstr x)))))))
+                    (%primitive print (hexstr obj)))))))
     (%cold-print x 0))
   (values))

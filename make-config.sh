@@ -81,6 +81,12 @@ do
       --xc-host=)
         $optarg_ok && SBCL_XC_HOST=$optarg
         ;;
+      --host-location=)
+        $optarg_ok && SBCL_HOST_LOCATION=$optarg
+        ;;
+      --target-location=)
+        $optarg_ok && SBCL_TARGET_LOCATION=$optarg
+        ;;
       --dynamic-space-size=)
         $optarg_ok && SBCL_DYNAMIC_SPACE_SIZE=$optarg
 	;;
@@ -247,6 +253,12 @@ echo "DEVNULL=\"$DEVNULL\"; export DEVNULL" > output/build-config
 echo "GNUMAKE=\"$GNUMAKE\"; export GNUMAKE" >> output/build-config
 echo "SBCL_XC_HOST=\"$SBCL_XC_HOST\"; export SBCL_XC_HOST" >> output/build-config
 echo "legacy_xc_spec=\"$legacy_xc_spec\"; export legacy_xc_spec" >> output/build-config
+if [ -n "$SBCL_HOST_LOCATION" ]; then
+    echo "SBCL_HOST_LOCATION=\"$SBCL_HOST_LOCATION\"; export SBCL_HOST_LOCATION" >> output/build-config
+fi
+if [ -n "$SBCL_TARGET_LOCATION" ]; then
+    echo "SBCL_TARGET_LOCATION=\"$SBCL_TARGET_LOCATION\"; export SBCL_TARGET_LOCATION" >> output/build-config
+fi
 
 # And now, sorting out the per-target dependencies...
 
@@ -265,6 +277,9 @@ case `uname` in
             FreeBSD)
                 sbcl_os="freebsd"
                 ;;
+            GNU/kFreeBSD)
+                sbcl_os="gnu-kfreebsd"
+                ;;
             OpenBSD)
                 sbcl_os="openbsd"
                 ;;
@@ -277,6 +292,9 @@ case `uname` in
                 ;;
         esac
         ;;
+    DragonFly)
+	sbcl_os="dragonfly"
+	;;
     Darwin)
         sbcl_os="darwin"
         ;;
@@ -347,9 +365,11 @@ case `uname -m` in
     *ppc) guessed_sbcl_arch=ppc ;;
     ppc64) guessed_sbcl_arch=ppc ;;
     Power*Macintosh) guessed_sbcl_arch=ppc ;;
+    ibmnws) guessed_sbcl_arch=ppc ;;
     parisc) guessed_sbcl_arch=hppa ;;
     9000/800) guessed_sbcl_arch=hppa ;;
     mips*) guessed_sbcl_arch=mips ;;
+    arm*) guessed_sbcl_arch=arm ;;
     *)
         # If we're not building on a supported target architecture, we
         # we have no guess, but it's not an error yet, since maybe
@@ -385,7 +405,8 @@ then
     # If --fancy, enable threads on platforms where they can be built.
     case $sbcl_arch in
         x86|x86-64|ppc)
-	    if [ "$sbcl_os" = "sunos" ] && [ "$sbcl_arch" = "x86-64" ]
+	    if ([ "$sbcl_os" = "sunos" ] && [ "$sbcl_arch" = "x86-64" ]) || \
+                [ "$sbcl_os" = "dragonfly" ]
 	    then
 		echo "No threads on this platform."
 	    else
@@ -404,7 +425,7 @@ echo //initializing $ltf
 echo ';;;; This is a machine-generated file.' > $ltf
 echo ';;;; Please do not edit it by hand.' >> $ltf
 echo ';;;; See make-config.sh.' >> $ltf
-echo "((lambda (features) (set-difference features (list$WITHOUT_FEATURES)))" >> $ltf
+echo "(lambda (features) (union (set-difference features (list$WITHOUT_FEATURES))" >> $ltf
 printf " (union (list$WITH_FEATURES) (list " >> $ltf
 
 printf ":%s" "$sbcl_arch" >> $ltf
@@ -439,7 +460,7 @@ case "$sbcl_os" in
         # If you add other platforms here, don't forget to edit
         # src/runtime/Config.foo-linux too.
         case "$sbcl_arch" in
-	    mips)
+	    mips | arm)
 		printf ' :largefile' >> $ltf
 		;;
             x86 | x86-64)
@@ -450,11 +471,8 @@ case "$sbcl_os" in
 		;;
         esac
 
-        if [ $sbcl_arch = "x86-64" ]; then
-            link_or_copy Config.x86_64-linux Config
-        else
-            link_or_copy Config.$sbcl_arch-linux Config
-        fi
+
+        link_or_copy Config.$sbcl_arch-linux Config
         link_or_copy $sbcl_arch-linux-os.h target-arch-os.h
         link_or_copy linux-os.h target-os.h
         ;;
@@ -480,14 +498,18 @@ case "$sbcl_os" in
         link_or_copy $sbcl_arch-bsd-os.h target-arch-os.h
         link_or_copy bsd-os.h target-os.h
         case "$sbcl_os" in
-            freebsd)
+            *freebsd)
                 printf ' :elf' >> $ltf
                 printf ' :freebsd' >> $ltf
                 printf ' :gcc-tls' >> $ltf
+                if [ $sbcl_os = "gnu-kfreebsd" ]; then
+                    printf ' :gnu-kfreebsd' >> $ltf
+                fi
+
                 if [ $sbcl_arch = "x86" ]; then
                     printf ' :restore-fs-segment-register-from-tls' >> $ltf
                 fi
-                link_or_copy Config.$sbcl_arch-freebsd Config
+                link_or_copy Config.$sbcl_arch-$sbcl_os Config
                 ;;
             openbsd)
                 printf ' :elf' >> $ltf
@@ -504,6 +526,19 @@ case "$sbcl_os" in
                 exit 1
                 ;;
         esac
+        ;;
+    dragonfly)
+        printf ' :unix' >> $ltf
+        printf ' :bsd' >> $ltf
+        printf ' :elf' >> $ltf
+        printf ' :dragonfly' >> $ltf
+        printf ' :sb-qshow' >> $ltf
+        if [ $sbcl_arch = "x86" ]; then
+            printf ' :restore-fs-segment-register-from-tls' >> $ltf
+        fi
+        link_or_copy $sbcl_arch-bsd-os.h target-arch-os.h
+        link_or_copy bsd-os.h target-os.h
+        link_or_copy Config.$sbcl_arch-dragonfly Config
         ;;
     darwin)
         printf ' :unix' >> $ltf
@@ -588,9 +623,9 @@ if [ "$sbcl_arch" = "x86" ]; then
     printf ' :stack-allocatable-closures :stack-allocatable-vectors' >> $ltf
     printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
     printf ' :alien-callbacks :cycle-counter :inline-constants ' >> $ltf
-    printf ' :memory-barrier-vops :multiply-high-vops :ash-right-vops' >> $ltf
+    printf ' :memory-barrier-vops :multiply-high-vops :ash-right-vops :symbol-info-vops' >> $ltf
     case "$sbcl_os" in
-    linux | freebsd | netbsd | openbsd | sunos | darwin | win32)
+    linux | freebsd | gnu-kfreebsd | netbsd | openbsd | sunos | darwin | win32 | dragonfly)
         printf ' :linkage-table' >> $ltf
     esac
     if [ "$sbcl_os" = "win32" ]; then
@@ -609,7 +644,7 @@ elif [ "$sbcl_arch" = "x86-64" ]; then
     printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
     printf ' :alien-callbacks :cycle-counter :complex-float-vops' >> $ltf
     printf ' :float-eql-vops :inline-constants :memory-barrier-vops' >> $ltf
-    printf ' :multiply-high-vops :sb-simd-pack :ash-right-vops' >> $ltf
+    printf ' :multiply-high-vops :sb-simd-pack :ash-right-vops :symbol-info-vops' >> $ltf
 elif [ "$sbcl_arch" = "mips" ]; then
     printf ' :cheneygc :linkage-table' >> $ltf
     printf ' :stack-allocatable-closures :stack-allocatable-vectors' >> $ltf
@@ -619,7 +654,7 @@ elif [ "$sbcl_arch" = "ppc" ]; then
     printf ' :gencgc :stack-allocatable-closures :stack-allocatable-vectors' >> $ltf
     printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
     printf ' :linkage-table :raw-instance-init-vops :memory-barrier-vops' >> $ltf
-    printf ' :compare-and-swap-vops :multiply-high-vops' >> $ltf
+    printf ' :compare-and-swap-vops :multiply-high-vops :alien-callbacks' >> $ltf
     if [ "$sbcl_os" = "linux" ]; then
         # Use a C program to detect which kind of glibc we're building on,
         # to bandage across the break in source compatibility between
@@ -630,7 +665,7 @@ elif [ "$sbcl_arch" = "ppc" ]; then
 	tools-for-build/where-is-mcontext > src/runtime/ppc-linux-mcontext.h || (echo "error running where-is-mcontext"; exit 1)
     elif [ "$sbcl_os" = "darwin" ]; then
         # We provide a dlopen shim, so a little lie won't hurt
-	printf " :os-provides-dlopen :alien-callbacks" >> $ltf
+	printf ' :os-provides-dlopen' >> $ltf
         # The default stack ulimit under darwin is too small to run PURIFY.
         # Best we can do is complain and exit at this stage
 	if [ "`ulimit -s`" = "512" ]; then
@@ -667,6 +702,15 @@ elif [ "$sbcl_arch" = "hppa" ]; then
     printf ' :cheneygc' >> $ltf
     printf ' :stack-allocatable-vectors :stack-allocatable-fixed-objects' >> $ltf
     printf ' :stack-allocatable-lists' >> $ltf
+elif [ "$sbcl_arch" = "arm" ]; then
+    printf ' :gencgc :linkage-table :alien-callbacks' >> $ltf
+    # As opposed to soft-float or FPA, we support VFP only (and
+    # possibly VFPv2 and higher only), but we'll leave the obvious
+    # hooks in for someone to add the support later.
+    printf ' :arm-vfp :arm-vfpv2' >> $ltf
+    printf ' :ash-right-vops :multiply-high-vops :symbol-info-vops' >> $ltf
+    printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
+    printf ' :stack-allocatable-vectors :stack-allocatable-closures' >> $ltf
 else
     # Nothing need be done in this case, but sh syntax wants a placeholder.
     echo > /dev/null
@@ -683,7 +727,7 @@ export sbcl_os sbcl_arch
 sh tools-for-build/grovel-features.sh >> $ltf
 
 echo //finishing $ltf
-echo ')))' >> $ltf
+echo '))))' >> $ltf
 
 # FIXME: The version system should probably be redone along these lines:
 #
@@ -700,3 +744,9 @@ if [ `uname` = "SunOS" ] ; then
   PATH=/usr/xpg4/bin:$PATH
 fi
 echo '"'`hostname`-`id -un`-`date +%Y-%m-%d-%H-%M-%S`'"' > output/build-id.tmp
+
+if [ -n "$SBCL_HOST_LOCATION" ]; then
+    echo //setting up host configuration
+    rsync --delete-after -a output/ "$SBCL_HOST_LOCATION/output/"
+    rsync -a local-target-features.lisp-expr version.lisp-expr "$SBCL_HOST_LOCATION/"
+fi

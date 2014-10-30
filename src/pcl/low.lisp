@@ -53,45 +53,21 @@
 
 ;;; Lambda which executes its body (or not) randomly. Used to drop
 ;;; random cache entries.
+;;; This formerly punted with slightly greater than 50% probability,
+;;; and there was a periodicity to the nonrandomess.
+;;; If that was intentional, it should have been commented to that effect.
 (defmacro randomly-punting-lambda (lambda-list &body body)
   (with-unique-names (drops drop-pos)
-    `(let ((,drops (random-fixnum))
-           (,drop-pos sb-vm:n-fixnum-bits))
+    `(let ((,drops (random-fixnum)) ; means a POSITIVE fixnum
+           (,drop-pos sb-vm:n-positive-fixnum-bits))
        (declare (fixnum ,drops)
-                (type (integer 0 #.sb-vm:n-fixnum-bits) ,drop-pos))
+                (type (mod #.sb-vm:n-fixnum-bits) ,drop-pos))
        (lambda ,lambda-list
          (when (logbitp (the unsigned-byte (decf ,drop-pos)) ,drops)
            (locally ,@body))
          (when (zerop ,drop-pos)
            (setf ,drops (random-fixnum)
-                 ,drop-pos sb-vm:n-fixnum-bits))))))
-
-;;;; early definition of WRAPPER
-;;;;
-;;;; Most WRAPPER stuff is defined later, but the DEFSTRUCT itself
-;;;; is here early so that things like (TYPEP .. 'WRAPPER) can be
-;;;; compiled efficiently.
-
-;;; Note that for SBCL, as for CMU CL, the WRAPPER of a built-in or
-;;; structure class will be some other kind of SB-KERNEL:LAYOUT, but
-;;; this shouldn't matter, since the only two slots that WRAPPER adds
-;;; are meaningless in those cases.
-(defstruct (wrapper
-            (:include layout
-                      ;; KLUDGE: In CMU CL, the initialization default
-                      ;; for LAYOUT-INVALID was NIL. In SBCL, that has
-                      ;; changed to :UNINITIALIZED, but PCL code might
-                      ;; still expect NIL for the initialization
-                      ;; default of WRAPPER-INVALID. Instead of trying
-                      ;; to find out, I just overrode the LAYOUT
-                      ;; default here. -- WHN 19991204
-                      (invalid nil)
-                      ;; This allows quick testing of wrapperness.
-                      (for-std-class-p t))
-            (:constructor make-wrapper-internal)
-            (:copier nil))
-  (slots () :type list))
-#-sb-fluid (declaim (sb-ext:freeze-type wrapper))
+                 ,drop-pos sb-vm:n-positive-fixnum-bits))))))
 
 ;;;; PCL's view of funcallable instances
 
@@ -168,6 +144,7 @@
     (let ((class (class-of instance)))
       (when (or (eq class (find-class 'standard-class nil))
                 (eq class (find-class 'funcallable-standard-class nil))
+                (eq class (find-class 'system-class nil))
                 (eq class (find-class 'built-in-class nil)))
         (princ (early-class-name instance) stream)))))
 
@@ -182,7 +159,8 @@
 ;;; otherwise dealing with STANDARD-INSTANCE-ACCESS becomes harder
 ;;; -- and slower -- than it needs to be.
 (defconstant +slot-unbound+ '..slot-unbound..
-  "SBCL specific extentions to MOP: if this value is read from an
+  #+sb-doc
+  "SBCL specific extensions to MOP: if this value is read from an
 instance using STANDARD-INSTANCE-ACCESS, the slot is unbound.
 Similarly, an :INSTANCE allocated slot can be made unbound by
 assigning this to it using (SETF STANDARD-INSTANCE-ACCESS).
@@ -190,9 +168,6 @@ assigning this to it using (SETF STANDARD-INSTANCE-ACCESS).
 Value of +SLOT-UNBOUND+ is unspecified, and should not be relied to be
 of any particular type, but it is guaranteed to be suitable for EQ
 comparison.")
-
-(defmacro %allocate-static-slot-storage--class (no-of-slots)
-  `(make-array ,no-of-slots :initial-element +slot-unbound+))
 
 (defmacro std-instance-class (instance)
   `(wrapper-class* (std-instance-wrapper ,instance)))
@@ -205,6 +180,7 @@ comparison.")
 ;;; In all cases, SET-FUN-NAME must return the new (or same)
 ;;; function. (Unlike other functions to set stuff, it does not return
 ;;; the new value.)
+(declaim (ftype function class-of))
 (defun set-fun-name (fun new-name)
   #+sb-doc
   "Set the name of a compiled function object. Return the function."
@@ -217,7 +193,7 @@ comparison.")
      (setf (sb-eval:interpreted-function-name fun) new-name))
     (funcallable-instance ;; KLUDGE: probably a generic function...
      (cond ((if (eq **boot-state** 'complete)
-                (typep fun 'generic-function)
+                (typep fun 'generic-function) ; FIXME: inefficient forward-ref
                 (eq (class-of fun) *the-class-standard-generic-function*))
             (setf (%funcallable-instance-info fun 2) new-name))
            (t
@@ -239,9 +215,21 @@ comparison.")
      (precompile-dfun-constructors ,system)
      (precompile-ctors)))
 
+;;; Return true of any object which is either a funcallable-instance,
+;;; or an ordinary instance that is not a structure-object.
+;;; This used to be implemented as (LAYOUT-FOR-STD-CLASS-P (LAYOUT-OF x))
+;;; but LAYOUT-OF is more general than need be here. So this bails out
+;;; after the first two clauses of the equivalent COND in LAYOUT-OF
+;;; because nothing else could possibly return T.
+(declaim (inline %pcl-instance-p))
+(defun %pcl-instance-p (x)
+  (layout-for-std-class-p
+   (cond ((%instancep x) (%instance-layout x))
+         ((funcallable-instance-p x) (%funcallable-instance-layout x))
+         (t (return-from %pcl-instance-p nil)))))
+
 ;;; This definition is for interpreted code.
-(defun pcl-instance-p (x)
-  (typep (layout-of x) 'wrapper))
+(defun pcl-instance-p (x) (%pcl-instance-p x))
 
 ;;; CMU CL comment:
 ;;;   We define this as STANDARD-INSTANCE, since we're going to
@@ -293,19 +281,13 @@ comparison.")
   (when (pcl-instance-p instance)
     (get-slots instance)))
 
+;; This macro is used only by %CHANGE-CLASS. Can we just do this there?
+;; [The code in 'fsc.lisp' which looks like it needs it is commented out]
 (defmacro get-wrapper (inst)
-  (once-only ((wrapper `(wrapper-of ,inst)))
+  (once-only ((wrapper `(layout-of ,inst)))
     `(progn
-       (aver (typep ,wrapper 'wrapper))
+       (aver (layout-for-std-class-p ,wrapper))
        ,wrapper)))
-
-;;; FIXME: could be an inline function or ordinary function (like many
-;;; other things around here)
-(defmacro get-instance-wrapper-or-nil (inst)
-  (once-only ((wrapper `(wrapper-of ,inst)))
-    `(if (typep ,wrapper 'wrapper)
-         ,wrapper
-         nil)))
 
 ;;;; support for useful hashing of PCL instances
 

@@ -16,42 +16,42 @@
 ;;; FIXME: Many of these have nontrivial types, e.g. *PRINT-LEVEL*,
 ;;; *PRINT-LENGTH*, and *PRINT-LINES* are (OR NULL UNSIGNED-BYTE).
 
-(defvar *print-readably* nil
+(!defvar *print-readably* nil
   #!+sb-doc
   "If true, all objects will be printed readably. If readable printing
   is impossible, an error will be signalled. This overrides the value of
   *PRINT-ESCAPE*.")
-(defvar *print-escape* t
+(!defvar *print-escape* t
   #!+sb-doc
   "Should we print in a reasonably machine-readable way? (possibly
   overridden by *PRINT-READABLY*)")
-(defvar *print-pretty* nil ; (set later when pretty-printer is initialized)
+(!defvar *print-pretty* nil ; (set later when pretty-printer is initialized)
   #!+sb-doc
   "Should pretty printing be used?")
-(defvar *print-base* 10.
+(!defvar *print-base* 10.
   #!+sb-doc
   "The output base for RATIONALs (including integers).")
-(defvar *print-radix* nil
+(!defvar *print-radix* nil
   #!+sb-doc
   "Should base be verified when printing RATIONALs?")
-(defvar *print-level* nil
+(!defvar *print-level* nil
   #!+sb-doc
   "How many levels should be printed before abbreviating with \"#\"?")
-(defvar *print-length* nil
+(!defvar *print-length* nil
   #!+sb-doc
   "How many elements at any level should be printed before abbreviating
   with \"...\"?")
-(defvar *print-circle* nil
+(!defvar *print-circle* nil
   #!+sb-doc
   "Should we use #n= and #n# notation to preserve uniqueness in general (and
   circularity in particular) when printing?")
-(defvar *print-case* :upcase
+(!defvar *print-case* :upcase
   #!+sb-doc
   "What case should the printer should use default?")
-(defvar *print-array* t
+(!defvar *print-array* t
   #!+sb-doc
   "Should the contents of arrays be printed?")
-(defvar *print-gensym* t
+(!defvar *print-gensym* t
   #!+sb-doc
   "Should #: prefixes be used when printing symbols with null SYMBOL-PACKAGE?")
 (defvar *print-lines* nil
@@ -70,7 +70,7 @@
 #!+sb-doc
 (setf (fdocumentation '*print-pprint-dispatch* 'variable)
       "The pprint-dispatch-table that controls how to pretty-print objects.")
-(defvar *suppress-print-errors* nil
+(!defvar *suppress-print-errors* nil
   #!+sb-doc
   "Suppress printer errors when the condition is of the type designated by this
 variable: an unreadable object representing the error is printed instead.")
@@ -105,6 +105,8 @@ variable: an unreadable object representing the error is printed instead.")
 "
   `(%with-standard-io-syntax (lambda () ,@body)))
 
+;; duplicate defglobal because this file is compiled before "reader"
+(defglobal *standard-readtable* nil)
 (defun %with-standard-io-syntax (function)
   (declare (type function function))
   (let ((*package* (find-package "COMMON-LISP-USER"))
@@ -338,7 +340,7 @@ variable: an unreadable object representing the error is printed instead.")
       o)))
 
 ;;; guts of PRINT-UNREADABLE-OBJECT
-(defun %print-unreadable-object (object stream type identity body)
+(defun %print-unreadable-object (object stream type identity &optional body)
   (declare (type (or null function) body))
   (if *print-readably*
       (print-not-readable-error object stream)
@@ -481,7 +483,14 @@ variable: an unreadable object representing the error is printed instead.")
          (output-symbol object stream)
          (output-list object stream)))
     (instance
-     (cond ((not (and (boundp '*print-object-is-disabled-p*)
+     ;; The first case takes the above idea one step further: If an instance
+     ;; isn't a citizen yet, it has no right to a print-object method.
+     (cond ((sb!kernel::undefined-classoid-p (layout-classoid (layout-of object)))
+            ;; not only is this unreadable, it's unprintable too.
+            (print-unreadable-object (object stream :identity t)
+              (format stream "UNPRINTABLE instance of ~W"
+                      (layout-classoid (layout-of object)))))
+           ((not (and (boundp '*print-object-is-disabled-p*)
                       *print-object-is-disabled-p*))
             (print-object object stream))
            ((typep object 'structure-object)
@@ -576,6 +585,7 @@ variable: an unreadable object representing the error is printed instead.")
 ;;; Output PNAME (a symbol-name or package-name) surrounded with |'s,
 ;;; and with any embedded |'s or \'s escaped.
 (defun output-quoted-symbol-name (pname stream)
+  (declare (string pname))
   (write-char #\| stream)
   (dotimes (index (length pname))
     (let ((char (schar pname index)))
@@ -615,12 +625,9 @@ variable: an unreadable object representing the error is printed instead.")
               (let ((prefix (or (car (rassoc package (package-%local-nicknames current)))
                                 (package-name package))))
                 (output-symbol-name prefix stream))
-              (multiple-value-bind (symbol externalp)
-                  (find-external-symbol name package)
-                (declare (ignore symbol))
-                (if externalp
-                    (write-char #\: stream)
-                    (write-string "::" stream)))))))
+              (if (nth-value 1 (find-external-symbol name package))
+                  (write-char #\: stream)
+                  (write-string "::" stream))))))
         (output-symbol-name name stream))
       (output-symbol-name (symbol-name object) stream nil)))
 
@@ -631,7 +638,10 @@ variable: an unreadable object representing the error is printed instead.")
   (declare (type simple-string name))
   (let ((*readtable* (if *print-readably* *standard-readtable* *readtable*)))
     (setup-printer-state)
-    (if (and maybe-quote (symbol-quotep name))
+    (if (and maybe-quote (or
+                          (and (readtable-normalization *readtable*)
+                               (not (sb!unicode:normalized-p name :nfkc)))
+                          (symbol-quotep name)))
         (output-quoted-symbol-name name stream)
         (funcall *internal-symbol-output-fun* name stream))))
 
@@ -676,6 +686,25 @@ variable: an unreadable object representing the error is printed instead.")
 
 ) ; EVAL-WHEN
 
+;;; For each character, the value of the corresponding element is the
+;;; lowest base in which that character is a digit.
+(declaim (type (simple-array (unsigned-byte 8) (128)) ; FIXME: range?
+               *digit-bases*))
+(defvar *digit-bases*
+  (make-array 128 ; FIXME
+              :element-type '(unsigned-byte 8)))
+
+(defun !printer-cold-init ()
+(setq *digit-bases* (make-array 128 ; FIXME
+                                :element-type '(unsigned-byte 8)
+                                :initial-element 36)
+      *character-attributes* (make-array 160 ; FIXME
+                                         :element-type '(unsigned-byte 16)
+                                         :initial-element 0))
+(dotimes (i 36)
+  (let ((char (digit-char i 36)))
+    (setf (aref *digit-bases* (char-code char)) i)))
+
 (flet ((set-bit (char bit)
          (let ((code (char-code char)))
            (setf (aref *character-attributes* code)
@@ -706,18 +735,7 @@ variable: an unreadable object representing the error is printed instead.")
   (dotimes (i 160) ; FIXME
     (when (zerop (aref *character-attributes* i))
       (setf (aref *character-attributes* i) funny-attribute))))
-
-;;; For each character, the value of the corresponding element is the
-;;; lowest base in which that character is a digit.
-(defvar *digit-bases*
-  (make-array 128 ; FIXME
-              :element-type '(unsigned-byte 8)
-              :initial-element 36))
-(declaim (type (simple-array (unsigned-byte 8) (#.128)) ; FIXME
-               *digit-bases*))
-(dotimes (i 36)
-  (let ((char (digit-char i 36)))
-    (setf (aref *digit-bases* (char-code char)) i)))
+) ; end !COLD-PRINT-INIT
 
 ;;; A FSM-like thingie that determines whether a symbol is a potential
 ;;; number or has evil characters in it.
@@ -1593,7 +1611,7 @@ variable: an unreadable object representing the error is printed instead.")
                                    ;; little unfortunate.)
                                    (load-time-value
                                     #!-long-float
-                                    (sb!kernel:make-double-float 1070810131 1352628735)
+                                    (make-double-float 1070810131 1352628735)
                                     #!+long-float
                                     (error "(log 2 10) not computed")))))))
                  (x (if (minusp ex)
@@ -1736,7 +1754,7 @@ variable: an unreadable object representing the error is printed instead.")
                            (standard-char-p char)))
             (name (char-name char)))
         (write-string "#\\" stream)
-        (if (and name (not graphicp))
+        (if (and name (or (not graphicp) *print-readably*))
             (quote-string name stream)
             (write-char char stream)))
       (write-char char stream)))
@@ -1776,8 +1794,15 @@ variable: an unreadable object representing the error is printed instead.")
 
 (defun output-fdefn (fdefn stream)
   (print-unreadable-object (fdefn stream)
-    (write-string "FDEFINITION object for " stream)
-    (output-object (fdefn-name fdefn) stream)))
+    (write-string "FDEFINITION for " stream)
+    ;; It's somewhat unhelpful to print as <FDEFINITION for (SETF #)>
+    ;; Generalized function names are indivisible.
+    (let ((name (fdefn-name fdefn)))
+      (if (atom name)
+          (output-object name stream)
+          ;; This needn't protect against improper lists.
+          ;; (You'd get crashes in INTERNAL-NAME-P and other places)
+          (format stream "(~{~S~^ ~})" name)))))
 
 #!+sb-simd-pack
 (defun output-simd-pack (pack stream)
@@ -1844,9 +1869,7 @@ variable: an unreadable object representing the error is printed instead.")
   nil)
 
 (defun output-fun (object stream)
-  (let* ((*print-length* 4)  ; in case we have to..
-         (*print-level* 3)  ; ..print an interpreted function definition
-         (name (%fun-name object))
+  (let* ((name (%fun-name object))
          (proper-name-p (and (legal-fun-name-p name) (fboundp name)
                              (eq (fdefinition name) object))))
     (print-unreadable-object (object stream :identity (not proper-name-p))

@@ -42,9 +42,11 @@
 
 (def!constant +char-attr-package-delimiter+ 12)
 (def!constant +char-attr-invalid+ 13)
+;; Meta: there is no such function as READ-UNQUALIFIED-TOKEN. No biggie.
 (def!constant +char-attr-delimiter+ 14) ; (a fake for READ-UNQUALIFIED-TOKEN)
 
 (sb!xc:defstruct (readtable (:conc-name nil)
+                            (:constructor make-readtable ())
                             (:predicate readtablep)
                             ;; ANSI requires a CL:COPY-READTABLE to do
                             ;; a deep copy, so the DEFSTRUCT-generated
@@ -52,7 +54,7 @@
                             (:copier nil))
   #!+sb-doc
   "A READTABLE is a data structure that maps characters into syntax
-   types for the Common Lisp expression reader."
+types for the Common Lisp expression reader."
   ;; The CHARACTER-ATTRIBUTE-TABLE is a vector of BASE-CHAR-CODE-LIMIT
   ;; integers for describing the character type. Conceptually, there
   ;; are 4 distinct "primary" character attributes:
@@ -77,10 +79,8 @@
   ;; implement user-defined read-macros, system read-macros, and the
   ;; number-symbol reader.
   (character-macro-array
-   (make-array base-char-code-limit :initial-element #'undefined-macro-char)
+   (make-array base-char-code-limit :initial-element nil)
    :type (simple-vector #.base-char-code-limit))
   (character-macro-hash-table (make-hash-table) :type hash-table)
-  ;; an alist from dispatch characters to hash-tables akin to
-  ;; CHARACTER-MACRO-HASH-TABLE.
-  (dispatch-tables () :type list)
-  (%readtable-case :upcase :type (member :upcase :downcase :preserve :invert)))
+  (%readtable-case :upcase :type (member :upcase :downcase :preserve :invert))
+  (%readtable-normalization #!+sb-unicode t #!-sb-unicode nil :type boolean))

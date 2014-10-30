@@ -37,41 +37,69 @@
 ;;;     SXHASH function does, again helping to avoid pathologies like
 ;;;     hashing all bit vectors to 1.
 ;;;   * We'd like this to be simple and fast, too.
-;;;
-;;; FIXME: Should this be INLINE?
 (declaim (ftype (sfunction ((and fixnum unsigned-byte)
                             (and fixnum unsigned-byte))
                            (and fixnum unsigned-byte))
                 mix))
 (declaim (inline mix))
 (defun mix (x y)
-  ;; FIXME: We wouldn't need the nasty (SAFETY 0) here if the compiler
-  ;; were smarter about optimizing ASH. (Without the THE FIXNUM below,
-  ;; and the (SAFETY 0) declaration here to get the compiler to trust
-  ;; it, the sbcl-0.5.0m cross-compiler running under Debian
-  ;; cmucl-2.4.17 turns the ASH into a full call, requiring the
-  ;; UNSIGNED-BYTE 32 argument to be coerced to a bignum, requiring
-  ;; consing, and thus generally obliterating performance.)
-  (declare (optimize (speed 3) (safety 0)))
+  (declare (optimize (speed 3)))
   (declare (type (and fixnum unsigned-byte) x y))
   ;; the ideas here:
-  ;;   * Bits diffuse in both directions (shifted left by up to 2 places
-  ;;     in the calculation of XY, and shifted right by up to 5 places
-  ;;     by the ASH).
+  ;;   * Bits diffuse in both directions (shifted arbitrarily left by
+  ;;     the multiplication in the calculation of XY, and shifted
+  ;;     right by up to 5 places by the ASH).
   ;;   * The #'+ and #'LOGXOR operations don't commute with each other,
   ;;     so different bit patterns are mixed together as they shift
   ;;     past each other.
-  ;;   * The arbitrary constant in the #'LOGXOR expression is intended
-  ;;     to help break up any weird anomalies we might otherwise get
-  ;;     when hashing highly regular patterns.
+  ;;   * The arbitrary constant XOR used in the LOGXOR expression is
+  ;;     intended to help break up any weird anomalies we might
+  ;;     otherwise get when hashing highly regular patterns.
   ;; (These are vaguely like the ideas used in many cryptographic
   ;; algorithms, but we're not pushing them hard enough here for them
   ;; to be cryptographically strong.)
-  (let* ((xy (+ (* x 3) y)))
-    (logand most-positive-fixnum
-            (logxor 441516657
-                    xy
-                    (ash xy -5)))))
+  ;;
+  ;; note: 3622009729038463111 is a 62-bit prime such that its low 61
+  ;; bits, low 60 bits and low 29 bits are all also primes, thus
+  ;; giving decent distributions no matter which of the possible
+  ;; values of most-positive-fixnum we have.  It is derived by simple
+  ;; search starting from 2^60*pi.  The multiplication should be
+  ;; efficient no matter what the platform thanks to modular
+  ;; arithmetic.
+  (let* ((mul (logand 3622009729038463111 sb!xc:most-positive-fixnum))
+         (xor (logand 608948948376289905 sb!xc:most-positive-fixnum))
+         (xy (logand (+ (* x mul) y) sb!xc:most-positive-fixnum)))
+    (logand (logxor xor xy (ash xy -5)) sb!xc:most-positive-fixnum)))
+
+;; Return a number that increments by 1 for each word-pair allocation,
+;; barring complications such as exhaustion of the current page.
+;; The result is guaranteed to be a positive fixnum.
+(declaim (inline address-based-counter-val))
+(defun address-based-counter-val ()
+  #!+(and (not sb-thread) cheneygc)
+  (ash (sap-int (dynamic-space-free-pointer)) (- (1+ sb!vm:word-shift)))
+  ;; dynamic-space-free-pointer increments only when a page is full.
+  ;; Using boxed_region directly is finer-grained.
+  #!+(and (not sb-thread) gencgc)
+  (ash (extern-alien "boxed_region" unsigned-long)
+       (- (1+ sb!vm:word-shift)))
+  ;; threads imply gencgc. use the per-thread alloc region pointer
+  #!+sb-thread
+  (ash (sap-int (sb!vm::current-thread-offset-sap
+                 sb!vm::thread-alloc-region-slot))
+       (- (1+ sb!vm:word-shift))))
+
+;; Return some bits that are dependent on the next address that will be
+;; allocated, mixed with the previous state (in case addresses get recycled).
+;; This algorithm, used for stuffing a hash-code into instances of CTYPE
+;; subtypes, is simpler than RANDOM, and a test of randomness won't
+;; measure up as well, but for the intended use, it doesn't matter.
+;; CLOS hashes could probably be made to use this.
+(defun quasi-random-address-based-hash (state)
+  (declare (type (simple-array (and fixnum unsigned-byte) (1)) state))
+  ;; Ok with multiple threads - No harm, no foul.
+  (setf (aref state 0) (mix (address-based-counter-val) (aref state 0))))
+
 
 ;;;; hashing strings
 ;;;;
@@ -145,6 +173,11 @@
 (declaim (ftype (sfunction (integer) hash) sxhash-bignum))
 (declaim (ftype (sfunction (t) hash) sxhash-instance))
 
+;; FIXME: a feature of this implementation is (SXHASH "FOO") = (SXHASH 'FOO)
+;;  but that is not a requirement. (in fact it is false of "NIL" and NIL)
+;;  A consequence is that tables of symbols and/or strings, or more
+;;  complex structures such as (FOO "X") and ("FOO" X),
+;;  have more collisions than they should.
 (defun sxhash (x)
   ;; profiling SXHASH is hard, but we might as well try to make it go
   ;; fast, in case it is the bottleneck somewhere.  -- CSR, 2003-03-14
@@ -177,34 +210,43 @@
                ;; answer.  -- CSR, 2004-07-14
                (list
                 (if (null x)
-                    (sxhash x) ; through DEFTRANSFORM
+                    (sxhash x)          ; through DEFTRANSFORM
                     (if (plusp depthoid)
                         (mix (sxhash-recurse (car x) (1- depthoid))
                              (sxhash-recurse (cdr x) (1- depthoid)))
                         261835505)))
                (instance
-                (if (pathnamep x)
-                    ;; Pathnames are EQUAL if all the components are EQUAL, so
-                    ;; we hash all of the components of a pathname together.
-                    (let ((hash (sxhash-recurse (pathname-host x) depthoid)))
-                      (mixf hash (sxhash-recurse (pathname-device x) depthoid))
-                      (mixf hash (sxhash-recurse (pathname-directory x) depthoid))
-                      (mixf hash (sxhash-recurse (pathname-name x) depthoid))
-                      (mixf hash (sxhash-recurse (pathname-type x) depthoid))
-                      ;; Hash :NEWEST the same as NIL because EQUAL for
-                      ;; pathnames assumes that :newest and nil are equal.
-                      (let ((version (%pathname-version x)))
-                        (mixf hash (sxhash-recurse (if (eq version :newest)
-                                                       nil
-                                                       version)
-                                                   depthoid))))
-                    (if (or (typep x 'structure-object) (typep x 'condition))
-                        (logxor 422371266
-                                (sxhash ; through DEFTRANSFORM
-                                 (classoid-name
-                                  (layout-classoid (%instance-layout x)))))
-                        (sxhash-instance x))))
-               (symbol (sxhash x)) ; through DEFTRANSFORM
+                (typecase x
+                  (pathname
+                   ;; Pathnames are EQUAL if all the components are EQUAL, so
+                   ;; we hash all of the components of a pathname together.
+                   (let ((hash (sxhash-recurse (pathname-host x) depthoid)))
+                     (mixf hash (sxhash-recurse (pathname-device x) depthoid))
+                     (mixf hash (sxhash-recurse (pathname-directory x) depthoid))
+                     (mixf hash (sxhash-recurse (pathname-name x) depthoid))
+                     (mixf hash (sxhash-recurse (pathname-type x) depthoid))
+                     ;; Hash :NEWEST the same as NIL because EQUAL for
+                     ;; pathnames assumes that :newest and nil are equal.
+                     (let ((version (%pathname-version x)))
+                       (mixf hash (sxhash-recurse (if (eq version :newest)
+                                                      nil
+                                                      version)
+                                                  depthoid)))))
+                  (layout
+                   ;; LAYOUTs have an easily-accesible hash value: we
+                   ;; might as well use it.  It's not actually uniform
+                   ;; over the space of hash values (it excludes 0 and
+                   ;; some of the larger numbers) but it's better than
+                   ;; simply returning the same value for all LAYOUT
+                   ;; objects, as the next branch would do.
+                   (layout-clos-hash x))
+                  ((or structure-object condition)
+                   (logxor 422371266
+                           (sxhash      ; through DEFTRANSFORM
+                            (classoid-name
+                             (layout-classoid (%instance-layout x))))))
+                  (t (sxhash-instance x))))
+               (symbol (sxhash x))      ; through DEFTRANSFORM
                (array
                 (typecase x
                   (simple-string (sxhash x)) ; through DEFTRANSFORM

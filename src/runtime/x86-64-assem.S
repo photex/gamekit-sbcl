@@ -25,7 +25,7 @@
 #include "genesis/thread.h"
 	
 /* Minimize conditionalization for different OS naming schemes. */
-#if defined __linux__  || defined __FreeBSD__ || defined __OpenBSD__ || defined __NetBSD__ || defined __sun || defined _WIN64
+#if defined __linux__  || defined LISP_FEATURE_FREEBSD || defined __OpenBSD__ || defined __NetBSD__ || defined __sun || defined _WIN64 || defined __DragonFly__
 #define GNAME(var) var
 #else
 #define GNAME(var) _##var
@@ -33,7 +33,7 @@
 
 /* Get the right type of alignment. Linux, FreeBSD and OpenBSD
  * want alignment in bytes. */
-#if defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined __NetBSD__ || defined(__sun) || defined _WIN64
+#if defined(__linux__) || defined(LISP_FEATURE_FREEBSD) || defined(__OpenBSD__) || defined __NetBSD__ || defined(__sun) || defined _WIN64 || defined(__DragonFly__)
 #define align_4byte	4
 #define align_8byte	8
 #define align_16byte	16
@@ -82,10 +82,8 @@
 #if defined(LISP_FEATURE_DARWIN)
 /* global symbol x86-64 sym(%rip) hack:*/
 #define GSYM(name) name(%rip)
-#define END()
 #else
 #define GSYM(name) $name
-#define END() .end
 #endif
 
         
@@ -214,17 +212,20 @@ Lstack:
 	xor	%rdx,%rdx	# clear any descriptor registers 
 	xor	%rdi,%rdi	# that we can't be sure we'll 
 	xor	%rsi,%rsi	# initialise properly.  XX do r8-r15 too?
-	shl	$(N_FIXNUM_TAG_BITS),%rcx	# (fixnumize num-args)
 	cmp	$0,%rcx
+        # It's tempting to think 'cmov' for these assignments, but don't:
+        # cmov does a memory cycle whether or not it moves, succumbing to
+        # a classic buffer overrun bug if argv[] is "badly" placed.
 	je	Ldone
 	mov	0(%rbx),%rdx	# arg0
-	cmp	$8,%rcx
+	cmp	$1,%rcx
 	je	Ldone
 	mov	8(%rbx),%rdi	# arg1
-	cmp	$16,%rcx
+	cmp	$2,%rcx
 	je	Ldone
 	mov	16(%rbx),%rsi	# arg2
 Ldone:	
+	shl	$(N_FIXNUM_TAG_BITS),%rcx	# (fixnumize num-args)
 	/* Registers rax, rcx, rdx, rdi, and rsi are now live. */
 	xor	%rbx,%rbx	# available
 
@@ -301,6 +302,24 @@ GNAME(undefined_tramp):
 	ret
 	SIZE(GNAME(undefined_tramp))
 
+	.text
+	.align	align_16byte,0x90
+	.globl  GNAME(undefined_alien_function)
+	TYPE(GNAME(undefined_alien_function))
+GNAME(undefined_alien_function):
+	pop	8(%rbp)         # Save return PC for backtrace.
+	TRAP
+	.byte	trap_Error
+        .byte   4
+        .byte   UNDEFINED_ALIEN_FUN_ERROR
+        /* Encode RBX
+           FIXME: make independt of the encoding changes. */
+        .byte   0xFE 
+        .byte   0x9F
+        .byte   0x01
+	ret
+	SIZE(GNAME(undefined_alien_function))
+
 /* KLUDGE: FIND-ESCAPED-FRAME (SYS:SRC;CODE;DEBUG-INT.LISP) needs
  * to know the name of the function immediately following the
  * undefined-function trampoline. */
@@ -335,6 +354,8 @@ GNAME(alloc_tramp):
 	and	$-32,%rsp
 	sub	$16*16,%rsp
 	map_all_xmm(stkxmmsave)
+	# Doing rax twice is to maintain 16-byte stack alignment.
+	push    %rax
 	push	%rax
 	push	%rcx
 	push	%rdx
@@ -344,11 +365,10 @@ GNAME(alloc_tramp):
 	push	%r9
 	push	%r10
 	push	%r11
-	push	%r11
+	# r12 through r15 are callee-saved
 	mov	16(%rbp),%rdi
 	call	GNAME(alloc)
 	mov	%rax,16(%rbp)
-	pop	%r11
 	pop	%r11
 	pop	%r10
 	pop	%r9
@@ -358,6 +378,7 @@ GNAME(alloc_tramp):
 	pop	%rdx
 	pop	%rcx
 	pop	%rax
+	pop	%rax # corresponds to "extra" push
 	map_all_xmm(stkxmmload)
 	mov	%rbp,%rsp
 	pop	%rbp
@@ -474,57 +495,6 @@ GNAME(post_signal_tramp):
 	ret
 	SIZE(GNAME(post_signal_tramp))
 
-	.text
-	.align	align_16byte,0x90
-	.globl  GNAME(fast_bzero)
-	TYPE(GNAME(fast_bzero))
-
-	#ifdef LISP_FEATURE_WIN32
-	#define xmmreg xmm7
-	#define redsave(reg,off) movups reg,-off(%rsp)
-	#define redrestore(reg,off) movups -off(%rsp),reg
-	#else
-	#define xmmreg xmm0
-	#define redsave(reg,off)
-	#define redrestore(reg,off)
-	#endif
-
-GNAME(fast_bzero):
-        /* A fast routine for zero-filling blocks of memory that are
-         * guaranteed to start and end at a 4096-byte aligned address.
-         */
-        shr $6, %rsi              /* Amount of 64-byte blocks to copy */
-        jz Lend                   /* If none, stop */
-        mov %rsi, %rcx            /* Save start address */
-	redsave(%xmmreg,16)
-        xorps  %xmmreg, %xmmreg       /* Zero the XMM register */
-        jmp Lloop
-        .align align_16byte
-Lloop:
-
-        /* Copy the 16 zeroes from xmm7 to memory, 4 times. MOVNTDQ is the
-         * non-caching double-quadword moving variant, i.e. the memory areas
-         * we're touching are not fetched into the L1 cache, since we're just
-         * going to overwrite the memory soon anyway.
-         */
-        movntdq %xmmreg, 0(%rdi)
-        movntdq %xmmreg, 16(%rdi)
-        movntdq %xmmreg, 32(%rdi)
-        movntdq %xmmreg, 48(%rdi)
-
-        add $64, %rdi  /* Advance pointer */
-        dec %rsi       /* Decrement 64-byte block count */
-        jnz Lloop
-        mfence         /* Ensure that the writes are globally visible, since
-                        * MOVNTDQ is weakly ordered */
-	redrestore(%xmmreg,16)
-        prefetcht0 0(%rcx)      /* Prefetch the start of the block into cache,
-                                 * since it's likely to be used immediately. */
-Lend:        
-	ret
-	SIZE(GNAME(fast_bzero))
-
-
 /* When LISP_FEATURE_C_STACK_IS_CONTROL_STACK, we cannot safely scrub
  * the control stack from C, largely due to not knowing where the
  * active stack frame ends.  On such platforms, we reimplement the
@@ -597,5 +567,3 @@ ascs_check_loop:
 ascs_finished:
 	ret
 	SIZE(GNAME(arch_scrub_control_stack))
-
-        END()

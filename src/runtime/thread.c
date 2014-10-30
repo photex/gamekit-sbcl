@@ -58,8 +58,7 @@
 #define LOCK_CREATE_THREAD
 #endif
 
-#ifdef LISP_FEATURE_FREEBSD
-#define CREATE_CLEANUP_THREAD
+#if defined(LISP_FEATURE_FREEBSD) || defined(LISP_FEATURE_DRAGONFLY)
 #define LOCK_CREATE_THREAD
 #endif
 
@@ -628,29 +627,6 @@ create_thread_struct(lispobj initial_function) {
 #ifdef LISP_FEATURE_SB_THREAD
     for(i = 0; i < (dynamic_values_bytes / sizeof(lispobj)); i++)
         per_thread->dynamic_values[i] = NO_TLS_VALUE_MARKER_WIDETAG;
-    if (all_threads == 0) {
-        if(SymbolValue(FREE_TLS_INDEX,0)==UNBOUND_MARKER_WIDETAG) {
-            SetSymbolValue(FREE_TLS_INDEX,tls_index_start << WORD_SHIFT,0);
-            SetSymbolValue(TLS_INDEX_LOCK,make_fixnum(0),0);
-        }
-#define STATIC_TLS_INIT(sym,field) \
-  ((struct symbol *)(sym-OTHER_POINTER_LOWTAG))->tls_index= \
-  (THREAD_SLOT_OFFSET_WORDS(field) << WORD_SHIFT)
-
-        STATIC_TLS_INIT(BINDING_STACK_START,binding_stack_start);
-#ifdef BINDING_STACK_POINTER
-        STATIC_TLS_INIT(BINDING_STACK_POINTER,binding_stack_pointer);
-#endif
-        STATIC_TLS_INIT(CONTROL_STACK_START,control_stack_start);
-        STATIC_TLS_INIT(CONTROL_STACK_END,control_stack_end);
-#ifdef ALIEN_STACK
-        STATIC_TLS_INIT(ALIEN_STACK,alien_stack_pointer);
-#endif
-#if defined(LISP_FEATURE_X86) || defined (LISP_FEATURE_X86_64)
-        STATIC_TLS_INIT(PSEUDO_ATOMIC_BITS,pseudo_atomic_bits);
-#endif
-#undef STATIC_TLS_INIT
-    }
 #endif
 
     th=&per_thread->thread;
@@ -732,8 +708,12 @@ create_thread_struct(lispobj initial_function) {
     SetSymbolValue(CONTROL_STACK_START,(lispobj)th->control_stack_start,th);
     SetSymbolValue(CONTROL_STACK_END,(lispobj)th->control_stack_end,th);
 #if defined(LISP_FEATURE_X86) || defined (LISP_FEATURE_X86_64)
-    SetSymbolValue(ALIEN_STACK,(lispobj)th->alien_stack_pointer,th);
+    SetSymbolValue(ALIEN_STACK_POINTER,(lispobj)th->alien_stack_pointer,th);
     SetSymbolValue(PSEUDO_ATOMIC_BITS,(lispobj)th->pseudo_atomic_bits,th);
+#endif
+#ifdef PSEUDO_ATOMIC_INTERRUPTED
+    SetSymbolValue(PSEUDO_ATOMIC_ATOMIC,NIL,th);
+    SetSymbolValue(PSEUDO_ATOMIC_INTERRUPTED,NIL,th);
 #endif
 #endif
     bind_variable(CURRENT_CATCH_BLOCK,make_fixnum(0),th);

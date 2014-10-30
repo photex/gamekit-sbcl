@@ -22,52 +22,55 @@
 (make-person :name "James") ; not an error, 007 not used
 
 #+#.(cl:if (cl:eq sb-ext:*evaluator-mode* :compile) '(and) '(or))
-(assert (raises-error? (make-person) type-error))
+(assert-error (make-person) type-error)
 #+#.(cl:if (cl:eq sb-ext:*evaluator-mode* :compile) '(and) '(or))
-(assert (raises-error? (setf (person-name (make-person :name "Q")) 1)
-                       type-error))
+(assert-error (setf (person-name (make-person :name "Q")) 1)
+              type-error)
 
 ;;; An &AUX variable in a boa-constructor without a default value
 ;;; means "do not initialize slot" and does not cause type error
 (declaim (notinline opaque-identity))
 (defun opaque-identity (x) x)
 
-(defstruct (boa-saux (:constructor make-boa-saux (&aux a (b 3) (c))))
+(with-test (:name :defstruct-boa-typecheck)
+  (defstruct (boa-saux (:constructor make-boa-saux (&aux a (b 3) (c))))
     (a #\! :type (integer 1 2))
     (b #\? :type (integer 3 4))
     (c #\# :type (integer 5 6)))
-(let ((s (make-boa-saux)))
-  (locally (declare (optimize (safety 3))
-                    (inline boa-saux-a))
-    (assert (raises-error? (opaque-identity (boa-saux-a s)) type-error)))
-  (setf (boa-saux-a s) 1)
-  (setf (boa-saux-c s) 5)
-  (assert (eql (boa-saux-a s) 1))
-  (assert (eql (boa-saux-b s) 3))
-  (assert (eql (boa-saux-c s) 5)))
+  (let ((s (make-boa-saux)))
+    (locally (declare (optimize (safety 3))
+                      (inline boa-saux-a))
+      (assert-error (opaque-identity (boa-saux-a s)) type-error))
+    (setf (boa-saux-a s) 1)
+    (setf (boa-saux-c s) 5)
+    (assert (eql (boa-saux-a s) 1))
+    (assert (eql (boa-saux-b s) 3))
+    (assert (eql (boa-saux-c s) 5))))
                                         ; these two checks should be
                                         ; kept separated
 
 #+#.(cl:if (cl:eq sb-ext:*evaluator-mode* :compile) '(and) '(or))
-(let ((s (make-boa-saux)))
-  (locally (declare (optimize (safety 0))
-                    (inline boa-saux-a))
-    (assert (eql (opaque-identity (boa-saux-a s)) 0)))
-  (setf (boa-saux-a s) 1)
-  (setf (boa-saux-c s) 5)
-  (assert (eql (boa-saux-a s) 1))
-  (assert (eql (boa-saux-b s) 3))
-  (assert (eql (boa-saux-c s) 5)))
+(with-test (:name :defstruct-boa-no-error)
+ (let ((s (make-boa-saux)))
+   (locally (declare (optimize (safety 0))
+                     (inline boa-saux-a))
+     (assert (eql (opaque-identity (boa-saux-a s)) 0)))
+   (setf (boa-saux-a s) 1)
+   (setf (boa-saux-c s) 5)
+   (assert (eql (boa-saux-a s) 1))
+   (assert (eql (boa-saux-b s) 3))
+   (assert (eql (boa-saux-c s) 5))))
 
-(let ((s (make-boa-saux)))
-  (locally (declare (optimize (safety 3))
-                    (notinline boa-saux-a))
-    (assert (raises-error? (opaque-identity (boa-saux-a s)) type-error)))
-  (setf (boa-saux-a s) 1)
-  (setf (boa-saux-c s) 5)
-  (assert (eql (boa-saux-a s) 1))
-  (assert (eql (boa-saux-b s) 3))
-  (assert (eql (boa-saux-c s) 5)))
+(with-test (:name :defstruct-boa-typecheck.2)
+  (let ((s (make-boa-saux)))
+    (locally (declare (optimize (safety 3))
+                      (notinline boa-saux-a))
+      (assert-error (opaque-identity (boa-saux-a s)) type-error))
+    (setf (boa-saux-a s) 1)
+    (setf (boa-saux-c s) 5)
+    (assert (eql (boa-saux-a s) 1))
+    (assert (eql (boa-saux-b s) 3))
+    (assert (eql (boa-saux-c s) 5))))
 
 ;;; basic inheritance
 (defstruct (astronaut (:include person)
@@ -551,7 +554,7 @@
 (assert (= (bug127--foo (make-bug127-e :foo 3)) 3))
 (defstruct (bug127-f (:conc-name bug127--)) foo)
 (assert (= (bug127--foo (make-bug127-f :foo 3)) 3))
-(assert (raises-error? (bug127--foo (make-bug127-e :foo 3)) type-error))
+(assert-error (bug127--foo (make-bug127-e :foo 3)) type-error)
 
 ;;; FIXME: should probably do the same tests on DEFSTRUCT :TYPE
 
@@ -566,8 +569,8 @@
   defstruct-test-scratch::conc-name-nil-slot)
 (assert (= (defstruct-test-scratch::conc-name-nil-slot
             (make-conc-name-nil :conc-name-nil-slot 1)) 1))
-(assert (raises-error? (conc-name-nil-slot (make-conc-name-nil))
-                       undefined-function))
+(assert-error (conc-name-nil-slot (make-conc-name-nil))
+              undefined-function)
 
 ;;; The named/typed predicates were a little fragile, in that they
 ;;; could throw errors on innocuous input:
@@ -600,8 +603,8 @@
             (defstruct (,base-name ,@type-options)
               x y)
             (defstruct (,up-name (:include ,base-name
-                                           (x "x" :type simple-string)
-                                           (y "y" :type simple-string))
+                                  (x "x" :type simple-string)
+                                  (y "y" :type simple-string))
                                  ,@type-options))
             (let ((ob (,(intern (format nil "MAKE-~A" up-name)))))
               (setf (,accessor ob) 0)
@@ -610,8 +613,8 @@
                                  (declare (optimize (safety 3))
                                           (,decl ,',up-accessor))
                                  (,',up-accessor s))
-                    do (assert (raises-error? (funcall (compile nil fun) ob)
-                                              type-error))))))))
+                    do (assert-error (funcall (compile nil fun) ob)
+                                     type-error)))))))
   (test nil)
   (test list)
   (test vector))
@@ -710,6 +713,12 @@
   c
   (a 0d0 :type double-float))
 
+(defstruct raw-slot-equalp-bug-2
+  (b (complex 1d0) :type (complex double-float))
+  (x (complex 1d0) :type (complex double-float))
+  c
+  (a 1s0 :type single-float))
+
 (with-test (:name :raw-slot-equalp)
   (assert (equalp (make-raw-slot-equalp-bug :a 1d0 :b 2s0)
                   (make-raw-slot-equalp-bug :a 1d0 :b 2s0)))
@@ -718,7 +727,15 @@
   (assert (not (equalp (make-raw-slot-equalp-bug :a 1d0 :b 2s0)
                        (make-raw-slot-equalp-bug :a 1d0 :b 3s0))))
   (assert (not (equalp (make-raw-slot-equalp-bug :a 1d0 :b 2s0)
-                       (make-raw-slot-equalp-bug :a 2d0 :b 2s0)))))
+                       (make-raw-slot-equalp-bug :a 2d0 :b 2s0))))
+  (assert (equalp (make-raw-slot-equalp-bug-2 :b (complex 1d0) :a 2s0)
+                  (make-raw-slot-equalp-bug-2 :b (complex 1d0) :a 2s0)))
+  (assert (equalp (make-raw-slot-equalp-bug-2 :b (complex 1d0) :a 0s0)
+                  (make-raw-slot-equalp-bug-2 :b (complex 1d0) :a -0s0)))
+  (assert (not (equalp (make-raw-slot-equalp-bug-2 :b (complex 1d0) :a 2s0)
+                       (make-raw-slot-equalp-bug-2 :b (complex 1d0) :a 3s0))))
+  (assert (not (equalp (make-raw-slot-equalp-bug-2 :b (complex 1d0) :a 2s0)
+                       (make-raw-slot-equalp-bug-2 :b (complex 2d0) :a 2s0)))))
 
 ;;; Check that all slot types (non-raw and raw) can be initialized with
 ;;; constant arguments.
@@ -809,8 +826,12 @@ redefinition."
 (defun assert-is (predicate instance)
   (assert (funcall predicate instance)))
 
-(defun assert-invalid (predicate instance)
-  (assert (typep (nth-value 1 (ignore-errors (funcall predicate instance)))
+;;; It used to call the predicate function, but out-of-line predicate
+;;; functions now don't signal layout-invalid, just like inlined
+;;; predicates didn't signal it.
+(defun assert-invalid (instance)
+  (declare (notinline typep))
+  (assert (typep (nth-value 1 (ignore-errors (typep instance 'structure-object)))
                  'sb-kernel::layout-invalid)))
 
 ;; Don't try to understand this macro; just look at its expansion.
@@ -866,7 +887,7 @@ redefinition."
 
 ;; Base case: continue (i.e., invalidate instances).
 (with-defstruct-redefinition-test :defstruct/continue
-    (((defstruct ctor pred) :class-name redef-test-2 :slots (a))
+    (((defstruct ctor) :class-name redef-test-2 :slots (a))
      ((defstruct*) :class-name redef-test-2 :slots (a b)))
     ((path1 defstruct)
      (path2 defstruct*))
@@ -874,7 +895,7 @@ redefinition."
   (load path1)
   (let ((instance (funcall ctor)))
     (load path2)
-    (assert-invalid pred instance)))
+    (assert-invalid instance)))
 
 ;; Compiling a file with an incompatible defstruct should emit a
 ;; warning and an error, but the fasl should be loadable.
@@ -903,7 +924,7 @@ redefinition."
 ;; After compiling a file with an incompatible DEFSTRUCT, load the
 ;; fasl and ensure that an old instance has become invalid.
 (with-defstruct-redefinition-test :defstruct/compile-file-continue
-    (((defstruct ctor pred) :class-name redef-test-5 :slots (a))
+    (((defstruct ctor) :class-name redef-test-5 :slots (a))
      ((defstruct*) :class-name redef-test-5 :slots (a b)))
     ((path1 defstruct)
      (path2 defstruct*))
@@ -911,7 +932,7 @@ redefinition."
   (load path1)
   (let ((instance (funcall ctor)))
     (load (compile-file-assert path2))
-    (assert-invalid pred instance)))
+    (assert-invalid instance)))
 
 ;;; Subclasses.
 ;; Ensure that recklessly continuing DT(expected)T to instances of
@@ -934,7 +955,7 @@ redefinition."
 ;; Ensure that continuing invalidates instances of subclasses.
 (with-defstruct-redefinition-test :defstruct/subclass-continue
     (((defstruct) :class-name redef-test-7 :slots (a))
-     ((substruct ctor pred) :class-name redef-test-7-sub
+     ((substruct ctor) :class-name redef-test-7-sub
                             :super-name redef-test-7 :slots (z))
      ((defstruct*) :class-name redef-test-7 :slots (a b)))
     ((path1 defstruct substruct)
@@ -943,7 +964,7 @@ redefinition."
   (load path1)
   (let ((instance (funcall ctor)))
     (load (compile-file-assert path2))
-    (assert-invalid pred instance)))
+    (assert-invalid instance)))
 
 ;; Reclkessly continuing doesn't invalidate instances of subclasses.
 (with-defstruct-redefinition-test :defstruct/subclass-in-other-file-reckless
@@ -967,8 +988,8 @@ redefinition."
 ;; superclass definition leaves the predicates and accessors into the
 ;; subclass in a bad way until the subclass form is evaluated.
 (with-defstruct-redefinition-test :defstruct/subclass-in-other-file-continue
-    (((defstruct ignore pred1) :class-name redef-test-9 :slots (a))
-     ((substruct ctor pred2) :class-name redef-test-9-sub
+    (((defstruct ignore) :class-name redef-test-9 :slots (a))
+     ((substruct ctor) :class-name redef-test-9-sub
                              :super-name redef-test-9 :slots (z))
      ((defstruct*) :class-name redef-test-9 :slots (a b)))
     ((path1 defstruct)
@@ -983,11 +1004,11 @@ redefinition."
     ;; an instance of the superclass or of the subclass, but PRED2's
     ;; predicate will error with "an obsolete structure accessor
     ;; function was called".
-    (assert-invalid pred1 instance)
+    (assert-invalid instance)
     (format t "~&~A~%" (nth-value 1 (ignore-errors (funcall pred2 instance))))
     ;; After loading PATH2, we'll get the desired LAYOUT-INVALID error.
     (load path2)
-    (assert-invalid pred2 instance)))
+    (assert-invalid instance)))
 
 ;; Some other subclass wrinkles have to do with splitting definitions
 ;; accross files and compiling and loading things in a funny order.
@@ -1015,8 +1036,8 @@ redefinition."
     ;; order.
     (load (compile-file-pathname path3))
     (load (compile-file-pathname path2))
-    (assert-invalid pred1 instance)
-    (assert-invalid pred2 instance)))
+    (assert-invalid instance)
+    (assert-invalid instance)))
 
 (with-defstruct-redefinition-test
     :defstruct/subclass-in-other-file-funny-operation-order-continue
@@ -1067,8 +1088,8 @@ redefinition."
       (assert (zerop (type-error-datum e))))))
 
 (with-test (:name :defstruct-copier-typechecks-argument)
-  (assert (not (raises-error? (copy-person (make-astronaut :name "Neil")))))
-  (assert (raises-error? (copy-astronaut (make-person :name "Fred")))))
+  (copy-person (make-astronaut :name "Neil"))
+  (assert-error (copy-astronaut (make-person :name "Fred"))))
 
 (with-test (:name :bug-528807)
   (let ((*evaluator-mode* :compile))
@@ -1077,16 +1098,30 @@ redefinition."
                (x nil :type fixnum))))))
 
 (with-test (:name :bug-520607)
-  (assert
-    (raises-error?
-      (eval '(defstruct (typed-struct (:type list) (:predicate typed-struct-p))
-              (a 42 :type fixnum)))))
+  (assert-error
+   (eval '(defstruct (typed-struct (:type list) (:predicate typed-struct-p))
+           (a 42 :type fixnum))))
   ;; NIL is ok, though.
   (eval '(defstruct (typed-struct (:type list) (:predicate nil))
           (a 42 :type fixnum)))
-  ;; So's empty.
-  (eval '(defstruct (typed-struct2 (:type list) (:predicate))
-          (a 42 :type fixnum))))
+
+  ;; (:predicate) is not ok because absence of the argument does not mean
+  ;; that the value of the option is NIL, as it must be for :typed un-:named.
+  ;; ":predicate
+  ;;  This option takes one argument ...
+  ;;  If the argument is not supplied ... the name of the predicate is made
+  ;;  by concatenating the name of the structure to the string "-P"
+  ;;  If the argument is provided and is nil, no predicate is defined.
+  ;;  ... if :type is supplied and :named is not supplied, then :predicate
+  ;;  must either be unsupplied or have the value nil."
+  ;;
+  ;; The last piece says that the entire option must be unsupplied
+  ;; or else "have the value NIL", and is preceded by a description of the
+  ;; precise manner in which absence of an argument is not the same as nil.
+  ;;
+  (assert-error
+   (eval '(defstruct (typed-struct2 (:type list) (:predicate))
+           (a 42 :type fixnum)))))
 
 (with-test (:name (:boa-supplied-p &optional))
   (handler-bind ((warning #'error))
@@ -1127,7 +1162,7 @@ redefinition."
   (let ((sb-ext:*evaluator-mode* :compile))
     (handler-bind ((warning #'error))
      (eval `(let ()
-              (defstruct destruct-no-warning-not-at-toplevel bar))))))
+              (defstruct defstruct-no-warning-not-at-toplevel bar))))))
 
 (with-test (:name :bug-941102)
   (let ((test `((defstruct bug-941102)
@@ -1139,3 +1174,64 @@ redefinition."
     (multiple-value-bind (warn2 fail2) (ctu:file-compile test)
       (assert (not warn2))
       (assert (not fail2)))))
+
+(with-test (:name (:defstruct :constant-slot-names))
+  (defstruct defstruct-constant-slot-names t)
+  (assert (= 3 (defstruct-constant-slot-names-t
+                (make-defstruct-constant-slot-names :t 3)))))
+
+(with-test (:name (:defstruct :bogus-inherited-slot-specs))
+  (defstruct flopsie a b c)
+  (assert
+   (handler-case (macroexpand '(defstruct (mopsie (:include flopsie (a 3) (z 9))) q))
+     (error (c)
+       (search "slot name Z not present" (write-to-string c :escape nil)))
+     (:no-error (x) x nil)))
+  (assert
+   (handler-case (macroexpand '(defstruct (mopsie (:include flopsie (a 3) (a 'a))) q))
+     (error (c)
+       (search "slot name A specified more than once" (write-to-string c :escape nil)))
+     (:no-error (x) x nil))))
+
+(assert-error
+ (defstruct bogus-aux.1 (:constructor make-bogus-aux.1 (&aux (a b c)))))
+
+(with-test (:name (:defstruct :lexical-default))
+  (let ((x 0)) (defstruct lexical-default (a (incf x)))
+    (assert (= (lexical-default-a (make-lexical-default))
+               x
+               1))))
+
+(with-test (:name (:defstruct :find-defstruct-description))
+  (assert (null (sb-kernel:find-defstruct-description 'not-foo nil)))
+
+  (assert-error (sb-kernel:find-defstruct-description 'not-foo t)))
+
+(defstruct (a-named-struct :named (:type vector)) a b c)
+(defstruct (a-kid-struct :named (:type vector) (:include a-named-struct)) n)
+(with-test (:name (:defstruct :named-typed-struct-subtype-pred))
+  (let ((par (make-a-named-struct :b 6))
+        (kid (make-a-kid-struct :n 5)))
+    (assert (a-named-struct-p par))
+    (assert (a-named-struct-p kid))
+    (assert (not (a-kid-struct-p par)))
+    (assert (a-kid-struct-p kid))))
+
+(with-test (:name :defstruct-parse-strictly)
+  (dolist (form
+           '((defstruct (s :conc-name (:conc-name b1-)) x y)
+             (defstruct (s :copier :copier) x y)
+             (defstruct (s (:include) (:include)) x y)
+             (defstruct (s (:initial-offset 2) (:initial-offset nil)) x y)
+             (defstruct (s (:predicate nil) (:predicate foolp)) x y)
+             (defstruct (s (:type list) (:type vector)) x y)
+             ;; The :NAMED option requires that SYMBOL be a subtype of the
+             ;; *supplied* element type (not the upgraded element-type).
+             ;; Defining a subtype of the structure places another symbol in
+             ;; the vector, and we can't anticipate what that will be.
+             ;; [Though in practice it is somewhere between unlikely and
+             ;; impossible that an implementation would be able to specialize
+             ;; on only one particular symbol and not also allow any symbol]
+             (defstruct (s (:type (vector (or (eql s) integer))) :named) x y)
+             ))
+    (assert-error (macroexpand form))))

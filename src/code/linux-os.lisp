@@ -18,7 +18,7 @@
 (defun software-type ()
   #!+sb-doc
   "Return a string describing the supporting software."
-  (values "Linux"))
+  "Linux")
 
 ;;; FIXME: More duplicated logic here vrt. other oses. Abstract into
 ;;; uname-software-version?
@@ -30,8 +30,8 @@
       (setf *software-version*
             (string-trim '(#\newline)
                          (with-output-to-string (stream)
-                           (sb!ext:run-program "/bin/uname" `("-r")
-                                               :output stream))))))
+                           (run-program "/bin/uname" `("-r")
+                                        :output stream))))))
 
 ;;; Return user time, system time, and number of page faults.
 (defun get-system-info ()
@@ -73,7 +73,8 @@
           ;;   "Intel(R) Pentium(R) M processor 1300MHz"
           ;; which seem comparable to the information in the example
           ;; in the MACHINE-VERSION page of the ANSI spec.
-          #!+(or x86 x86-64) "model name"))
+          #!+(or x86 x86-64) "model name"
+          #!+arm "Processor"))
      (when marker
        (with-open-file (stream "/proc/cpuinfo"
                                ;; Even on Linux it's an option to build

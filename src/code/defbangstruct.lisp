@@ -73,6 +73,25 @@
 
 ;;; the simplest, most vanilla MAKE-LOAD-FORM function for DEF!STRUCT
 ;;; objects
+;;; If, in general, we could reverse-engineer that when a user-written
+;;; MAKE-LOAD-FORM was (MAKE-LOAD-FORM-SAVING-SLOTS ...) in an expected way,
+;;; we could obtain fasl-op-based dumping of user-defined structures.
+;;; At present we've no way to infer when the semantics of the Lisp code
+;;; produced by MAKE-LOAD-FORM-SAVING-SLOTS is effectively the same as
+;;; "dump the layout, dump the slots" (a/k/a :just-dump-it-normally).
+;;; Barring that, there's no choice but to compile code to recreate users'
+;;; constant structures. Otherwise we could nearly eliminate DEF!STRUCT too.
+;;; Consider its objectives:
+;;;  - enable efficient structure dumping
+;;;  - inform the cross-compiler of SBCL-style metadata using only ANSI Lisp
+;;;  - doing it *before* the defining form has been seen during cross-compile
+;;;  - (maybe) even during building of the XC
+;;; Of those goals, all but the last can be achieved by writing an ordinary
+;;; DEFSTRUCT, putting it early enough, and attaching a magic property to
+;;; the symbol naming your DEFSTRUCT. Witness that "backq.lisp" contains a
+;;; manipulatable dumpable defstruct, modulo a problem that would be fixed by
+;;; just delaying until after defsetfs is processed. backq is unique in that
+;;; no other defstruct has the distinction of preceding defsetfs.
 (defun just-dump-it-normally (object &optional (env nil env-p))
   (declare (type structure!object object))
   (declare (ignorable env env-p object))
@@ -153,11 +172,35 @@
 ;;; inner loops.)
 #+sb-xc-host
 (progn
+  (defun xc-dumpable-structure-instance-p (x)
+    (and (typep x 'cl:structure-object)
+         (let ((name (type-of x)))
+           ;; Don't allow totally random structures, only ones that the
+           ;; cross-compiler has been advised will work.
+           (and (get name :sb-xc-allow-dumping-instances)
+                ;; but we must also have cross-compiled it for real.
+                (sb!kernel::compiler-layout-ready-p name)
+                ;; and I don't know anything about raw slots
+                (zerop (layout-n-untagged-slots
+                        (info :type :compiler-layout name)))))))
   (defun %instance-length (instance)
-    (aver (typep instance 'structure!object))
+    (aver (or (typep instance 'structure!object)
+              (xc-dumpable-structure-instance-p instance)))
+    ;; INSTANCE-LENGTH tells you how many data words the backend is able to
+    ;; physically access in this structure. Since every structure occupies
+    ;; an even number of words, the storage slots comprise an odd number
+    ;; of words after subtracting 1 for the header.
+    ;; And in fact the fasl dumper / loader do write and read potentially
+    ;; one cell beyond the instance's LAYOUT-LENGTH if it was not odd.
+    ;; I'm not sure whether that is a good or bad thing.
+    ;; But be that as it may, in the cross-compiler you must not access
+    ;; more cells than there are in the declared structure because there
+    ;; is no lower level storage that you can peek at.
+    ;; So INSTANCE-LENGTH is exactly the same as LAYOUT-LENGTH on the host.
     (layout-length (classoid-layout (find-classoid (type-of instance)))))
   (defun %instance-ref (instance index)
-    (aver (typep instance 'structure!object))
+    (aver (or (typep instance 'structure!object)
+              (xc-dumpable-structure-instance-p instance)))
     (let* ((class (find-classoid (type-of instance)))
            (layout (classoid-layout class)))
       (if (zerop index)
@@ -167,6 +210,12 @@
                  (accessor-name (dsd-accessor-name dsd)))
             (declare (type symbol accessor-name))
             (funcall accessor-name instance)))))
+  ;; I believe this approach is technically nonportable because CLHS says that
+  ;;  "The mechanism by which defstruct arranges for slot accessors to be usable
+  ;;   with setf is implementation-dependent; for example, it may use setf
+  ;;   functions, setf expanders, or some other implementation-dependent
+  ;;   mechanism ..."
+  ;; As it happens, many implementations provide both functions and expanders.
   (defun %instance-set (instance index new-value)
     (aver (typep instance 'structure!object))
     (let* ((class (find-classoid (type-of instance)))
@@ -281,7 +330,7 @@
 ;;; STRUCTURE-OBJECTs defined by ordinary, post-warm-init programs, so
 ;;; it's only put into STRUCTURE-OBJECTs which inherit from
 ;;; STRUCTURE!OBJECT.)
-(def!struct (structure!object (:constructor nil)))
+(def!struct (structure!object (:constructor nil) (:copier nil) (:predicate nil)))
 
 ;;;; hooking this all into the standard MAKE-LOAD-FORM system
 

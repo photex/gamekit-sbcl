@@ -142,7 +142,6 @@ extent of the block."
   ;; BLOCK-HOME-LAMBDA-OR-NULL) more obscure, and it might be better
   ;; to get rid of it, perhaps using a special placeholder value
   ;; to indicate the orphanedness of the code.
-  (declare (ignore result))
   (ctran-starts-block next)
   (let* ((found (or (lexenv-find name blocks)
                     (compiler-error "return for unknown block: ~S" name)))
@@ -339,6 +338,7 @@ Evaluate the FORMS in the specified SITUATIONS (any of :COMPILE-TOPLEVEL,
                     ,(compile-in-lexenv
                       nil
                       `(lambda (,whole ,environment)
+                         ,@(macro-policy-decls t)
                          ,@local-decls
                          ,body)
                       lexenv))))))))
@@ -912,6 +912,8 @@ other."
                     (values-subtypep (make-single-value-type (leaf-type value))
                                      type))
                (and (sb!xc:constantp value)
+                    (or (not (values-type-p type))
+                        (values-type-may-be-single-value-p type))
                     (ctypep (constant-form-value value)
                             (single-value-type type))))
            (ir1-convert start next result value))

@@ -64,6 +64,14 @@
     (move res x)
     (inst neg res)))
 
+(define-vop (fast-negate/unsigned signed-unop)
+  (:args (x :scs (unsigned-reg) :target res))
+  (:arg-types unsigned-num)
+  (:translate %negate)
+  (:generator 3
+    (move res x)
+    (inst neg res)))
+
 (define-vop (fast-lognot/fixnum fixnum-unop)
   (:translate lognot)
   (:generator 1
@@ -229,6 +237,30 @@
        (if (eql y -1) ; special-case "XOR reg, [all-ones]"
            (inst not r)
            (inst xor r y))))))
+
+(define-vop (fast-logior-unsigned-signed=>signed fast-safe-arith-op)
+  (:args (x :scs (unsigned-reg))
+         (y :target r :scs (signed-reg)))
+  (:arg-types unsigned-num signed-num)
+  (:results (r :scs (signed-reg) :from (:argument 1)))
+  (:result-types signed-num)
+  (:note "inline (unsigned-byte 64) arithmetic")
+  (:translate logior)
+  (:generator 3
+    (move r y)
+    (inst or r x)))
+
+(define-vop (fast-logior-signed-unsigned=>signed fast-safe-arith-op)
+  (:args (x :target r :scs (signed-reg))
+         (y :scs (unsigned-reg)))
+  (:arg-types signed-num unsigned-num)
+  (:results (r :scs (signed-reg) :from (:argument 0)))
+  (:result-types signed-num)
+  (:note "inline (unsigned-byte 64) arithmetic")
+  (:translate logior)
+  (:generator 3
+    (move r x)
+    (inst or r y)))
 
 ;;; Special handling of add on the x86; can use lea to avoid a
 ;;; register load, otherwise it uses add.
@@ -1315,16 +1347,12 @@ constant shift greater than word length")))
     (inst bt x y)))
 
 (macrolet ((define-conditional-vop (tran cond unsigned not-cond not-unsigned)
+             (declare (ignore not-cond not-unsigned))
              `(progn
                 ,@(mapcar
                    (lambda (suffix cost signed)
-                     `(define-vop (;; FIXME: These could be done more
-                                   ;; cleanly with SYMBOLICATE.
-                                   ,(intern (format nil "~:@(FAST-IF-~A~A~)"
-                                                    tran suffix))
-                                   ,(intern
-                                     (format nil "~:@(FAST-CONDITIONAL~A~)"
-                                             suffix)))
+                     `(define-vop (,(symbolicate "FAST-IF-" tran suffix)
+                                   ,(symbolicate "FAST-CONDITIONAL"  suffix))
                         (:translate ,tran)
                         (:conditional ,(if signed cond unsigned))
                         (:generator ,cost
@@ -1495,6 +1523,7 @@ constant shift greater than word length")))
                    (funfx (intern (format nil "~S-MODFX" name)))
                    (vopfxf (intern (format nil "FAST-~S-MODFX/FIXNUM=>FIXNUM" name)))
                    (vopfxcf (intern (format nil "FAST-~S-MODFX-C/FIXNUM=>FIXNUM" name))))
+               (declare (ignore vop64cf)) ; maybe someone will want it some day
                `(progn
                   (define-modular-fun ,fun64 (x y) ,name :untagged nil 64)
                   (define-modular-fun ,funfx (x y) ,name :tagged t
@@ -1781,7 +1810,7 @@ constant shift greater than word length")))
 
 #!+multiply-high-vops
 (define-vop (mulhi)
-  (:translate sb!kernel:%multiply-high)
+  (:translate %multiply-high)
   (:policy :fast-safe)
   (:args (x :scs (unsigned-reg) :target eax)
          (y :scs (unsigned-reg unsigned-stack)))
@@ -1799,7 +1828,7 @@ constant shift greater than word length")))
 
 #!+multiply-high-vops
 (define-vop (mulhi/fx)
-  (:translate sb!kernel:%multiply-high)
+  (:translate %multiply-high)
   (:policy :fast-safe)
   (:args (x :scs (any-reg) :target eax)
          (y :scs (unsigned-reg unsigned-stack)))
@@ -1921,17 +1950,17 @@ constant shift greater than word length")))
   (:info mask)
   (:result-types unsigned-num)
   (:generator 4
-    (let ((mask (constantize mask)))
-      (cond ((or (integerp mask)
-                 (location= x r))
-             (loadw r x bignum-digits-offset other-pointer-lowtag)
-             (unless (eql mask -1)
-               (inst and r mask)))
-            (t
-             (inst mov r mask)
-             (inst and r (make-ea-for-object-slot x
-                                                  bignum-digits-offset
-                                                  other-pointer-lowtag)))))))
+     (cond ((or (immediate32-p mask)
+                (location= x r))
+            (loadw r x bignum-digits-offset other-pointer-lowtag)
+            (unless (or (eql mask -1)
+                        (eql mask (ldb (byte n-word-bits 0) -1)))
+              (inst and r (constantize mask))))
+           (t
+            (inst mov r mask)
+            (inst and r (make-ea-for-object-slot x
+                                                 bignum-digits-offset
+                                                 other-pointer-lowtag))))))
 
 ;; Specialised mask-signed-field VOPs.
 (define-vop (mask-signed-field-word/c)
@@ -2012,28 +2041,36 @@ constant shift greater than word length")))
      ;; quite a lot of hairy code.
      (give-up-ir1-transform))))
 
+;; These transforms were exceptionally noisy in an unhelpful way.
+;; Reading the output would not induce the speed-conscious programmer to think
+;; "I'd better code this multiply as (* (* B 2) 9) instead of (* B 18)
+;;  so that the LEA transform kicks in".
 (deftransform * ((x y)
                  ((unsigned-byte 64) (constant-arg (unsigned-byte 64)))
-                 (unsigned-byte 64))
+                 (unsigned-byte 64)
+                 :important nil)
   "recode as leas, shifts and adds"
   (let ((y (lvar-value y)))
     (*-transformer y)))
 (deftransform sb!vm::*-mod64
     ((x y) ((unsigned-byte 64) (constant-arg (unsigned-byte 64)))
-     (unsigned-byte 64))
+     (unsigned-byte 64)
+     :important nil)
   "recode as leas, shifts and adds"
   (let ((y (lvar-value y)))
     (*-transformer y)))
 
 (deftransform * ((x y)
                  (fixnum (constant-arg (unsigned-byte 64)))
-                 fixnum)
+                 fixnum
+                 :important nil)
   "recode as leas, shifts and adds"
   (let ((y (lvar-value y)))
     (*-transformer y)))
 (deftransform sb!vm::*-modfx
     ((x y) (fixnum (constant-arg (unsigned-byte 64)))
-     fixnum)
+     fixnum
+     :important nil)
   "recode as leas, shifts and adds"
   (let ((y (lvar-value y)))
     (*-transformer y)))

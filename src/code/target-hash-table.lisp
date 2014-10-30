@@ -174,7 +174,7 @@ Examples:
 
   ;; We want to use objects of type FOO as keys (by their
   ;; names.) EQUALP would work, but would make the names
-  ;; case-insensitive -- wich we don't want.
+  ;; case-insensitive -- which we don't want.
   (defstruct foo (name nil :type (or null string)))
 
   ;; Define an equivalence test function and a hash function.
@@ -756,9 +756,8 @@ if there is no such entry. Entries can be added using SETF."
                            (update-hash-table-cache hash-table (* 2 next))
                            (let ((value (aref table (1+ (* 2 next)))))
                              (result value t)))))))))))))
-
+;;; Three argument version of GETHASH
 (defun gethash3 (key hash-table default)
-  "Three argument version of GETHASH"
   (declare (type hash-table hash-table))
   (with-hash-table-locks (hash-table :operation :read :inline (%gethash3)
                                      :pin (key))
@@ -1038,14 +1037,6 @@ to protect the MAPHASH call."
     :rehash-size      ',(hash-table-rehash-size      hash-table)
     :rehash-threshold ',(hash-table-rehash-threshold hash-table)
     :weakness         ',(hash-table-weakness         hash-table)))
-
-;;; Return an association list representing the same data as HASH-TABLE.
-(defun %hash-table-alist (hash-table)
-  (let ((result nil))
-    (maphash (lambda (key value)
-               (push (cons key value) result))
-             hash-table)
-    result))
 
 ;;; Stuff an association list into HASH-TABLE. Return the hash table,
 ;;; so that we can use this for the *PRINT-READABLY* case in

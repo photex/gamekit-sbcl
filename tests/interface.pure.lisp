@@ -54,8 +54,30 @@
 (upgraded-array-element-type '(mod 5) nil)
 (upgraded-complex-part-type '(single-float 0.0 1.0) nil)
 
-;;; We should have documentation for our extension package:
-(assert (documentation (find-package "SB-EXT") t))
+#+sb-doc
+(with-test (:name :sb-ext-documentation)
+  ;;; We should have documentation for our extension package:
+ (assert (documentation (find-package "SB-EXT") t)))
+
+;; This is trying to assert that you didn't mistakenly write
+;; "#!+sb-doc (important-form)" in source code
+;; but it's an absolutely terrible test, because it is nothing more
+;; than a change detector. There are two possible improvements:
+;; 1. eliminate the change-detection nature of the test by documenting
+;;    all functions in CL, so that the magic constant 605 goes away.
+;;    This would still be an indirect test.
+;; 2. stop littering up the source code with #!+sb-doc,
+;;    always write docstrings, and have 'make-target-2-load.lisp' remove them
+;;    if desired. This would eliminate >1100 reader conditionals,
+;;    comprising nearly 68% of all reader conditionals in SBCL source.
+#+sb-doc
+(with-test (:name :cl-documentation)
+  (let ((n 0))
+    (do-symbols (s 'cl)
+      (if (fboundp s)
+          (when (documentation s 'function)
+            (incf n))))
+    (assert (= n 605))))
 
 ;;; DECLARE should not be a special operator
 (assert (not (special-operator-p 'declare)))
@@ -153,6 +175,32 @@
                  (= (the (complex single-float) x)
                     (the (complex single-float) y)))))
 
+#+x86-64
+;; The labeler for LEA would choke on an illegal encoding
+;; instead of showing what it illegally encodes, such as LEA RAX, RSP
+(with-test (:name :x86-lea-disassemble-illegal-op)
+  (let ((a (coerce '(#x48 #x8D #xC4) '(array (unsigned-byte 8) (3)))))
+    (sb-sys:with-pinned-objects (a)
+      (sb-disassem::disassemble-memory (sb-sys:sap-int (sb-sys:vector-sap a)) 3))))
+
+;; Assert that disassemblies of identically-acting functions are identical
+;; if address printing is turned off. Should work on any backend, I think.
+(with-test (:name :disassemble-without-addresses)
+  (flet ((disassembly-text (lambda-expr)
+         (let ((string
+                (let ((sb-disassem::*disassem-location-column-width* 0)
+                      (*print-pretty* nil)) ; prevent function name wraparound
+                  (with-output-to-string (s)
+                    (disassemble lambda-expr :stream s)))))
+           ;; Return all except the first two lines. This is subject to change
+           ;; any time we muck with the layout unfortunately.
+           (subseq string
+                   (1+ (position #\Newline string
+                                 :start (1+ (position #\Newline string))))))))
+  (let ((string1 (disassembly-text '(lambda (x) (car x))))
+        (string2 (disassembly-text '(lambda (y) (car y)))))
+    (assert (string= string1 string2)))))
+
 ;;; Check that SLEEP called with ratios (with no common factors with
 ;;; 1000000000, and smaller than 1/1000000000) works more or less as
 ;;; expected.
@@ -168,3 +216,13 @@
     (funcall fun1 1/7)
     (funcall fun1 1/100000000000000000000000000)
     (assert (< (- (get-universal-time) start-time) 2))))
+
+(with-test (:name :version-assert-ok)
+  (sb-ext:assert-version->= 1 1 13))
+
+(with-test (:name :version-assert-fails)
+  (assert-error
+   (sb-ext:assert-version->= most-positive-fixnum)))
+
+(with-test (:name :bug-1095483)
+  (assert-error (fboundp '(cas "foo"))))

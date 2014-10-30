@@ -291,7 +291,7 @@ The second value is true if NAME is bound locally. This is currently
 always NIL for special variables, although arguably it should be T
 when there is a lexically apparent binding for the special variable.
 
-The third value is an alist describind the declarations that apply to
+The third value is an alist describing the declarations that apply to
 the function NAME. Standard declaration specifiers that may appear in
 CARS of the alist include:
 
@@ -397,15 +397,7 @@ the condition types that have been muffled."
        (car (rassoc 'muffle-warning
                     (sb-c::lexenv-handled-conditions env))))
       (declaration
-       ;; FIXME: This is a bit too deep in the guts of INFO for comfort...
-       (let ((type (sb-c::type-info-number
-                    (sb-c::type-info-or-lose :declaration :recognized)))
-             (ret nil))
-         (dolist (env *info-environment*)
-           (do-info (env :name name :type-number num :value value)
-             (when (and (= num type) value)
-               (push name ret))))
-         ret))
+       (copy-list sb-c::*recognized-declarations*))
       (t (if (info :declaration :handler declaration-name)
              (extra-decl-info declaration-name env)
              (error "Unsupported declaration ~S." declaration-name))))))
@@ -414,8 +406,8 @@ the condition types that have been muffled."
 (defun parse-macro (name lambda-list body &optional env)
   "Process a macro definition of the kind that might appear in a DEFMACRO form
 into a lambda expression of two variables: a form and an environment. The
-lambda edxpression will parse its form argument, binding the variables in
-LAMBDA-LIST appropriately, and then excute BODY with those bindings in
+lambda expression will parse its form argument, binding the variables in
+LAMBDA-LIST appropriately, and then execute BODY with those bindings in
 effect."
   (declare (ignore env))
   (with-unique-names (whole environment)

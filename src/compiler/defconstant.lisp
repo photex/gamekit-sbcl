@@ -9,6 +9,26 @@
 
 (in-package "SB!IMPL")
 
+;;; We need a mechanism different from the usual SYMBOL-VALUE during cross-
+;;; compilation so we don't clobber the host Lisp's manifest constants.
+;;; This was formerly done using the globaldb, so emulate exactly the
+;;; calls to UNCROSS in (SETF INFO) and INFO because that works just fine.
+;;; Also, as noted in 'constantp.lisp'
+;;;   "KLUDGE: superficially, this might look good enough..."
+;;; we should enforce that we not wrongly look at a host constant where
+;;; a target constant is intended. This specialized accessor, in lieu of INFO
+;;; facilitates implementing something like that, though in fact ir1tran is
+;;; already able to generate some warnings about host constant usage.
+#+sb-xc-host
+(progn
+  (defun (setf sb!c::xc-constant-value) (newval sym)
+    (setf (get (uncross sym) :sb-xc-constant-val) newval))
+  (defun sb!c::xc-constant-value (sym) ; return 2 values as does (INFO ...)
+    (multiple-value-bind (indicator value foundp)
+        (get-properties (symbol-plist (uncross sym)) '(:sb-xc-constant-val))
+      (declare (ignore indicator))
+      (values value (not (null foundp))))))
+
 (def!macro sb!xc:defconstant (name value &optional documentation)
   #!+sb-doc
   "Define a global constant, saying that the value is constant and may be
@@ -24,7 +44,7 @@
   (unless (symbolp name)
     (error "The constant name is not a symbol: ~S" name))
   (when (looks-like-name-of-special-var-p name)
-    (style-warn 'sb!kernel:asterisks-around-constant-variable-name
+    (style-warn 'asterisks-around-constant-variable-name
                 :format-control "defining ~S as a constant"
                 :format-arguments (list name)))
   (sb!c:with-source-location (source-location)
@@ -62,6 +82,13 @@
        ;; don't warn or error or anything, just fall through.)
        )
       (t (warn "redefining ~(~A~) ~S to be a constant" kind name))))
+  ;; We ought to be consistent in treating any change of :VARIABLE :KIND
+  ;; as a continuable error. The above CASE expression pre-dates the
+  ;; existence of symbol-macros (I believe), but at a bare minimum,
+  ;; INFO should return NIL for its second value if requesting the
+  ;; :macro-expansion of something that is getting defined as constant.
+  (clear-info :variable :macro-expansion name)
+  (clear-info :source-location :symbol-macro name)
   (when doc
     (setf (fdocumentation name 'variable) doc))
   #-sb-xc-host
@@ -103,6 +130,6 @@
     ;; It would certainly be awesome if this was only needed for symbols
     ;; in CL. Unfortunately, that is not the case. Maybe some are moved
     ;; back in CL later on?
-    (setf (info :variable :xc-constant-value name) value))
+    (setf (sb!c::xc-constant-value name) value))
   (setf (info :variable :kind name) :constant)
   name)

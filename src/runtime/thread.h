@@ -135,80 +135,72 @@ extern int dynamic_values_bytes;
 #define for_each_thread(th) for(th=all_threads;th;th=0)
 #endif
 
+#ifndef LISP_FEATURE_SB_THREAD
+/* no threads: every symbol's tls_index is statically zero */
+#  define tls_index_of(x) 0
+#  define per_thread_value(sym, thread) sym->value
+#else
+#ifdef LISP_FEATURE_X86_64
+static inline int
+tls_index_of(struct symbol *symbol) // untagged pointer
+{
+  return symbol->header >> 32;
+}
+#else
+#  define tls_index_of(x) (x->tls_index)
+#endif
+#define per_thread_value(sym,th) \
+  ((union per_thread_data *)th)->dynamic_values[tls_index_of(sym)>>WORD_SHIFT]
+#endif
+
 static inline lispobj *
 SymbolValueAddress(u64 tagged_symbol_pointer, void *thread)
 {
-    struct symbol *sym= (struct symbol *)
-        (pointer_sized_uint_t)(tagged_symbol_pointer-OTHER_POINTER_LOWTAG);
-#ifdef LISP_FEATURE_SB_THREAD
-    if(thread && sym->tls_index) {
-        lispobj *r = &(((union per_thread_data *)thread)
-                       ->dynamic_values[(sym->tls_index) >> WORD_SHIFT]);
+    struct symbol *sym= SYMBOL(tagged_symbol_pointer);
+    if(thread && tls_index_of(sym)) {
+        lispobj *r = &per_thread_value(sym, thread);
         if((*r)!=NO_TLS_VALUE_MARKER_WIDETAG) return r;
     }
-#endif
     return &sym->value;
 }
 
 static inline lispobj
 SymbolValue(u64 tagged_symbol_pointer, void *thread)
 {
-    struct symbol *sym= (struct symbol *)
-        (pointer_sized_uint_t)(tagged_symbol_pointer-OTHER_POINTER_LOWTAG);
-#ifdef LISP_FEATURE_SB_THREAD
-    if(thread && sym->tls_index) {
-        lispobj r=
-            ((union per_thread_data *)thread)
-            ->dynamic_values[(sym->tls_index) >> WORD_SHIFT];
+    struct symbol *sym= SYMBOL(tagged_symbol_pointer);
+    if(thread && tls_index_of(sym)) {
+        lispobj r = per_thread_value(sym, thread);
         if(r!=NO_TLS_VALUE_MARKER_WIDETAG) return r;
     }
-#endif
     return sym->value;
-}
-
-static inline lispobj
-SymbolTlValue(u64 tagged_symbol_pointer, void *thread)
-{
-    struct symbol *sym= (struct symbol *)
-        (pointer_sized_uint_t)(tagged_symbol_pointer-OTHER_POINTER_LOWTAG);
-#ifdef LISP_FEATURE_SB_THREAD
-    return ((union per_thread_data *)thread)
-        ->dynamic_values[(sym->tls_index) >> WORD_SHIFT];
-#else
-    return sym->value;
-#endif
 }
 
 static inline void
 SetSymbolValue(u64 tagged_symbol_pointer,lispobj val, void *thread)
 {
-    struct symbol *sym= (struct symbol *)
-        (pointer_sized_uint_t)(tagged_symbol_pointer-OTHER_POINTER_LOWTAG);
-#ifdef LISP_FEATURE_SB_THREAD
-    if(thread && sym->tls_index) {
-        lispobj *pr= &(((union per_thread_data *)thread)
-                       ->dynamic_values[(sym->tls_index) >> WORD_SHIFT]);
-        if(*pr!=NO_TLS_VALUE_MARKER_WIDETAG) {
-            *pr=val;
+    struct symbol *sym= SYMBOL(tagged_symbol_pointer);
+    if(thread && tls_index_of(sym)) {
+        if (per_thread_value(sym, thread) != NO_TLS_VALUE_MARKER_WIDETAG) {
+            per_thread_value(sym, thread) = val;
             return;
         }
     }
-#endif
     sym->value = val;
+}
+
+static inline lispobj
+SymbolTlValue(u64 tagged_symbol_pointer, void *thread)
+{
+    struct symbol *sym= SYMBOL(tagged_symbol_pointer);
+    return per_thread_value(sym, thread);
 }
 
 static inline void
 SetTlSymbolValue(u64 tagged_symbol_pointer,lispobj val, void *thread)
 {
-#ifdef LISP_FEATURE_SB_THREAD
-    struct symbol *sym= (struct symbol *)
-        (pointer_sized_uint_t)(tagged_symbol_pointer-OTHER_POINTER_LOWTAG);
-    ((union per_thread_data *)thread)
-        ->dynamic_values[(sym->tls_index) >> WORD_SHIFT]
-        =val;
-#else
-    SetSymbolValue(tagged_symbol_pointer,val,thread) ;
-#endif
+    struct symbol *sym= SYMBOL(tagged_symbol_pointer);
+    // dynbind asserts that there is a tls_index in multithread runtime
+    per_thread_value(sym, thread) = val;
 }
 
 /* This only works for static symbols. */
@@ -324,8 +316,10 @@ static inline struct thread *arch_os_get_current_thread(void)
     /* If enabled by make-config (currently Darwin and FreeBSD only),
      * re-setup %fs.  This is an out-of-line call, and potentially
      * expensive.*/
-    if (th)
+    if (th) {
+        void arch_os_load_ldt(struct thread*);
         arch_os_load_ldt(th);
+    }
 # endif
 
     return th;

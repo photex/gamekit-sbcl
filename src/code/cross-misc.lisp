@@ -17,14 +17,6 @@
 (defmacro truly-the (type expr)
   `(the ,type ,expr))
 
-;;; MAYBE-INLINE and FREEZE-TYPE declarations can be safely ignored
-;;; (possibly at some cost in efficiency).
-(declaim (declaration freeze-type maybe-inline))
-
-;;; INHIBIT-WARNINGS declarations can be safely ignored (although we
-;;; may then have to wade through some irrelevant warnings).
-(declaim (declaration inhibit-warnings))
-
 ;;; Interrupt control isn't an issue in the cross-compiler: we don't
 ;;; use address-dependent (and thus GC-dependent) hashes, and we only
 ;;; have a single thread of control.
@@ -57,9 +49,9 @@
 ;;; CL:STREAM.
 (deftype ansi-stream () 'stream)
 
-(deftype sb!kernel:instance ()
+(deftype instance ()
   '(or condition structure-object standard-object))
-(deftype sb!kernel:funcallable-instance ()
+(deftype funcallable-instance ()
   (error "not clear how to represent FUNCALLABLE-INSTANCE type"))
 
 ;;; In the target SBCL, the INSTANCE type refers to a base
@@ -86,57 +78,10 @@
 
 ;;; This seems to be the portable Common Lisp type test which
 ;;; corresponds to the effect of the target SBCL implementation test...
-(defun sb!kernel:array-header-p (x)
+(defun array-header-p (x)
   (and (typep x 'array)
        (or (not (typep x 'simple-array))
            (/= (array-rank x) 1))))
-
-;;; GENESIS needs these at cross-compile time. The target
-;;; implementation of these is reasonably efficient by virtue of its
-;;; ability to peek into the internals of the package implementation;
-;;; this reimplementation is portable but slow.
-(defun package-internal-symbol-count (package)
-  (let ((result 0))
-    (declare (type fixnum result))
-    (do-symbols (i package)
-      ;; KLUDGE: The ANSI Common Lisp specification warns that
-      ;; DO-SYMBOLS may execute its body more than once for symbols
-      ;; that are inherited from multiple packages, and we currently
-      ;; make no attempt to correct for that here. (The current uses
-      ;; of this function at cross-compile time don't really care if
-      ;; the count is a little too high.) -- WHN 19990826
-      (multiple-value-bind (symbol status)
-          (find-symbol (symbol-name i) package)
-        (declare (ignore symbol))
-        (when (member status '(:internal :inherited))
-          (incf result))))
-    result))
-(defun package-external-symbol-count (package)
-  (let ((result 0))
-    (declare (type fixnum result))
-    (do-external-symbols (i package)
-      (declare (ignorable i))
-      (incf result))
-    result))
-
-;;; In the target Lisp, INTERN* is the primitive and INTERN is
-;;; implemented in terms of it. This increases efficiency by letting
-;;; us reuse a fixed-size buffer; the alternative would be
-;;; particularly painful because we don't implement DYNAMIC-EXTENT. In
-;;; the host Lisp, this is only used at cold load time, and we don't
-;;; care as much about efficiency, so it's fine to treat the host
-;;; Lisp's INTERN as primitive and implement INTERN* in terms of it.
-(defun intern* (nameoid length package &key no-copy)
-  (declare (ignore no-copy))
-  (intern (replace (make-string length) nameoid :end2 length) package))
-
-;;; In the target Lisp this is implemented by reading a fixed slot in
-;;; the symbol. In portable ANSI Common Lisp the same criteria can be
-;;; met (more slowly, and with the extra property of repeatability
-;;; between runs) by just calling SXHASH.
-(defun symbol-hash (symbol)
-  (declare (type symbol symbol))
-  (sxhash symbol))
 
 (defvar sb!xc:*gensym-counter* 0)
 
@@ -148,35 +93,35 @@
       (incf sb!xc:*gensym-counter*))))
 
 ;;; These functions are needed for constant-folding.
-(defun sb!kernel:simple-array-nil-p (object)
+(defun simple-array-nil-p (object)
   (when (typep object 'array)
     (assert (not (eq (array-element-type object) nil))))
   nil)
 
-(defun sb!kernel:%negate (number)
+(defun %negate (number)
   (- number))
 
-(defun sb!kernel:%single-float (number)
+(defun %single-float (number)
   (coerce number 'single-float))
 
-(defun sb!kernel:%double-float (number)
+(defun %double-float (number)
   (coerce number 'double-float))
 
-(defun sb!kernel:%ldb (size posn integer)
+(defun %ldb (size posn integer)
   (ldb (byte size posn) integer))
 
-(defun sb!kernel:%dpb (newbyte size posn integer)
+(defun %dpb (newbyte size posn integer)
   (dpb newbyte (byte size posn) integer))
 
-(defun sb!kernel:%with-array-data (array start end)
+(defun %with-array-data (array start end)
   (assert (typep array '(simple-array * (*))))
   (values array start end 0))
 
-(defun sb!kernel:%with-array-data/fp (array start end)
+(defun %with-array-data/fp (array start end)
   (assert (typep array '(simple-array * (*))))
   (values array start end 0))
 
-(defun sb!kernel:signed-byte-32-p (number)
+(defun signed-byte-32-p (number)
   (typep number '(signed-byte 32)))
 
 ;;; package locking nops for the cross-compiler
@@ -193,18 +138,20 @@
   (declare (ignore context control))
   symbol)
 
-(defun assert-package-unlocked (package &optional control &rest args)
-  (declare (ignore control args))
+(defun assert-package-unlocked (package &optional format-control
+                                &rest format-arguments)
+  (declare (ignore format-control format-arguments))
   package)
 
-(defun assert-symbol-home-package-unlocked (name format &key continuablep)
-  (declare (ignore format continuablep))
+(defun assert-symbol-home-package-unlocked (name &optional format-control
+                                            &rest format-arguments)
+  (declare (ignore format-control format-arguments))
   name)
 
 (declaim (declaration enable-package-locks disable-package-locks))
 
 ;;; printing structures
 
-(defun sb!kernel::default-structure-print (structure stream depth)
+(defun default-structure-print (structure stream depth)
   (declare (ignore depth))
   (write structure :stream stream :circle t))

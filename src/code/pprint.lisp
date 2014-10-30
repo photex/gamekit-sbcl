@@ -28,7 +28,7 @@
 
 (defconstant default-line-length 80)
 
-(defstruct (pretty-stream (:include sb!kernel:ansi-stream
+(defstruct (pretty-stream (:include ansi-stream
                                     (out #'pretty-out)
                                     (sout #'pretty-sout)
                                     (misc #'pretty-misc))
@@ -42,6 +42,8 @@
                    (sb!impl::line-length target)
                    default-line-length)
                :type column)
+  ;; If non-nil, a function to call before performing OUT or SOUT
+  (char-out-oneshot-hook nil :type (or null function))
   ;; A simple string holding all the text that has been output but not yet
   ;; printed.
   (buffer (make-string initial-buffer-size) :type (simple-array character (*)))
@@ -120,6 +122,10 @@
 (defun pretty-out (stream char)
   (declare (type pretty-stream stream)
            (type character char))
+  (let ((f (pretty-stream-char-out-oneshot-hook stream)))
+    (when f
+      (setf (pretty-stream-char-out-oneshot-hook stream) nil)
+      (funcall f stream char)))
   (cond ((char= char #\newline)
          (enqueue-newline stream :literal))
         (t
@@ -142,6 +148,10 @@
           string
         ;; For POSITION transform
         (declare (optimize (speed 2)))
+        (let ((f (pretty-stream-char-out-oneshot-hook stream)))
+          (when f
+            (setf (pretty-stream-char-out-oneshot-hook stream) nil)
+            (funcall f stream (aref string start))))
         (let ((newline (position #\newline string :start start :end end)))
           (cond
             (newline
@@ -679,7 +689,7 @@
   "Output a conditional newline to STREAM (which defaults to
    *STANDARD-OUTPUT*) if it is a pretty-printing stream, and do
    nothing if not. KIND can be one of:
-     :LINEAR - A line break is inserted if and only if the immediatly
+     :LINEAR - A line break is inserted if and only if the immediately
         containing section cannot be printed on one line.
      :MISER - Same as LINEAR, but only if ``miser-style'' is in effect.
         (See *PRINT-MISER-WIDTH*.)
@@ -691,7 +701,7 @@
            line and miser-style is in effect.
      :MANDATORY - A line break is always inserted.
    When a line break is inserted by any type of conditional newline, any
-   blanks that immediately precede the conditional newline are ommitted
+   blanks that immediately precede the conditional newline are omitted
    from the output and indentation is introduced at the beginning of the
    next line. (See PPRINT-INDENT.)"
   (declare (type (member :linear :miser :fill :mandatory) kind)
@@ -815,23 +825,22 @@ line break."
 
 (defvar *standard-pprint-dispatch-table*)
 (defvar *initial-pprint-dispatch-table*)
-(defvar *building-initial-table* nil)
 
 (defstruct (pprint-dispatch-entry (:copier nil))
   ;; the type specifier for this entry
-  (type (missing-arg) :type t)
-  ;; a function to test to see whether an object is of this time.
-  ;; Pretty must just (LAMBDA (OBJ) (TYPEP OBJECT TYPE)) except that
-  ;; we handle the CONS type specially so that (CONS (MEMBER FOO))
-  ;; works. We don't bother computing this for entries in the CONS
+  (type (missing-arg) :type t :read-only t)
+  ;; a function to test to see whether an object is of this type,
+  ;; either (LAMBDA (OBJ) (TYPEP OBJECT TYPE)) or a builtin predicate.
+  ;; We don't bother computing this for entries in the CONS
   ;; hash table, because we don't need it.
-  (test-fn nil :type (or function null))
+  (test-fn nil :type (or function null) :read-only t)
   ;; the priority for this guy
-  (priority 0 :type real)
+  (priority 0 :type real :read-only t)
   ;; T iff one of the original entries.
-  (initial-p *building-initial-table* :type (member t nil))
+  (initial-p (eq *initial-pprint-dispatch-table* nil)
+             :type (member t nil) :read-only t)
   ;; and the associated function
-  (fun (missing-arg) :type callable))
+  (fun (missing-arg) :type callable :read-only t))
 (def!method print-object ((entry pprint-dispatch-entry) stream)
   (print-unreadable-object (entry stream :type t)
     (format stream "type=~S, priority=~S~@[ [initial]~]"
@@ -840,18 +849,11 @@ line break."
             (pprint-dispatch-entry-initial-p entry))))
 
 (defun cons-type-specifier-p (spec)
-  (and (consp spec)
-       (eq (car spec) 'cons)
-       (cdr spec)
-       (null (cddr spec))
-       (let ((car (cadr spec)))
-         (and (consp car)
-              (let ((carcar (car car)))
-                (or (eq carcar 'member)
-                    (eq carcar 'eql)))
-              (cdr car)
-              (null (cddr car))))))
+  (typep spec '(cons (eql cons)
+                     (cons (cons (member eql member) (cons t null))
+                           null))))
 
+;; Return T iff E1 is strictly less preferable than E2.
 (defun entry< (e1 e2)
   (declare (type pprint-dispatch-entry e1 e2))
   (if (pprint-dispatch-entry-initial-p e1)
@@ -864,70 +866,45 @@ line break."
           (< (pprint-dispatch-entry-priority e1)
              (pprint-dispatch-entry-priority e2)))))
 
-(macrolet ((frob (name x)
-             `(cons ',x (named-lambda ,(symbolicate "PPRINT-DISPATCH-" name) (object)
-                            ,x))))
-  (defvar *precompiled-pprint-dispatch-funs*
-    (list (frob array (typep object 'array))
-          (frob function-call (and (consp object)
-                                    (symbolp (car object))
-                                    (fboundp (car object))))
-          (frob cons (typep object 'cons)))))
-
-(defun compute-test-fn (type)
-  (let ((was-cons nil))
-    (labels ((compute-test-expr (type object)
-               (if (listp type)
-                   (case (car type)
-                     (cons
-                      (setq was-cons t)
-                      (destructuring-bind
-                          (&optional (car nil car-p) (cdr nil cdr-p))
-                          (cdr type)
-                        `(and (consp ,object)
-                              ,@(when car-p
-                                  `(,(compute-test-expr
-                                      car `(car ,object))))
-                              ,@(when cdr-p
-                                  `(,(compute-test-expr
-                                      cdr `(cdr ,object)))))))
-                     (not
-                      (destructuring-bind (type) (cdr type)
-                        `(not ,(compute-test-expr type object))))
-                     (and
-                      `(and ,@(mapcar (lambda (type)
-                                        (compute-test-expr type object))
-                                      (cdr type))))
-                     (or
-                      `(or ,@(mapcar (lambda (type)
-                                       (compute-test-expr type object))
-                                     (cdr type))))
-                     (t
-                      `(typep ,object ',type)))
-                   `(typep ,object ',type))))
-      (let ((expr (compute-test-expr type 'object)))
-        (cond ((cdr (assoc expr *precompiled-pprint-dispatch-funs*
-                           :test #'equal)))
-              (t
-               (let ((name (symbolicate "PPRINT-DISPATCH-"
-                                        (if (symbolp type)
-                                            type
-                                            (write-to-string type
-                                                             :escape t
-                                                             :pretty nil
-                                                             :readably nil)))))
-                 (compile nil `(named-lambda ,name (object)
-                                 ,expr)))))))))
+;; Return the predicate for TYPE. This used to involve rewriting TYPE
+;; into a sexpr due to (CONS <t1> <t2>) not being an official specifier.
+;; Now that it is, there's nothing magical about it.
+(defun compute-test-fn (type function)
+  (declare (special sb!c::*backend-type-predicates*))
+  ;; Avoid compiling code for an existing structure predicate
+  (or (and (eq (info :type :kind type) :instance)
+           (let ((layout (info :type :compiler-layout type)))
+             (and layout
+                  (let ((info (layout-info layout)))
+                    (and info
+                         (let ((pred (dd-predicate-name info)))
+                           (and pred (fboundp pred)
+                                (symbol-function pred))))))))
+      ;; avoid compiling code for CONS, ARRAY, VECTOR, etc
+      (awhen (assoc (specifier-type type) sb!c::*backend-type-predicates*
+                    :test #'type=)
+        (symbol-function (cdr it)))
+      ;; OK, compile something
+      (let ((name
+             ;; Keep name as a string, because NAMED-LAMBDA with a symbol
+             ;; affects the global environment, when all you want
+             ;; is to give the lambda a human-readable label.
+             (format nil "~A-P"
+                     (cond ((symbolp type) type)
+                           ((symbolp function) function)
+                           ((%fun-name function))
+                           (t
+                            (write-to-string type :pretty nil :escape nil
+                                             :readably nil))))))
+        (compile nil `(named-lambda ,name (object) (typep object ',type))))))
 
 (defun copy-pprint-dispatch (&optional (table *print-pprint-dispatch*))
   (declare (type (or pprint-dispatch-table null) table))
   (let* ((orig (or table *initial-pprint-dispatch-table*))
          (new (make-pprint-dispatch-table
-               :entries (copy-list (pprint-dispatch-table-entries orig))))
-         (new-cons-entries (pprint-dispatch-table-cons-entries new)))
-    (maphash (lambda (key value)
-               (setf (gethash key new-cons-entries) value))
-             (pprint-dispatch-table-cons-entries orig))
+               :entries (copy-list (pprint-dispatch-table-entries orig)))))
+    (replace/eql-hash-table (pprint-dispatch-table-cons-entries new)
+                            (pprint-dispatch-table-cons-entries orig))
     new))
 
 (defun pprint-dispatch (object &optional (table *print-pprint-dispatch*))
@@ -955,6 +932,13 @@ line break."
     (cerror "Frob it anyway!" 'standard-pprint-dispatch-table-modified-error
             :operation operation)))
 
+;; The dispatch mechanism is not quite sophisticated enough to have a guard
+;; condition on CONS entries. One place this would impact is that you could
+;; write the full matcher for QUOTE as just a type-specifier. It can be done
+;; now, but using the non-cons table entails linear scan.
+;; A test-fn in the cons table would require storing multiple entries per
+;; key though because any might fail. Conceivably you could have
+;; (cons (eql foo) cons) and (cons (eql foo) bit-vector) as two FOO entries.
 (defun set-pprint-dispatch (type function &optional
                             (priority 0) (table *print-pprint-dispatch*))
   (declare (type (or null callable) function)
@@ -963,40 +947,29 @@ line break."
   (/show0 "entering SET-PPRINT-DISPATCH, TYPE=...")
   (/hexstr type)
   (assert-not-standard-pprint-dispatch-table table 'set-pprint-dispatch)
-  (if function
-      (if (cons-type-specifier-p type)
-          (setf (gethash (second (second type))
-                         (pprint-dispatch-table-cons-entries table))
-                (make-pprint-dispatch-entry :type type
-                                            :priority priority
-                                            :fun function))
-          (let ((list (delete type (pprint-dispatch-table-entries table)
-                              :key #'pprint-dispatch-entry-type
-                              :test #'equal))
-                (entry (make-pprint-dispatch-entry
-                        :type type
-                        :test-fn (compute-test-fn type)
-                        :priority priority
-                        :fun function)))
-            (do ((prev nil next)
-                 (next list (cdr next)))
-                ((null next)
-                 (if prev
-                     (setf (cdr prev) (list entry))
-                     (setf list (list entry))))
-              (when (entry< (car next) entry)
-                (if prev
-                    (setf (cdr prev) (cons entry next))
-                    (setf list (cons entry next)))
-                (return)))
-            (setf (pprint-dispatch-table-entries table) list)))
-      (if (cons-type-specifier-p type)
-          (remhash (second (second type))
-                   (pprint-dispatch-table-cons-entries table))
-          (setf (pprint-dispatch-table-entries table)
-                (delete type (pprint-dispatch-table-entries table)
-                        :key #'pprint-dispatch-entry-type
-                        :test #'equal))))
+  (let* ((consp (cons-type-specifier-p type))
+         (entry (if function
+                    (make-pprint-dispatch-entry
+                     :type type
+                     :test-fn (unless consp (compute-test-fn type function))
+                     :priority priority :fun function))))
+    (if consp
+        (let ((hashtable (pprint-dispatch-table-cons-entries table))
+              (key (second (second type))))
+          (if function
+              (setf (gethash key hashtable) entry)
+              (remhash key hashtable)))
+        (setf (pprint-dispatch-table-entries table)
+              (let ((list (delete type (pprint-dispatch-table-entries table)
+                                  :key #'pprint-dispatch-entry-type
+                                  :test #'equal)))
+                (if function
+                    ;; ENTRY< is T if lower in priority, which should sort to
+                    ;; the end, but MERGE's predicate wants T for the (a,b) pair
+                    ;; if 'a' should go in front of 'b', so swap them.
+                    ;; (COMPLEMENT #'entry<) is unstable wrt insertion order.
+                    (merge 'list list (list entry) (lambda (a b) (entry< b a)))
+                    list)))))
   (/show0 "about to return NIL from SET-PPRINT-DISPATCH")
   nil)
 
@@ -1053,15 +1026,6 @@ line break."
 
 (defun pprint-lambda-list (stream lambda-list &rest noise)
   (declare (ignore noise))
-  (when (and (consp lambda-list)
-             (member (car lambda-list) *backq-tokens*))
-    ;; if this thing looks like a backquoty thing, then we don't want
-    ;; to destructure it, we want to output it straight away.  [ this
-    ;; is the exception to the normal processing: if we did this
-    ;; generally we would find lambda lists such as (FUNCTION FOO)
-    ;; being printed as #'FOO ]  -- CSR, 2003-12-07
-    (output-object lambda-list stream)
-    (return-from pprint-lambda-list nil))
   (pprint-logical-block (stream lambda-list :prefix "(" :suffix ")")
     (let ((state :required)
           (first t))
@@ -1177,24 +1141,34 @@ line break."
   (funcall (formatter "~:<~^~W~^~3I ~:_~W~^ ~_~W~^~1I~@{ ~_~W~}~:>")
            stream list))
 
+(defun pprint-unquoting-comma (stream obj &rest noise)
+  (declare (ignore noise))
+  (write-string (svref #("," ",." ",@") (comma-kind obj)) stream)
+  (when (eql (comma-kind obj) 0)
+    ;; Ensure a space is written before any output that would change the meaning
+    ;; of the preceding the comma to ",." or ",@" such as a symbol named "@BAR".
+    (setf (pretty-stream-char-out-oneshot-hook stream)
+          (lambda (stream char)
+            (when (member char '(#\. #\@))
+              (write-char #\Space stream)))))
+  (output-object (comma-expr obj) stream))
+
 (defvar *pprint-quote-with-syntactic-sugar* t)
 
 (defun pprint-quote (stream list &rest noise)
   (declare (ignore noise))
-  (if (and (consp list)
-           (consp (cdr list))
-           (null (cddr list))
-           *pprint-quote-with-syntactic-sugar*)
-      (case (car list)
-        (function
-         (write-string "#'" stream)
-         (output-object (cadr list) stream))
-        (quote
-         (write-char #\' stream)
-         (output-object (cadr list) stream))
-        (t
-         (pprint-fill stream list)))
-      (pprint-fill stream list)))
+  (when (and (listp list) (singleton-p (cdr list)))
+    (let* ((pretty-p nil)
+           (sigil (case (car list)
+                    (function "#'")
+                    (quote "'")
+                    ;; QUASIQUOTE can't choose not to print prettily.
+                    ;; Wrongly nested commas beget unreadable sexprs.
+                    (quasiquote (setq pretty-p t) "`"))))
+      (when (or pretty-p *pprint-quote-with-syntactic-sugar*)
+        (write-string sigil stream)
+        (return-from pprint-quote (output-object (cadr list) stream)))))
+  (pprint-fill stream list))
 
 (defun pprint-declare (stream list &rest noise)
   (declare (ignore noise))
@@ -1341,6 +1315,10 @@ line break."
     (pprint-tagbody-guts stream)))
 
 ;;; Each clause in this list will get its own line.
+;;; FIXME: (LOOP for x in list summing (f x) into count finally ...)
+;;;        puts a newline in between INTO and COUNT.
+;;;        It would be awesome to have code in common with the macro
+;;;        the properly represents each clauses.
 (defvar *loop-seperating-clauses*
   '(:and
     :with :for
@@ -1474,9 +1452,6 @@ line break."
         ;; printing the object after all.
         (output-ugly-object object stream))))
 
-(defun mboundp (name)
-  (and (fboundp name) (macro-function name) t))
-
 (defun !pprint-cold-init ()
   (/show0 "entering !PPRINT-COLD-INIT")
   ;; Kludge: We set *STANDARD-PP-D-TABLE* to a new table even though
@@ -1484,18 +1459,22 @@ line break."
   ;; it's used in WITH-STANDARD-IO-SYNTAX, and condition reportery
   ;; possibly performed in the following extent may use W-S-IO-SYNTAX.
   (setf *standard-pprint-dispatch-table* (make-pprint-dispatch-table))
-  (setf *initial-pprint-dispatch-table*  (make-pprint-dispatch-table))
-  (let ((*print-pprint-dispatch* *initial-pprint-dispatch-table*)
-        (*building-initial-table* t))
+  (setf *initial-pprint-dispatch-table*  nil)
+  (let ((*print-pprint-dispatch* (make-pprint-dispatch-table)))
     (/show0 "doing SET-PPRINT-DISPATCH for regular types")
     (set-pprint-dispatch '(and array (not (or string bit-vector))) #'pprint-array)
-    (set-pprint-dispatch '(cons (and symbol (satisfies mboundp)))
+    ;; MACRO-FUNCTION must have effectively higher priority than FBOUNDP.
+    ;; The implementation happens to check identical priorities in the order added,
+    ;; but that's unspecified behavior.  Both must be _strictly_ lower than the
+    ;; default cons entries though.
+    (set-pprint-dispatch '(cons (and symbol (satisfies macro-function)))
                          #'pprint-macro-call -1)
     (set-pprint-dispatch '(cons (and symbol (satisfies fboundp)))
                          #'pprint-fun-call -1)
     (set-pprint-dispatch '(cons symbol)
                          #'pprint-data-list -2)
     (set-pprint-dispatch 'cons #'pprint-fill -2)
+    (set-pprint-dispatch 'sb!impl::comma #'pprint-unquoting-comma -3)
     ;; cons cells with interesting things for the car
     (/show0 "doing SET-PPRINT-DISPATCH for CONS with interesting CAR")
 
@@ -1566,6 +1545,7 @@ line break."
                           (prog2 pprint-prog2)
                           (psetf pprint-setq)
                           (psetq pprint-setq)
+                          (quasiquote pprint-quote)
                           #+nil (restart-bind ...)
                           #+nil (restart-case ...)
                           (setf pprint-setq)
@@ -1591,11 +1571,7 @@ line break."
 
       (set-pprint-dispatch `(cons (eql ,(first magic-form)))
                            (symbol-function (second magic-form))))
-
-    ;; other pretty-print init forms
-    (/show0 "about to call !BACKQ-PP-COLD-INIT")
-    (sb!impl::!backq-pp-cold-init)
-    (/show0 "leaving !PPRINT-COLD-INIT"))
+    (setf *initial-pprint-dispatch-table* *print-pprint-dispatch*))
 
   (setf *standard-pprint-dispatch-table*
         (copy-pprint-dispatch *initial-pprint-dispatch-table*))

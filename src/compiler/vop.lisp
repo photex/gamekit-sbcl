@@ -684,16 +684,16 @@
   (num-results 0 :type index)
   ;; a vector of the temporaries the vop needs. See EMIT-VOP
   ;; in vmdef for information on how the temps are encoded.
-  (temps nil :type (or null (specializable-vector (unsigned-byte 16))))
+  (temps nil :type (or null (simple-array (unsigned-byte 16) 1)))
   ;; the order all the refs for this vop should be put in. Each
   ;; operand is assigned a number in the following ordering: args,
   ;; more-args, results, more-results, temps. This vector represents
   ;; the order the operands should be put into in the next-ref link.
-  (ref-ordering nil :type (or null (specializable-vector (unsigned-byte 8))))
+  (ref-ordering nil :type (or null (simple-array (unsigned-byte 8) 1)))
   ;; a vector of the various targets that should be done. Each element
   ;; encodes the source ref (shifted 8, it is also encoded in
   ;; MAX-VOP-TN-REFS) and the dest ref index.
-  (targets nil :type (or null (specializable-vector (unsigned-byte 16)))))
+  (targets nil :type (or null (simple-array (unsigned-byte 16) 1))))
 
 ;;;; SBs and SCs
 
@@ -954,7 +954,14 @@
   ;; This list is sorted by block number (i.e. reverse DFO), allowing
   ;; the intersection between the lifetimes for two global TNs to be
   ;; easily found. If null, then this TN is a local TN.
-  (global-conflicts nil :type (or global-conflicts null))
+  ;; KLUDGE: The defstructs for TN and GLOBAL-CONFLICTS are mutually
+  ;; referential, and absent a block-compilation feature, one or the other
+  ;; of the structures can't inline type checks for its referent.
+  ;; Stating this type as (OR NULL GLOBAL-CONFLICTS) instead of the reverse
+  ;; avoids a forward-reference that would crash cold-init.
+  ;; But since TYPEP short-circuits, the constructor is happy with NIL.
+  ;; [See the comments in LAYOUT-OF for further detail]
+  (global-conflicts nil :type (or null global-conflicts))
   ;; During lifetime analysis, this is used as a pointer into the
   ;; conflicts chain, for scanning through blocks in reverse DFO.
   (current-conflict nil)

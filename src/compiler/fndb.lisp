@@ -74,12 +74,12 @@
                 sb!xc:packagep functionp compiled-function-p not)
   (t) boolean (movable foldable flushable))
 
-(defknown (eq eql) (t t) boolean (movable foldable flushable))
+(defknown (eq eql) (t t) boolean (movable foldable flushable commutative))
 (defknown (equal equalp) (t t) boolean (foldable flushable recursive))
 
-#!+(or x86 x86-64)
+#!+(or x86 x86-64 arm)
 (defknown fixnum-mod-p (t fixnum) boolean
-    (movable foldable flushable always-translatable))
+  (movable foldable flushable always-translatable))
 
 
 ;;;; classes
@@ -98,6 +98,8 @@
 ;;; This is not FLUSHABLE, since it's required to signal an error if
 ;;; unbound.
 (defknown (symbol-value) (symbol) t ())
+(defknown about-to-modify-symbol-value (symbol t &optional t t) null
+  (explicit-check))
 ;;; From CLHS, "If the symbol is globally defined as a macro or a
 ;;; special operator, an object of implementation-dependent nature and
 ;;; identity is returned. If the symbol is not globally defined as
@@ -162,7 +164,6 @@
 ;;;; from the "Symbols" chapter:
 
 (defknown get (symbol t &optional t) t (flushable))
-(defknown sb!impl::get2 (symbol t) t (flushable))
 (defknown sb!impl::get3 (symbol t t) t (flushable))
 (defknown remprop (symbol t) t)
 (defknown symbol-plist (symbol) list (flushable))
@@ -189,6 +190,8 @@
   sb!xc:package)
 (defknown find-package (package-designator) (or sb!xc:package null)
   (flushable))
+(defknown find-undeleted-package-or-lose (package-designator)
+  sb!xc:package) ; not flushable
 (defknown package-name (package-designator) (or simple-string null)
   (unsafely-flushable))
 (defknown package-nicknames (package-designator) list (unsafely-flushable))
@@ -215,6 +218,9 @@
 (defknown (use-package unuse-package)
   ((or list package-designator) &optional package-designator) (eql t))
 (defknown find-all-symbols (string-designator) list (flushable))
+;; private
+(defknown package-iter-step (fixnum index simple-vector list)
+  (values fixnum index simple-vector list symbol symbol))
 
 ;;;; from the "Numbers" chapter:
 
@@ -223,18 +229,18 @@
   (movable foldable flushable explicit-check))
 (defknown (oddp evenp) (integer) boolean
   (movable foldable flushable explicit-check))
-(defknown (= /=) (number &rest number) boolean
+(defknown (=) (number &rest number) boolean
+  (movable foldable flushable explicit-check commutative))
+(defknown (/=) (number &rest number) boolean
   (movable foldable flushable explicit-check))
 (defknown (< > <= >=) (real &rest real) boolean
   (movable foldable flushable explicit-check))
 (defknown (max min) (real &rest real) real
   (movable foldable flushable explicit-check))
 
-(defknown + (&rest number) number
-  (movable foldable flushable explicit-check))
+(defknown (+ *) (&rest number) number
+  (movable foldable flushable explicit-check commutative))
 (defknown - (number &rest number) number
-  (movable foldable flushable explicit-check))
-(defknown * (&rest number) number
   (movable foldable flushable explicit-check))
 (defknown / (number &rest number) number
   (movable foldable unsafely-flushable explicit-check))
@@ -331,10 +337,6 @@
 (defknown %multiply-high (word word) word
     (movable foldable flushable))
 
-(defknown (%floor %ceiling)
-  (real real) (values integer real)
-  (movable foldable flushable explicit-check))
-
 (defknown (mod rem) (real real) real
   (movable foldable flushable explicit-check))
 
@@ -362,7 +364,7 @@
 (defknown (realpart imagpart) (number) real (movable foldable flushable))
 
 (defknown (logior logxor logand logeqv) (&rest integer) integer
-  (movable foldable flushable explicit-check))
+  (movable foldable flushable explicit-check commutative))
 
 (defknown (lognand lognor logandc1 logandc2 logorc1 logorc2)
           (integer integer) integer
@@ -372,14 +374,14 @@
   (movable foldable flushable))
 
 (defknown lognot (integer) integer (movable foldable flushable explicit-check))
-(defknown logtest (integer integer) boolean (movable foldable flushable))
+(defknown logtest (integer integer) boolean (movable foldable flushable commutative))
 (defknown logbitp (unsigned-byte integer) boolean (movable foldable flushable))
 (defknown ash (integer integer) integer
   (movable foldable flushable explicit-check))
 #!+ash-right-vops
 (defknown %ash/right ((or word sb!vm:signed-word) (mod #.sb!vm:n-word-bits))
-    (or word sb!vm:signed-word)
-    (movable foldable flushable always-translatable))
+  (or word sb!vm:signed-word)
+  (movable foldable flushable always-translatable))
 (defknown (logcount integer-length) (integer) bit-index
   (movable foldable flushable explicit-check))
 ;;; FIXME: According to the ANSI spec, it's legal to use any
@@ -391,10 +393,10 @@
   (movable foldable flushable))
 (defknown (byte-size byte-position) (byte-specifier) bit-index
   (movable foldable flushable))
-(defknown ldb (byte-specifier integer) integer (movable foldable flushable))
+(defknown ldb (byte-specifier integer) unsigned-byte (movable foldable flushable))
 (defknown ldb-test (byte-specifier integer) boolean
   (movable foldable flushable))
-(defknown mask-field (byte-specifier integer) integer
+(defknown mask-field (byte-specifier integer) unsigned-byte
   (movable foldable flushable))
 (defknown dpb (integer byte-specifier integer) integer
   (movable foldable flushable))
@@ -403,11 +405,16 @@
 (defknown random ((or (float (0.0)) (integer 1)) &optional random-state)
   (or (float 0.0) (integer 0))
   (explicit-check))
-(defknown make-random-state (&optional
+(defknown make-random-state (&optional (or random-state (member nil t)))
+  random-state (flushable))
+;; The arg type specifier is for documentation only- EXPLICIT-CHECK prevails.
+;; It feels almost wrong to state it at all.
+(defknown seed-random-state (&optional ; SBCL extension
                              (or (member nil t) random-state unsigned-byte
                                  (simple-array (unsigned-byte 8) (*))
                                  (simple-array (unsigned-byte 32) (*))))
-  random-state (flushable))
+  random-state (flushable explicit-check))
+
 (defknown random-state-p (t) boolean (movable foldable flushable))
 
 ;;;; from the "Characters" chapter:
@@ -418,12 +425,26 @@
 (defknown digit-char-p (character &optional (integer 2 36))
   (or (integer 0 35) null) (movable foldable flushable))
 
-(defknown (char= char/= char< char> char<= char>= char-equal char-not-equal
-                 char-lessp char-greaterp char-not-greaterp char-not-lessp)
-  (character &rest character) boolean (movable foldable flushable))
+;; Character predicates: if the 2-argument predicate which underlies
+;; the N-argument predicate unavoidably type-checks its 2 args,
+;; then the N-argument form should not type-check anything
+;; except in the degenerate case of 1 actual argument.
+;; All of the case-sensitive functions have the check of the first arg
+;; generated by the compiler, and successive args checked by hand.
+;; The case-insensitive functions don't need any checks, since the underlying
+;; two-arg case-insensitive function does it, except when it isn't called.
+(defknown (char=)
+  (character &rest character) boolean (movable foldable flushable commutative))
 
-(defknown (two-arg-char-equal
-           two-arg-char-not-equal
+(defknown (char/= char< char> char<= char>= char-not-equal)
+  (character &rest character) boolean (movable foldable flushable))
+(defknown (char-equal char-lessp char-greaterp char-not-greaterp char-not-lessp)
+  (character &rest character) boolean (movable foldable flushable explicit-check))
+
+(defknown (two-arg-char-equal)
+    (character character) boolean (movable foldable flushable commutative))
+
+(defknown (two-arg-char-not-equal
            two-arg-char-lessp
            two-arg-char-not-lessp
            two-arg-char-greaterp
@@ -466,12 +487,12 @@
 (defknown copy-seq (sequence) consed-sequence (flushable)
   :derive-type (sequence-result-nth-arg 1))
 
-(defknown length (sequence) index (foldable flushable dx-safe))
+(defknown length (sequence) index (explicit-check foldable flushable dx-safe))
 
-(defknown reverse (sequence) consed-sequence (flushable)
+(defknown reverse (sequence) consed-sequence (explicit-check flushable)
   :derive-type (sequence-result-nth-arg 1))
 
-(defknown nreverse (sequence) sequence (important-result)
+(defknown nreverse (sequence) sequence (explicit-check important-result)
   :derive-type #'result-type-first-arg
   :destroyed-constant-args (nth-constant-nonempty-sequence-args 1))
 
@@ -486,11 +507,17 @@
   ()
   :derive-type (creation-result-type-specifier-nth-arg 1))
 
+(defknown %concatenate-to-string (&rest sequence) simple-string
+  (explicit-check flushable))
+(defknown %concatenate-to-base-string (&rest sequence) simple-base-string
+  (explicit-check flushable))
+
 (defknown (map %map) (type-specifier callable sequence &rest sequence)
   consed-sequence
   (call)
 ; :DERIVE-TYPE 'TYPE-SPEC-ARG1 ? Nope... (MAP NIL ...) returns NULL, not NIL.
   )
+(defknown %map-for-effect-arity-1 (callable sequence) null (call))
 (defknown %map-to-list-arity-1 (callable sequence) list (flushable call))
 (defknown %map-to-simple-vector-arity-1 (callable sequence) simple-vector
   (flushable call))
@@ -622,13 +649,15 @@
                     (:test-not callable) (:start index) (:from-end t)
                     (:end sequence-end) (:key callable))
   (or index null)
-  (foldable flushable call))
+  (foldable flushable call)
+  :derive-type #'position-derive-type)
 
 (defknown (position-if position-if-not)
   (callable sequence &rest t &key (:from-end t) (:start index)
    (:end sequence-end) (:key callable))
   (or index null)
-  (foldable flushable call))
+  (foldable flushable call)
+  :derive-type #'position-derive-type)
 
 (defknown count (t sequence &rest t &key
                    (:test callable) (:test-not callable) (:start index)
@@ -656,11 +685,23 @@
   :derive-type (sequence-result-nth-arg 1)
   :destroyed-constant-args (nth-constant-nonempty-sequence-args 1))
 (defknown sb!impl::stable-sort-list (list function function) list
-  (call important-result)
+  (call important-result explicit-check)
   :destroyed-constant-args (nth-constant-nonempty-sequence-args 1))
 (defknown sb!impl::sort-vector (vector index index function (or function null))
   * ; SORT-VECTOR works through side-effect
   (call)
+  :destroyed-constant-args (nth-constant-nonempty-sequence-args 1))
+
+(defknown sb!impl::stable-sort-vector
+  (vector function (or function null))
+  vector
+  (call explicit-check)
+  :destroyed-constant-args (nth-constant-nonempty-sequence-args 1))
+
+(defknown sb!impl::stable-sort-simple-vector
+  (simple-vector function (or function null))
+  simple-vector
+  (call explicit-check)
   :destroyed-constant-args (nth-constant-nonempty-sequence-args 1))
 
 (defknown merge (type-specifier sequence sequence callable
@@ -723,14 +764,10 @@
 (defknown make-list (index &key (:initial-element t)) list
   (movable flushable))
 
-(defknown sb!impl::backq-list (&rest t) list (movable flushable))
-(defknown sb!impl::backq-list* (t &rest t) t (movable flushable))
-(defknown sb!impl::backq-append (&rest t) t (flushable))
-(defknown sb!impl::backq-nconc (&rest t) t ()
-  :destroyed-constant-args (remove-non-constants-and-nils #'butlast))
-(defknown sb!impl::backq-cons (t t) cons (foldable movable flushable))
-(defknown sb!impl::backq-vector (list) simple-vector
-    (foldable movable flushable))
+(defknown sb!impl::|List| (&rest t) list (movable flushable foldable))
+(defknown sb!impl::|List*| (t &rest t) t (movable flushable foldable))
+(defknown sb!impl::|Append| (&rest t) t (flushable foldable))
+(defknown sb!impl::|Vector| (&rest t) simple-vector (flushable foldable))
 
 ;;; All but last must be of type LIST, but there seems to be no way to
 ;;; express that in this syntax.
@@ -746,8 +783,6 @@
 ;;; express that in this syntax. The result must be LIST, but we do
 ;;; not check it now :-).
 (defknown nconc (&rest t) t ()
-  :destroyed-constant-args (remove-non-constants-and-nils #'butlast))
-(defknown sb!impl::nconc2 (list t) t ()
   :destroyed-constant-args (remove-non-constants-and-nils #'butlast))
 
 (defknown nreconc (list t) t (important-result)
@@ -839,8 +874,6 @@
 (defknown hash-table-p (t) boolean (movable foldable flushable))
 (defknown gethash (t hash-table &optional t) (values t boolean)
   (flushable)) ; not FOLDABLE, since hash table contents can change
-(defknown sb!impl::gethash2 (t hash-table) (values t boolean)
-  (flushable)) ; not FOLDABLE, since hash table contents can change
 (defknown sb!impl::gethash3 (t hash-table t) (values t boolean)
   (flushable)) ; not FOLDABLE, since hash table contents can change
 (defknown %puthash (t hash-table t) t ()
@@ -870,10 +903,25 @@
                       (:initial-element t)
                       (:initial-contents t)
                       (:adjustable t)
-                      (:fill-pointer t)
+                      ;; the type constraint doesn't do anything
+                      ;; on account of EXPLICIT-CHECK. it's documentation.
+                      (:fill-pointer (or index boolean))
                       (:displaced-to (or array null))
                       (:displaced-index-offset index))
-  array (flushable))
+  array (flushable explicit-check))
+
+(defknown %make-array ((or index list)
+                       (unsigned-byte #.sb!vm:n-widetag-bits)
+                       (unsigned-byte 16)
+                       &key
+                       (:element-type type-specifier)
+                       (:initial-element t)
+                       (:initial-contents t)
+                       (:adjustable t)
+                       (:fill-pointer (or index boolean))
+                       (:displaced-to (or array null))
+                       (:displaced-index-offset index))
+    array (flushable))
 
 (defknown vector (&rest t) simple-vector (flushable))
 
@@ -884,6 +932,10 @@
   type-specifier
   (foldable flushable recursive))
 (defknown array-rank (array) array-rank (foldable flushable))
+;; FIXME: there's a fencepost bug, but for all practical purposes our
+;; ARRAY-RANK-LIMIT is infinite, thus masking the bug. e.g. if the
+;; exclusive limit on rank were 8, then your dimension numbers can
+;; be in the range 0 through 6, not 0 through 7.
 (defknown array-dimension (array array-rank) index (foldable flushable))
 (defknown array-dimensions (array) list (foldable flushable))
 (defknown array-in-bounds-p (array &rest integer) boolean (foldable flushable))
@@ -916,6 +968,8 @@
   (movable foldable flushable))
 (defknown fill-pointer (complex-vector) index
     (unsafely-flushable explicit-check))
+(defknown sb!impl::fill-pointer-error (t &optional t) nil)
+
 (defknown vector-push (t complex-vector) (or index null)
     (explicit-check)
   :destroyed-constant-args (nth-constant-args 2))
@@ -932,7 +986,8 @@
 (defknown adjust-array
   (array (or index list) &key (:element-type type-specifier)
          (:initial-element t) (:initial-contents t)
-         (:fill-pointer t) (:displaced-to (or array null))
+         (:fill-pointer (or index boolean))
+         (:displaced-to (or array null))
          (:displaced-index-offset index))
   array ())
 ;  :derive-type 'result-type-arg1) Not even close...
@@ -1011,9 +1066,14 @@
 (defknown streamp (t) boolean (movable foldable flushable))
 (defknown stream-element-type (stream) type-specifier
   (movable foldable flushable))
+(defknown stream-external-format (stream) t (flushable))
 (defknown (output-stream-p input-stream-p) (stream) boolean
   (movable foldable flushable))
+(defknown open-stream-p (stream) boolean (flushable))
 (defknown close (stream &key (:abort t)) (eql t) ())
+(defknown file-string-length (ansi-stream (or string character))
+  (or unsigned-byte null)
+  (flushable))
 
 ;;;; from the "Input/Output" chapter:
 
@@ -1081,19 +1141,28 @@
   ())
 
 ;;; may return any type due to eof-value...
-(defknown (read read-preserving-whitespace read-char-no-hang read-char)
+;;; and because READ generally returns anything.
+(defknown (read read-preserving-whitespace)
   (&optional stream-designator t t t) t (explicit-check))
+
+(defknown read-char (&optional stream-designator t t t) t (explicit-check)
+  :derive-type (read-elt-type-deriver nil 'character nil))
+(defknown read-char-no-hang (&optional stream-designator t t t) t
+  (explicit-check)
+  :derive-type (read-elt-type-deriver nil 'character t))
 
 (defknown read-delimited-list (character &optional stream-designator t) list
   (explicit-check))
+;; FIXME: add a type-deriver => (values (or string eof-value) boolean)
 (defknown read-line (&optional stream-designator t t t) (values t boolean)
   (explicit-check))
 (defknown unread-char (character &optional stream-designator) t
   (explicit-check))
 (defknown peek-char (&optional (or character (member nil t))
-                               stream-designator t t t)
-  t
-  (explicit-check))
+                               stream-designator t t t) t
+  (explicit-check)
+  :derive-type (read-elt-type-deriver t 'character nil))
+
 (defknown listen (&optional stream-designator) boolean (flushable explicit-check))
 
 (defknown clear-input (&optional stream-designator) null (explicit-check))
@@ -1113,49 +1182,48 @@
           (:junk-allowed t))
   (values (or integer null ()) index))
 
-(defknown read-byte (stream &optional t t) t (explicit-check))
-
-(defknown write
-  (t &key
-     (:stream stream-designator)
-     (:escape t)
-     (:radix t)
-     (:base (integer 2 36))
-     (:circle t)
-     (:pretty t)
-     (:level (or unsigned-byte null))
-     (:readably t)
-     (:length (or unsigned-byte null))
-     (:case t)
-     (:array t)
-     (:gensym t)
-     (:lines (or unsigned-byte null))
-     (:right-margin (or unsigned-byte null))
-     (:miser-width (or unsigned-byte null))
-     (:pprint-dispatch t)
-     (:suppress-errors t))
-  t
-  (any explicit-check)
-  :derive-type #'result-type-first-arg)
+(defknown read-byte (stream &optional t t) t (explicit-check)
+  :derive-type (read-elt-type-deriver nil 'integer nil))
 
 (defknown (prin1 print princ) (t &optional stream-designator)
   t
   (any explicit-check)
   :derive-type #'result-type-first-arg)
 
+(defknown (pprint) (t &optional stream-designator) (values)
+  (explicit-check))
+
+(macrolet
+    ((deffrob (name keys returns attributes &rest more)
+       `(defknown ,name
+            (t &key ,@keys
+               (:escape t)
+               (:radix t)
+               (:base (integer 2 36))
+               (:circle t)
+               (:pretty t)
+               (:readably t)
+               (:level (or unsigned-byte null))
+               (:length (or unsigned-byte null))
+               (:case t)
+               (:array t)
+               (:gensym t)
+               (:lines (or unsigned-byte null))
+               (:right-margin (or unsigned-byte null))
+               (:miser-width (or unsigned-byte null))
+               (:pprint-dispatch t)
+               (:suppress-errors t))
+          ,returns ,attributes ,@more)))
+  (deffrob write ((:stream stream-designator)) t (any explicit-check)
+    :derive-type #'result-type-first-arg)
 ;;; xxx-TO-STRING functions are not foldable because they depend on
 ;;; the dynamic environment, the state of the pretty printer dispatch
 ;;; table, and probably other run-time factors.
-(defknown write-to-string
-  (t &key (:escape t) (:radix t) (:base (integer 2 36)) (:readably t)
-     (:circle t) (:pretty t) (:level (or unsigned-byte null))
-     (:length (or unsigned-byte null)) (:case t) (:array t) (:gensym t)
-     (:lines (or unsigned-byte null)) (:right-margin (or unsigned-byte null))
-     (:miser-width (or unsigned-byte null)) (:pprint-dispatch t))
-  simple-string
-  (flushable explicit-check))
+  (deffrob write-to-string () simple-string
+           (unsafely-flushable explicit-check)))
 
 (defknown (prin1-to-string princ-to-string) (t) simple-string (flushable))
+(defknown sb!impl::stringify-object (t) simple-string)
 
 (defknown write-char (character &optional stream-designator) character
   (explicit-check)
@@ -1341,6 +1409,8 @@
 ;;; and analogous SBCL extension:
 (defknown sb!impl::%failed-aver (t) nil)
 (defknown bug (t &rest t) nil) ; never returns
+(defknown sb!int:simple-reader-error (stream string &rest t) nil)
+(defknown sb!kernel:reader-eof-error (stream string) nil)
 
 
 ;;;; from the "Miscellaneous" Chapter:
@@ -1367,6 +1437,13 @@
    (:emit-cfasl t))
   (values (or pathname null) boolean boolean))
 
+(defknown (compile-file-pathname)
+  (pathname-designator &key (:output-file (or pathname-designator
+                                              null
+                                              (member t)))
+                       &allow-other-keys)
+  pathname)
+
 ;; FIXME: consider making (OR CALLABLE CONS) something like
 ;; EXTENDED-FUNCTION-DESIGNATOR
 (defknown disassemble ((or callable cons) &key
@@ -1374,6 +1451,7 @@
   null)
 
 (defknown describe (t &optional (or stream (member t nil))) (values))
+(defknown function-lambda-expression (function) (values t boolean t))
 (defknown inspect (t) (values))
 (defknown room (&optional (member t nil :default)) (values))
 (defknown ed (&optional (or symbol cons filename))
@@ -1407,6 +1485,9 @@
   () internal-time (flushable))
 
 (defknown sleep ((real 0)) null (explicit-check))
+
+(defknown call-with-timing (callable callable &rest t) *
+  (call))
 
 ;;; Even though ANSI defines LISP-IMPLEMENTATION-TYPE and
 ;;; LISP-IMPLEMENTATION-VERSION to possibly punt and return NIL, we
@@ -1459,6 +1540,9 @@
   (movable flushable explicit-check))
 (defknown %instance-typep (t (or type-specifier ctype)) boolean
   (movable flushable explicit-check always-translatable))
+;;; We should never emit a call to %typep-wrapper
+(defknown %typep-wrapper (t t (or type-specifier ctype)) t
+  (movable flushable always-translatable))
 
 (defknown %cleanup-point () t)
 (defknown %special-bind (t t) t)
@@ -1472,7 +1556,7 @@
 (defknown %more-kw-arg (t fixnum) (values t t))
 (defknown %more-arg-values (t index index) * (flushable))
 (defknown %verify-arg-count (index index) (values))
-(defknown %arg-count-error (t) nil)
+(defknown %arg-count-error (t t) nil)
 (defknown %unknown-values () *)
 (defknown %catch (t t) t)
 (defknown %unwind-protect (t t) t)
@@ -1486,11 +1570,12 @@
 (defknown %nip-values (t t &rest t) (values))
 (defknown %allocate-closures (t) *)
 (defknown %type-check-error (t t) nil)
+(defknown %type-check-error/c (t t) nil)
 
 ;; FIXME: This function does not return, but due to the implementation
 ;; of FILTER-LVAR we cannot write it here.
 (defknown %compile-time-type-error (t t t t) *)
-(defknown sb!kernel::case-failure (t t t) nil)
+(defknown case-failure (t t t) nil)
 
 (defknown %odd-key-args-error () nil)
 (defknown %unknown-key-arg-error (t) nil)
@@ -1505,6 +1590,8 @@
   (foldable unsafely-flushable explicit-check always-translatable))
 (defknown data-vector-ref-with-offset (simple-array fixnum fixnum) t
   (foldable unsafely-flushable explicit-check always-translatable))
+(defknown data-nil-vector-ref (simple-array index) nil
+  (explicit-check always-translatable))
 (defknown data-vector-set (array index t) t
   (explicit-check always-translatable))
 (defknown data-vector-set-with-offset (array fixnum fixnum t) t
@@ -1527,7 +1614,8 @@
   (foldable flushable))
 (defknown %set-symbol-package (symbol t) t ())
 (defknown %coerce-name-to-fun ((or symbol cons)) function (flushable))
-(defknown %coerce-callable-to-fun (callable) function (flushable))
+(defknown %coerce-callable-to-fun (callable) function
+    (flushable explicit-check))
 (defknown array-bounding-indices-bad-error (t t t) nil)
 (defknown sequence-bounding-indices-bad-error (t t t) nil)
 (defknown %find-position
@@ -1606,21 +1694,14 @@
 (defknown %check-vector-sequence-bounds (vector index sequence-end)
   index
   (unwind))
-;;; FIXME: including this information here is probably necessary to
-;;; get efficient compilation of the inline expansion of
-;;; %FIND-POSITION-IF, so it should maybe be in a more
-;;; compiler-friendly package (SB-INT?)
-(defknown sb!impl::signal-bounding-indices-bad-error
-    (sequence index sequence-end)
-  nil) ; never returns
-
 
 (defknown arg-count-error (t t t t t t) nil ())
 
 ;;;; SETF inverses
 
-(defknown %aset (array &rest t) t ()
-  :destroyed-constant-args (nth-constant-args 1))
+(defknown (setf aref) (t array &rest index) t ()
+  :destroyed-constant-args (nth-constant-args 2)
+  :derive-type #'result-type-first-arg)
 (defknown %set-row-major-aref (array index t) t ()
   :destroyed-constant-args (nth-constant-args 1))
 (defknown (%rplaca %rplacd) (cons t) t ()
@@ -1632,10 +1713,10 @@
   :derive-type #'result-type-last-arg)
 (defknown %svset (simple-vector index t) t ()
   :destroyed-constant-args (nth-constant-args 1))
-(defknown %bitset ((array bit) &rest index) bit ()
-  :destroyed-constant-args (nth-constant-args 1))
-(defknown %sbitset ((simple-array bit) &rest index) bit ()
-  :destroyed-constant-args (nth-constant-args 1))
+(defknown (setf bit) (bit (array bit) &rest index) bit ()
+  :destroyed-constant-args (nth-constant-args 2))
+(defknown (setf sbit) (bit (simple-array bit) &rest index) bit ()
+  :destroyed-constant-args (nth-constant-args 2))
 (defknown %charset (string index character) character ()
   :destroyed-constant-args (nth-constant-args 1))
 (defknown %scharset (simple-string index character) character ()
@@ -1692,6 +1773,10 @@
     condition
     (explicit-check))
 
+(defknown coerce-symbol-to-fun (symbol)
+  function
+  ())
+
 (defknown sc-number-or-lose (symbol) sc-number
   (foldable))
 
@@ -1717,5 +1802,9 @@
     ())
 (defknown %compare-and-swap-symbol-value (symbol t t) t
     (unwind))
+(defknown (%atomic-dec-symbol-global-value %atomic-inc-symbol-global-value)
+    (symbol fixnum) fixnum)
+(defknown (%atomic-dec-car %atomic-inc-car %atomic-dec-cdr %atomic-inc-cdr)
+    (cons fixnum) fixnum)
 (defknown spin-loop-hint () (values)
     (always-translatable))

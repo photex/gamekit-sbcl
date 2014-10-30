@@ -11,11 +11,12 @@
 
 ;;; Has the type system been properly initialized? (I.e. is it OK to
 ;;; use it?)
-(defvar *type-system-initialized* #+sb-xc-host nil) ; (set in cold load)
+(!defglobal *type-system-initialized* nil)
 
-(defvar *wild-type*)
-(defvar *empty-type*)
-(defvar *universal-type*)
+;; These are set by cold-init-forms in 'late-type' (look for "macrolet frob").
+(defglobal *wild-type* -1)
+(defglobal *empty-type* -1)
+(defglobal *universal-type* -1)
 (defvar *universal-fun-type*)
 (defvar *instance-type*)
 (defvar *funcallable-instance-type*)
@@ -23,6 +24,5 @@
 
 ;;; a vector that maps type codes to layouts, used for quickly finding
 ;;; the layouts of built-in classes
-(defvar *built-in-class-codes*) ; initialized in cold load
-(defvar *null-classoid-layout*)
-(declaim (type simple-vector *built-in-class-codes*))
+(defglobal **built-in-class-codes** #()) ; initialized in cold load
+(declaim (type simple-vector **built-in-class-codes**))

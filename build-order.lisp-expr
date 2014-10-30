@@ -146,6 +146,7 @@
  ("src/code/early-package" :not-host)
 
  ("src/code/early-defstructs" :not-host) ; gotta-be-first DEFSTRUCTs
+ ("src/code/early-raw-slots")
 
  ("src/code/defbangstruct")
 
@@ -185,9 +186,10 @@
  ("src/code/kernel"      :not-host)
  ("src/code/toplevel"    :not-host)
  ("src/code/cold-error"  :not-host)
+ ;; 'info-vector' is needed at least as early as 'fdefinition' so that the
+ ;; inlined INFO-VECTOR-FDEFINITION is available to %COERCE-CALLABLE-TO-FUN.
+ ("src/compiler/info-vector")
  ("src/code/fdefinition" :not-host)
- ;; FIXME: Figure out some way to make the compiler macro for INFO
- ;; available for compilation of "code/fdefinition".
 
  ;; In classic CMU CL, code/type was here. I've since split that into
  ;; lots of smaller pieces, some of which are here and some of which
@@ -204,6 +206,7 @@
  ;; This needs DEFINE-ALIEN-ROUTINE from target-alieneval.
  ("src/code/misc-aliens" :not-host)
 
+ ("src/code/typedefs")
  ("src/compiler/generic/vm-array")
  ("src/code/array"         :not-host)
  ("src/code/early-float"   :not-host)
@@ -222,6 +225,7 @@
  #!+mach  ("src/code/mach"     :not-host)
 
  ("src/code/common-os" :not-host)
+ #!+android ("src/code/android-os" :not-host)
  #!+mach  ("src/code/mach-os"  :not-host)
  #!+sunos ("src/code/sunos-os" :not-host)
  #!+hpux  ("src/code/hpux-os"  :not-host)
@@ -246,6 +250,7 @@
  #!+ppc   ("src/code/ppc-vm"   :not-host)
  #!+alpha ("src/code/alpha-vm" :not-host)
  #!+mips  ("src/code/mips-vm"  :not-host)
+ #!+arm   ("src/code/arm-vm" :not-host)
 
  ;; FIXME: do we really want to keep this? -- CSR, 2002-08-31
  #!+rt    ("src/code/rt-vm"    :not-host)
@@ -262,8 +267,9 @@
 
  ("src/code/char")
  ("src/code/huffman")
- ("src/code/target-char" :not-host)
- ("src/code/target-misc" :not-host)
+ ("src/code/target-char"    :not-host)
+ ("src/code/target-unicode" :not-host)
+ ("src/code/target-misc"    :not-host)
  ("src/code/misc")
 
  ("src/code/room"   :not-host)
@@ -274,7 +280,6 @@
  ("src/code/early-format")
  ("src/code/target-format" :not-host)
  ("src/code/defpackage"    :not-host)
- ("src/code/pp-backq"      :not-host)
 
  ("src/code/error-error" :not-host) ; needs WITH-STANDARD-IO-SYNTAX macro
 
@@ -307,12 +312,12 @@
  ("src/compiler/early-c")
  ("src/compiler/policy")
  ("src/compiler/policies")
- ("src/code/typedefs")
 
  ;; ("src/code/defbangmacro" was here until sbcl-0.6.7.3.)
 
  ("src/compiler/macros")
  ("src/compiler/generic/vm-macs")
+ ("src/compiler/generic/objdef")
 
  ;; needed by "compiler/vop"
  ("src/compiler/sset")
@@ -400,7 +405,6 @@
  ("src/compiler/proclaim")
 
  ("src/code/class-init")
- ("src/code/typecheckfuns")
 
  ;; The DEFSTRUCT machinery needs SB!XC:SUBTYPEP, defined in
  ;; "code/late-type", and SB!XC:TYPEP, defined in "code/cross-type",
@@ -458,7 +462,7 @@
  ("src/compiler/fndb")
  ("src/compiler/generic/vm-fndb")
 
- ("src/compiler/generic/objdef")
+ ("src/compiler/generic/late-objdef")
 
  ("src/compiler/generic/interr")
 
@@ -491,11 +495,8 @@
  ("src/compiler/disassem")
  ("src/compiler/assem")
 
- ("src/compiler/trace-table") ; needs EMIT-LABEL macro from compiler/assem.lisp
-
  ("src/code/debug-info")
  ;; Compiling this requires fop definitions from code/fop.lisp and
- ;; trace table definitions from compiler/trace-table.lisp.
  ("src/compiler/dump")
 
  ("src/compiler/main") ; needs DEFSTRUCT FASL-OUTPUT from dump.lisp
@@ -595,7 +596,7 @@
  ("src/compiler/generic/late-nlx")
  ("src/compiler/target/show")
  ("src/compiler/target/array")
- ("src/compiler/generic/array")
+ ("src/compiler/generic/type-error")
  ("src/compiler/target/pred")
 
  ("src/compiler/generic/late-type-vops")
@@ -632,6 +633,7 @@
  ("src/compiler/represent")
  ("src/compiler/ir2opt")
  ("src/compiler/pack")
+ ("src/compiler/pack-iterative")
  ("src/compiler/codegen")
  ("src/compiler/debug")
 
@@ -666,8 +668,10 @@
  ("src/code/reader"            :not-host) ; needs "code/readtable"
  ("src/code/target-stream"     :not-host) ; needs WHITESPACEP from "code/reader"
  ("src/code/target-pathname"   :not-host) ; needs "code/pathname"
- ("src/code/unix-pathname"      :not-host)
- ("src/code/win32-pathname"     :not-host)
+ #!-win32
+ ("src/code/unix-pathname"     :not-host)
+ #!+win32
+ ("src/code/win32-pathname"    :not-host)
  ("src/code/filesys"           :not-host) ; needs HOST from "code/pathname"
 
  ("src/code/save"              :not-host) ; uses the definition of PATHNAME
@@ -702,6 +706,8 @@
  #!+sb-unicode
  ("src/code/external-formats/enc-win" :not-host)
  #!+sb-unicode
+ ("src/code/external-formats/enc-mac" :not-host)
+ #!+sb-unicode
  ("src/code/external-formats/mb-util" :not-host)
  #!+sb-unicode
  ("src/code/external-formats/enc-cn-tbl" :not-host)
@@ -727,6 +733,8 @@
  ("src/code/bit-bash"    :not-host) ; needs %NEGATE from assembly/target/arith
 
  ("src/code/target-load" :not-host) ; needs special vars from code/load.lisp
+
+ #!-(or x86 x86-64)
  ("src/compiler/target/sanctify" :not-host)
 
  ;; FIXME: Does this really need stuff from compiler/dump.lisp?
